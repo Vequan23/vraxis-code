@@ -209,10 +209,12 @@ test("tokenizes and executes an approved command without a shell", async () => {
   );
   assert.throws(() => commandArguments("node 'unfinished"), /unfinished quote/);
   const terminationSignals: Array<string | undefined> = [];
-  const observedPty = { kill: (signal?: string) => { terminationSignals.push(signal); } };
-  terminatePty(observedPty, "SIGTERM", "win32");
+  const terminatedWindowsProcesses: number[] = [];
+  const observedPty = { pid: 42, kill: (signal?: string) => { terminationSignals.push(signal); } };
+  terminatePty(observedPty, "SIGTERM", "win32", (pid) => terminatedWindowsProcesses.push(pid));
   terminatePty(observedPty, "SIGTERM", "linux");
-  assert.deepEqual(terminationSignals, [undefined, "SIGTERM"]);
+  assert.deepEqual(terminatedWindowsProcesses, [42]);
+  assert.deepEqual(terminationSignals, ["SIGTERM"]);
   const root = await mkdtemp(join(tmpdir(), "vraxis-terminal-test-"));
   const terminal = new TerminalRegistry(root);
   const run = await terminal.prepare("session-1", "approval-1", "node -e \"console.log('ready')\"", ".");

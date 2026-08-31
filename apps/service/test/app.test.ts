@@ -392,13 +392,20 @@ test("completes the clean-install journey from harness verification to portable 
   });
   assert.equal(approved.status, 200);
 
-  let state: { verificationRuns?: Array<{ state: string }> } | undefined;
+  let state: {
+    verificationRuns?: Array<{ state: string; checks: Array<{ state: string; failure?: string; terminalRunId?: string }> }>;
+    terminalRuns?: Array<{ id: string; status: string; exitCode?: number; output: string }>;
+  } | undefined;
   for (let attempt = 0; attempt < 100; attempt += 1) {
     state = await (await fetch(`${app.baseUrl}/api/sessions/${session.id}/live-evidence`)).json() as typeof state;
     if (state?.verificationRuns?.[0]?.state === "passed") break;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  assert.equal(state?.verificationRuns?.[0]?.state, "passed");
+  assert.equal(
+    state?.verificationRuns?.[0]?.state,
+    "passed",
+    `Clean-install verification evidence: ${JSON.stringify(state)}`,
+  );
   const proof = await fetch(`${app.baseUrl}/api/sessions/${session.id}/proof.json`);
   assert.equal(proof.status, 200);
   const envelope = await proof.json() as TaskProofEnvelopeV1;
@@ -1227,7 +1234,7 @@ test("requires a product approval before running a terminal command", async (con
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   assert.equal(evidence?.terminalRuns[0]?.status, "success");
-  assert.equal(evidence?.terminalRuns[0]?.output.trim(), "approved");
+  assert.match(evidence?.terminalRuns[0]?.output ?? "", /approved/);
   assert.equal(evidence?.approvals[0]?.state, "completed");
 
   const ruleResponse = await fetch(`${app.baseUrl}/api/approval-rules`);

@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import { access, mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { basename, delimiter, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import type { TerminalRunSummary } from "@vraxis/code-contracts";
-import { spawn, type IPty } from "node-pty";
+import { spawn as spawnPty, type IPty } from "node-pty";
 
 interface TerminalData {
   schemaVersion: 1;
@@ -94,12 +95,21 @@ interface ResolvedCommand {
 }
 
 export function terminatePty(
-  child: Pick<IPty, "kill">,
+  child: Pick<IPty, "kill" | "pid">,
   signal = "SIGTERM",
   platform: NodeJS.Platform = process.platform,
+  killWindowsTree: (pid: number) => void = killWindowsProcessTree,
 ): void {
-  if (platform === "win32") child.kill();
+  if (platform === "win32") killWindowsTree(child.pid);
   else child.kill(signal);
+}
+
+function killWindowsProcessTree(pid: number): void {
+  const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows";
+  execFile(join(systemRoot, "System32", "taskkill.exe"), ["/PID", String(pid), "/T", "/F"], { windowsHide: true }, (error) => {
+    if (!error) return;
+    try { process.kill(pid); } catch { /* The process has already exited. */ }
+  });
 }
 
 function executableCandidates(executable: string, environment: Record<string, string>): string[] {
@@ -207,7 +217,7 @@ export class TerminalRegistry {
     const startedAt = Date.now();
     await this.update(id, { status: "running", startedAt: new Date(startedAt).toISOString() });
     const execution = new Promise<TerminalRunSummary>((resolve, reject) => {
-      const child = spawn(resolvedCommand.executable, [...resolvedCommand.prefixArguments, ...args], {
+      const child = spawnPty(resolvedCommand.executable, [...resolvedCommand.prefixArguments, ...args], {
         cwd: absoluteCwd,
         env: environment,
         name: "xterm-256color",
