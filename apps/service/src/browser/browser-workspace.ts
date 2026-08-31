@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { chmod, copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { chromium, type BrowserContext, type ConsoleMessage, type ElementHandle, type Page, type Request } from "playwright";
-import type { ContextArtifact, JsonObject } from "@vraxis/agent-v";
+import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type ElementHandle, type Page, type Request } from "playwright";
+import type { ContextArtifact, CredentialStore, JsonObject } from "@vraxis/agent-v";
 import type { BrowserController } from "@vraxis/agent-v/tools";
 import type {
   BrowserActionRequest,
@@ -13,6 +13,7 @@ import type {
   BrowserNetworkEntry,
   BrowserSessionSummary,
 } from "@vraxis/code-contracts";
+import { BrowserStateVault, type BrowserStorageState } from "./browser-state-vault.js";
 
 interface BrowserPage {
   id: string;
@@ -27,6 +28,7 @@ export interface BrowserActionReceipt {
 }
 
 interface SessionBrowser {
+  browser: Browser;
   context: BrowserContext;
   pages: Map<string, BrowserPage>;
   activePageId: string;
@@ -139,14 +141,16 @@ export class BrowserWorkspace {
   private readonly captureDirectory: string;
   private readonly profileDirectory: string;
   private readonly evidenceFile: string;
+  private readonly stateVault: BrowserStateVault | undefined;
   private readonly operationQueues = new Map<string, Promise<void>>();
   private mutations: Promise<void> = Promise.resolve();
   private readonly persistenceTimers = new Map<string, NodeJS.Timeout>();
 
-  constructor(dataDirectory: string) {
+  constructor(dataDirectory: string, credentials?: CredentialStore) {
     this.captureDirectory = join(dataDirectory, "browser-captures");
     this.profileDirectory = join(dataDirectory, "browser-profiles");
     this.evidenceFile = join(dataDirectory, "browser-evidence.json");
+    this.stateVault = credentials ? new BrowserStateVault(dataDirectory, credentials) : undefined;
   }
 
   async state(sessionId: string): Promise<BrowserSessionSummary | undefined> {
@@ -243,7 +247,7 @@ export class BrowserWorkspace {
       }
       const afterFrameId = await this.captureActionFrame(session, actionId, "after");
       this.recordAction(session, actionId, input.action, target, "success", this.actionDetail(input.action, session.state), receipt, beforeFrameId, afterFrameId);
-      await this.persistState(session.state);
+      await Promise.all([this.persistState(session.state), this.persistBrowserState(input.sessionId, session.context)]);
       return structuredClone(session.state);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Browser action failed.";
@@ -252,7 +256,7 @@ export class BrowserWorkspace {
       session.state.updatedAt = new Date().toISOString();
       const afterFrameId = await this.captureActionFrame(session, actionId, "after").catch(() => undefined);
       this.recordAction(session, actionId, input.action, target, "error", message, receipt, beforeFrameId, afterFrameId);
-      await this.persistState(session.state);
+      await Promise.all([this.persistState(session.state), this.persistBrowserState(input.sessionId, session.context)]);
       throw error;
     }
   }
@@ -363,10 +367,12 @@ export class BrowserWorkspace {
     await Promise.all(active.map(async (session) => {
       session.state.status = "closed";
       session.state.updatedAt = new Date().toISOString();
-      await this.persistState(session.state);
+      await Promise.all([this.persistState(session.state), this.persistBrowserState(session.state.sessionId, session.context)]);
     }));
-    const contexts = active.map((session) => session.context.close());
-    await Promise.all(contexts);
+    await Promise.all(active.map(async (session) => {
+      await session.context.close();
+      await session.browser.close();
+    }));
     for (const timer of this.persistenceTimers.values()) clearTimeout(timer);
     this.persistenceTimers.clear();
     this.sessions.clear();
@@ -381,18 +387,24 @@ export class BrowserWorkspace {
       mkdir(this.captureDirectory, { recursive: true, mode: 0o700 }),
       mkdir(this.profileDirectory, { recursive: true, mode: 0o700 }),
     ]);
-    await Promise.all([chmod(this.captureDirectory, 0o700), chmod(this.profileDirectory, 0o700)]);
-    const profilePath = join(this.profileDirectory, sessionId);
-    const launchOptions = { headless: true, viewport, acceptDownloads: false } as const;
-    let context: BrowserContext;
+    if (process.platform !== "win32") await Promise.all([chmod(this.captureDirectory, 0o700), chmod(this.profileDirectory, 0o700)]);
+    const storageState = await this.loadBrowserState(sessionId, retained?.url);
+    let browser: Browser;
     try {
-      context = await chromium.launchPersistentContext(profilePath, launchOptions);
+      browser = await chromium.launch({ headless: true });
     } catch (error) {
       try {
-        context = await chromium.launchPersistentContext(profilePath, { ...launchOptions, channel: "chrome" });
+        browser = await chromium.launch({ headless: true, channel: "chrome" });
       } catch {
         throw new Error(`The isolated browser could not start. Install Google Chrome or Playwright Chromium, then retry. ${error instanceof Error ? error.message : ""}`.trim());
       }
+    }
+    let context: BrowserContext;
+    try {
+      context = await browser.newContext({ viewport, acceptDownloads: false, ...(storageState ? { storageState } : {}) });
+    } catch (error) {
+      await browser.close();
+      throw error;
     }
     const timestamp = new Date().toISOString();
     const retainedWithoutError = retained ? structuredClone(retained) : undefined;
@@ -420,7 +432,7 @@ export class BrowserWorkspace {
       frames: [],
       updatedAt: timestamp,
     };
-    const session: SessionBrowser = { context, pages: new Map(), activePageId: "", state };
+    const session: SessionBrowser = { browser, context, pages: new Map(), activePageId: "", state };
     context.on("page", (page) => {
       const entry = this.registerPage(session, page);
       session.activePageId = entry.id;
@@ -433,6 +445,82 @@ export class BrowserWorkspace {
       await this.activePage(session).page.goto(retained.url, { waitUntil: "domcontentloaded", timeout: 30_000 });
     }
     return session;
+  }
+
+  private async loadBrowserState(sessionId: string, retainedUrl?: string): Promise<BrowserStorageState | undefined> {
+    if (!this.stateVault) return undefined;
+    const encrypted = await this.stateVault.load(sessionId);
+    if (encrypted) {
+      await this.archiveLegacyProfileIfPresent(sessionId);
+      return encrypted;
+    }
+    return this.migrateLegacyProfile(sessionId, retainedUrl);
+  }
+
+  private async migrateLegacyProfile(sessionId: string, retainedUrl?: string): Promise<BrowserStorageState | undefined> {
+    if (!this.stateVault) return undefined;
+    const profilePath = join(this.profileDirectory, sessionId);
+    try {
+      if (!(await stat(profilePath)).isDirectory()) return undefined;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+    let context: BrowserContext;
+    try {
+      context = await chromium.launchPersistentContext(profilePath, { headless: true, viewport, acceptDownloads: false });
+    } catch (error) {
+      try {
+        context = await chromium.launchPersistentContext(profilePath, { headless: true, viewport, acceptDownloads: false, channel: "chrome" });
+      } catch {
+        throw new Error(`The legacy isolated browser profile could not be migrated into encrypted storage. ${error instanceof Error ? error.message : ""}`.trim());
+      }
+    }
+    try {
+      if (retainedUrl) {
+        const page = context.pages()[0] ?? await context.newPage();
+        await context.route("**/*", async (route) => {
+          await route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>Vraxis migration</title>" });
+        });
+        await page.goto(safeUrl(retainedUrl).href, { waitUntil: "domcontentloaded", timeout: 30_000 });
+        await context.unrouteAll({ behavior: "wait" });
+      }
+      const storageState = await context.storageState({ indexedDB: true });
+      await this.stateVault.save(sessionId, storageState);
+      await context.close();
+      await this.archiveLegacyProfileIfPresent(sessionId);
+      return storageState;
+    } catch (error) {
+      await context.close().catch(() => undefined);
+      throw new Error("The legacy isolated browser profile was preserved because encrypted migration did not complete.", { cause: error });
+    }
+  }
+
+  private async archiveLegacyProfileIfPresent(sessionId: string): Promise<void> {
+    const profilePath = join(this.profileDirectory, sessionId);
+    try {
+      if (!(await stat(profilePath)).isDirectory()) throw new Error("The legacy browser profile path is not a directory.");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    await rename(profilePath, await this.legacyArchivePath(sessionId));
+  }
+
+  private async legacyArchivePath(sessionId: string): Promise<string> {
+    const preferred = join(this.profileDirectory, `${sessionId}.migrated`);
+    try {
+      await stat(preferred);
+      return join(this.profileDirectory, `${sessionId}.migrated-${randomUUID()}`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return preferred;
+      throw error;
+    }
+  }
+
+  private async persistBrowserState(sessionId: string, context: BrowserContext): Promise<void> {
+    if (!this.stateVault) return;
+    await this.stateVault.save(sessionId, await context.storageState({ indexedDB: true }));
   }
 
   private registerPage(session: SessionBrowser, page: Page): BrowserPage {

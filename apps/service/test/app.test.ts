@@ -56,6 +56,21 @@ async function fixture(
 
 const execFileAsync = promisify(execFile);
 
+test("exposes graceful resource shutdown for the service host", async () => {
+  const root = await mkdtemp(join(tmpdir(), "vraxis-code-close-test-"));
+  class ObservedBrowserWorkspace extends BrowserWorkspace {
+    closed = false;
+    override async close(): Promise<void> {
+      this.closed = true;
+      await super.close();
+    }
+  }
+  const browser = new ObservedBrowserWorkspace(root, new MemoryCredentialStore());
+  const app = createApp({ dataDirectory: root, browserWorkspace: browser });
+  await app.close();
+  assert.equal(browser.closed, true);
+});
+
 async function git(cwd: string, ...args: string[]): Promise<string> {
   const result = await execFileAsync("git", args, { cwd, encoding: "utf8" });
   return result.stdout.trim();

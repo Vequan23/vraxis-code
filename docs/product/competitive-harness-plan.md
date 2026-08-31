@@ -67,7 +67,7 @@ These are directional signals, not a quantitative market survey. We should valid
 - Approval-backed checkpoint and apply flow that preserves the project index, source commit, and recovery branch.
 - One product-owned approval record for agent tools, terminal commands, and browser actions.
 - No-shell terminal execution with live bounded output, process-group interruption, explicit working directories, and task-attached receipts.
-- An isolated Playwright browser profile with approval-gated first-origin navigation, mapped controls, tabs, screenshots, visible-text context, console and credential-redacted network evidence, blocked downloads, bounded waits, and actor-linked action history.
+- An isolated ephemeral Playwright browser context with encrypted authentication-state recovery, approval-gated first-origin navigation, mapped controls, tabs, screenshots, visible-text context, console and credential-redacted network evidence, blocked downloads, bounded waits, and actor-linked action history.
 - A concise evidence ledger that makes command, browser, approval, and failure state legible before the user drills into raw output.
 - Remembered task/project approval scopes with visible policy rules and fresh decisions for sensitive actions.
 - A true PTY terminal with input, resize, interrupt, search, bounded replay, and durable provenance.
@@ -83,7 +83,7 @@ These are directional signals, not a quantitative market survey. We should valid
 
 - Codex, Claude Code, stable OpenCode 1.x, and verified Cursor ACP releases receive Vraxis-owned filesystem, terminal, browser, secret-safe evidence, and verification-handoff tools through an authenticated per-run MCP bridge. Native mutation paths are removed or denied, guarded actions use the product approval lifecycle, and terminal calls retain receipts. Unknown OpenCode majors and older Cursor releases fail closed. The handoff is deliberately non-actuating: it records agent intent, while the user reviews and starts or dismisses the product-owned recipe.
 - Runtime capability negotiation is explicit and version-aware in the composer. Safe bridge parity is complete for Codex, Claude Code, stable OpenCode 1.x, and verified Cursor ACP releases. Settings separates the registered adapter and host-tool isolation contract from an opt-in bounded live model probe, persists the result by runtime version, and marks it stale after an update.
-- Browser frames are retained per action, project recipes can perform tolerance-based visual regression comparison with bounded diff artifacts, and a self-contained offline replay preserves chronological before/after frames, actor, approval, target, and status without network authority. Lossy video export, upload capability, and frame-level annotation remain future work.
+- Browser frames are retained per action, project recipes can perform tolerance-based visual regression comparison with bounded diff artifacts, and a self-contained offline replay preserves chronological before/after frames, actor, approval, target, and status without network authority. Live contexts are ephemeral; recoverable cookies, local storage, and IndexedDB are encrypted under an operating-system credential-store key, and legacy profiles migrate without network access while remaining preserved for recovery. Lossy video export, upload capability, and frame-level annotation remain future work.
 - A dedicated Permission Center now explains active task and project rules across repositories, revokes exact authority, and exports a redacted audit including revoked history. Rule mutation remains revoke-and-reapprove so broader authority cannot appear without a fresh receipt.
 - Worktrees support whole-checkpoint, file, and immutable hunk apply. Failed preflight identifies overlapping files and hunks, leaves the project untouched, and supports smaller safe retries; a side-by-side conflict editor remains future work.
 - Project Doctor discovers common JavaScript, Python, Rust, and Go checks. Bounded project recipes govern service startup, loopback health, command checks, exact-route and visible-page assertions, screenshot baselines, and teardown. Local Ed25519 proof signs the complete receipt, verification handoff, and exact evidence links. The Proof identity & trust center exports public identity only, enrolls and revokes external signers, distinguishes valid-local, valid-trusted, valid-untrusted, and invalid proofs, and supports local key rotation with a retained dual-signed attestation; centralized organization policy distribution remains future work.
@@ -121,7 +121,7 @@ The browser should feel shared by the user and agent, not like a hidden automati
 
 1. User or agent requests a domain.
 2. Vraxis shows read versus actuation authority separately.
-3. The isolated profile opens the page and records pixels, accessible/visible text, console, and network metadata.
+3. The isolated ephemeral context opens the page and records pixels, accessible/visible text, console, and network metadata while its recoverable authentication state remains encrypted at rest.
 4. Agent actions are highlighted live and grouped into a replayable receipt.
 5. Before external writes—submit, purchase, publish, delete, upload, login—the user sees the exact target and origin again.
 6. The completed task links code changes to the browser frame and verification that proved them.

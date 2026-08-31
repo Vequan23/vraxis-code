@@ -22,3 +22,10 @@ All notable changes to Vraxis Code will be documented here. The project follows 
 
 - Redact portable proof receipts before signing so JSON and HTML exports remove common tokens, authorization values, secret assignments, command secret flags, URL credentials, queries, and fragments without mutating exact local evidence.
 - Apply restrictive CSP, framing, referrer, permissions, MIME-sniffing, and cross-origin headers to the local service; constrain product data and attachment storage to owner-only permissions on supported platforms.
+- Replace reusable plaintext Playwright profiles with ephemeral browser contexts and AES-256-GCM authentication-state envelopes whose keys live in the operating-system credential store and whose integrity is bound to the session identity.
+- Migrate legacy isolated browser profiles without external network access, retain the source profile owner-only for recovery, and fail closed when state decryption or integrity verification fails.
+- Flush encrypted browser authentication state and close live browser resources before a graceful service shutdown is marked complete.
+
+### Fixed
+
+- Build the private contracts workspace before Playwright starts so the browser suite is reliable on a clean clone instead of depending on stale local build output.

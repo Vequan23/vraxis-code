@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { chromium } from "playwright";
 import { MemoryCredentialStore, defineOutput, localExecutionScope, type ApprovalRequest, type CodingRuntimeRequest, type CodingRuntimeResult, type RuntimeReadiness } from "@vraxis/agent-v";
 import { LocalCliRuntimeEngine } from "@vraxis/agent-v/local-cli";
 import { executeAgentTool } from "@vraxis/agent-v/tools";
@@ -497,17 +498,23 @@ test("controls an isolated browser and captures visible evidence", async (contex
   assert.match(artifact?.content ?? "", /e\d+ \[button\] Save/);
 });
 
-test("persists browser evidence and safely restores it after a service restart", async (context) => {
+test("persists browser evidence and encrypted authentication state across a service restart", async (context) => {
   const server = createServer((_request, response) => {
     response.writeHead(200, { "content-type": "text/html" });
-    response.end("<!doctype html><title>Durable browser proof</title><main><h1>Recovered evidence</h1><button>Verify</button></main>");
+    response.end(`<!doctype html><title>Durable browser proof</title><main><h1 id="state">Recovered evidence</h1><button>Verify</button></main><script>
+      const restored = document.cookie.includes("vraxis_session=private-cookie") && localStorage.getItem("vraxis-token") === "private-local-storage";
+      document.querySelector("#state").textContent = restored ? "Recovered private state" : "Recovered evidence";
+      document.cookie = "vraxis_session=private-cookie; SameSite=Strict";
+      localStorage.setItem("vraxis-token", "private-local-storage");
+    </script>`);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Browser fixture did not start.");
   const root = await mkdtemp(join(tmpdir(), "vraxis-browser-restart-test-"));
-  const first = new BrowserWorkspace(root);
-  const second = new BrowserWorkspace(root);
+  const credentials = new MemoryCredentialStore();
+  const first = new BrowserWorkspace(root, credentials);
+  const second = new BrowserWorkspace(root, credentials);
   context.after(async () => {
     await first.close();
     await second.close();
@@ -532,6 +539,8 @@ test("persists browser evidence and safely restores it after a service restart",
   assert.equal(registry.schemaVersion, 1);
   assert.ok(registry.sessions.some((item) => item.sessionId === sessionId));
   assert.equal((await stat(registryFile)).mode & 0o777, 0o600);
+  const encryptedState = await readFile(join(root, "browser-state", `${sessionId}.json`), "utf8");
+  assert.doesNotMatch(encryptedState, /private-cookie|private-local-storage/);
 
   const retained = await second.state(sessionId);
   assert.equal(retained?.status, "closed");
@@ -551,8 +560,71 @@ test("persists browser evidence and safely restores it after a service restart",
   const restored = await second.perform({ sessionId, action: "capture" }, { actor: "user", approvalId: "approval-restore" });
   assert.equal(restored.status, "ready");
   assert.equal(restored.url, url);
+  assert.match(restored.snapshot, /Recovered private state/);
   assert.ok(restored.screenshotVersion > capturedVersion);
   assert.ok(restored.actions.some((action) => action.approvalId === "approval-restore"));
+});
+
+test("migrates a legacy isolated profile into encrypted state without discarding the source profile", async (context) => {
+  let externalRequests = 0;
+  const server = createServer((_request, response) => {
+    externalRequests += 1;
+    response.writeHead(200, { "content-type": "text/html" });
+    response.end(`<!doctype html><title>Legacy migration</title><h1 id="state">Fresh</h1><script>
+      if (document.cookie.includes("legacy_session=private-cookie") && localStorage.getItem("legacy-token") === "private-storage") {
+        document.querySelector("#state").textContent = "Legacy state restored";
+      }
+    </script>`);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Browser fixture did not start.");
+  const root = await mkdtemp(join(tmpdir(), "vraxis-browser-migration-test-"));
+  const sessionId = "session-legacy";
+  const profilePath = join(root, "browser-profiles", sessionId);
+  const url = `http://127.0.0.1:${address.port}/`;
+  const legacy = await chromium.launchPersistentContext(profilePath, { headless: true });
+  const legacyPage = legacy.pages()[0] ?? await legacy.newPage();
+  await legacyPage.goto(url);
+  await legacyPage.evaluate(() => {
+    document.cookie = "legacy_session=private-cookie; Max-Age=3600; SameSite=Strict";
+    localStorage.setItem("legacy-token", "private-storage");
+  });
+  await legacy.close();
+
+  await writeFile(join(root, "browser-evidence.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    sessions: [{
+      sessionId,
+      status: "closed",
+      url,
+      title: "Legacy migration",
+      snapshot: "Legacy retained evidence",
+      screenshotVersion: 1,
+      viewport: { width: 1280, height: 820 },
+      activeTabId: "legacy-tab",
+      tabs: [],
+      controls: [],
+      allowedOrigins: [new URL(url).origin],
+      console: [],
+      network: [],
+      actions: [],
+      frames: [],
+      updatedAt: new Date().toISOString(),
+    }],
+  }, null, 2)}\n`);
+
+  const browser = new BrowserWorkspace(root, new MemoryCredentialStore());
+  context.after(async () => {
+    await browser.close();
+    server.close();
+  });
+  const migrated = await browser.perform({ sessionId, action: "navigate", target: url });
+  assert.match(migrated.snapshot, /Legacy state restored/);
+  assert.equal(externalRequests, 2, "migration must hydrate origin storage without making an external request");
+  const encrypted = await readFile(join(root, "browser-state", `${sessionId}.json`), "utf8");
+  assert.doesNotMatch(encrypted, /private-cookie|private-storage/);
+  assert.equal((await stat(join(root, "browser-profiles", `${sessionId}.migrated`))).isDirectory(), true);
 });
 
 test("agent browser navigation requests the first origin through approval and accepts only mapped controls", async (context) => {

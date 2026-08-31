@@ -15,12 +15,13 @@ if (process.platform !== "win32") await chmod(dataDirectory, 0o700);
 const lifecycle = new ServiceLifecycleMarker(dataDirectory);
 const startupRecovery = await lifecycle.begin();
 
-const server = createServer(createApp({
+const app = createApp({
   dataDirectory,
   publicDirectory,
   startupRecovery,
   ...(process.env.VRAXIS_DESKTOP_TOKEN ? { desktopToken: process.env.VRAXIS_DESKTOP_TOKEN } : {}),
-}));
+});
+const server = createServer(app);
 
 server.listen(port, "127.0.0.1", () => {
   console.log(`Vraxis Code service listening on http://127.0.0.1:${port}`);
@@ -30,8 +31,10 @@ let shuttingDown = false;
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
+  await new Promise<void>((resolve) => server.close(() => resolve())).catch(() => undefined);
+  await app.close().catch(() => undefined);
   await lifecycle.finish().catch(() => undefined);
-  server.close(() => process.exit(0));
+  process.exit(0);
 }
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

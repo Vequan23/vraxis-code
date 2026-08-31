@@ -139,7 +139,7 @@ export function createApp(options: AppOptions) {
   const worktrees = new GitWorktrees(options.dataDirectory);
   const approvals = new ApprovalRegistry(options.dataDirectory);
   const terminal = new TerminalRegistry(options.dataDirectory);
-  const browser = options.browserWorkspace ?? new BrowserWorkspace(options.dataDirectory);
+  const browser = options.browserWorkspace ?? new BrowserWorkspace(options.dataDirectory, credentials);
   const verifications = new VerificationRegistry(options.dataDirectory);
   const proofSigner = new TaskProofSigner(options.dataDirectory);
   const proofTrust = new ProofTrustRegistry(options.dataDirectory);
@@ -555,7 +555,7 @@ export function createApp(options: AppOptions) {
     return createUnderstandArtifact(await taskProof(sessionId), proofSigner);
   }
 
-  return async function app(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  const app = async function app(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
       applySecurityHeaders(response);
       if (!hostIsLoopback(request) || !originIsLoopback(request)) {
@@ -1571,4 +1571,5 @@ export function createApp(options: AppOptions) {
       json(response, error instanceof TypeError ? 400 : 500, { error: message });
     }
   };
+  return Object.assign(app, { close: () => browser.close() });
 }
