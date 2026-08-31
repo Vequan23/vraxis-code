@@ -16,6 +16,12 @@ import { ModelProviderRegistry } from "../src/model-providers/model-provider-reg
 import { VraxisCodeRuntimeEngine } from "../src/runtimes/vraxis-code-runtime.js";
 import { VerificationRegistry } from "../src/verification/verification-registry.js";
 
+async function closeHttpServer(server: ReturnType<typeof createServer>): Promise<void> {
+  const closed = new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  server.closeAllConnections();
+  await closed;
+}
+
 async function pendingApproval(approvals: ApprovalRegistry, sessionId: string) {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     const [approval] = await approvals.list(sessionId);
@@ -466,7 +472,7 @@ test("controls an isolated browser and captures visible evidence", async (contex
   const browser = new BrowserWorkspace(root);
   context.after(async () => {
     await browser.close();
-    server.close();
+    await closeHttpServer(server);
   });
   const url = `http://127.0.0.1:${address.port}/`;
   const navigated = await browser.perform({ sessionId: "session-1", action: "navigate", target: url });
@@ -537,7 +543,7 @@ test("persists browser evidence and encrypted authentication state across a serv
   context.after(async () => {
     await first.close();
     await second.close();
-    server.close();
+    await closeHttpServer(server);
   });
   const sessionId = "session-durable";
   const url = `http://127.0.0.1:${address.port}/`;
@@ -607,7 +613,7 @@ test("migrates a legacy isolated profile into encrypted state without discarding
   context.after(async () => {
     await legacy?.close().catch(() => undefined);
     await browser.close();
-    server.close();
+    await closeHttpServer(server);
   });
   try {
     legacy = await chromium.launchPersistentContext(profilePath, { headless: true });
@@ -664,7 +670,7 @@ test("agent browser navigation requests the first origin through approval and ac
   const browser = new BrowserWorkspace(root);
   context.after(async () => {
     await browser.close();
-    server.close();
+    await closeHttpServer(server);
   });
   const controller = browser.controller("session-agent-browser");
   const url = `http://127.0.0.1:${address.port}/`;
