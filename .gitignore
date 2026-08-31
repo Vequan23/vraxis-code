@@ -1,0 +1,13 @@
+node_modules/
+dist/
+desktop-service/
+coverage/
+playwright-report/
+test-results/
+out/
+.vraxis-code/
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example

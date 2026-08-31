@@ -1,0 +1,199 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  defaultUserSettings,
+  modeAgentProfile,
+  modeAgentProfiles,
+  parseAppendMessageRequest,
+  parseApprovalDecisionRequest,
+  parseBrowserActionRequest,
+  parseCommandRequest,
+  parseConnectModelProviderRequest,
+  parseCreateSessionRequest,
+  parseRegisterProjectRequest,
+  parseUpdateSettingsRequest,
+} from "../src/index.js";
+
+test("publishes safe mode-specific default agent profiles", () => {
+  assert.deepEqual(Object.keys(modeAgentProfiles), ["ask", "plan", "build", "review"]);
+  assert.equal(modeAgentProfile("plan").access, "read-only");
+  assert.ok(modeAgentProfile("plan").skillNames.includes("Project architecture"));
+  assert.ok(!modeAgentProfile("plan").toolIds.includes("write-text"));
+  assert.equal(modeAgentProfile("build").access, "isolated-worktree");
+  assert.ok(modeAgentProfile("ask").toolIds.includes("evidence-status"));
+  assert.ok(modeAgentProfile("build").guardedToolIds.includes("terminal-run"));
+  assert.ok(modeAgentProfile("build").guardedToolIds.includes("remove-path"));
+  assert.ok(modeAgentProfile("build").guardedToolIds.includes("browser-navigate"));
+  assert.deepEqual(modeAgentProfile("review").guardedToolIds, []);
+});
+
+test("parses a bounded project registration", () => {
+  assert.deepEqual(parseRegisterProjectRequest({ path: " /tmp/example " }), { path: "/tmp/example" });
+});
+
+test("rejects an empty command", () => {
+  assert.throws(
+    () => parseCommandRequest({ sessionId: "session-1", command: "", cwd: "/tmp" }),
+    /Command must be a non-empty string/,
+  );
+  assert.deepEqual(parseCommandRequest({ sessionId: "session-1", command: "npm test" }), {
+    sessionId: "session-1",
+    command: "npm test",
+  });
+  assert.throws(
+    () => parseCommandRequest({ sessionId: "session-1", command: "npm test", cwd: "../outside" }),
+    /inside the session workspace/,
+  );
+});
+
+test("rejects browser actions outside the published capability set", () => {
+  assert.throws(
+    () => parseBrowserActionRequest({ sessionId: "session-1", action: "execute-script" }),
+    /not supported/,
+  );
+});
+
+test("parses browser tab actions", () => {
+  assert.deepEqual(parseBrowserActionRequest({ sessionId: "session-1", action: "select-tab", tabId: "tab-1" }), {
+    sessionId: "session-1",
+    action: "select-tab",
+    tabId: "tab-1",
+  });
+});
+
+test("parses explicit approval decisions", () => {
+  assert.deepEqual(parseApprovalDecisionRequest({ decision: "approve" }), { decision: "approve" });
+  assert.deepEqual(parseApprovalDecisionRequest({ decision: "approve", duration: "project" }), { decision: "approve", duration: "project" });
+  assert.deepEqual(parseApprovalDecisionRequest({ decision: "deny" }), { decision: "deny" });
+  assert.throws(() => parseApprovalDecisionRequest({ decision: "always" }), /approve or deny/);
+  assert.throws(() => parseApprovalDecisionRequest({ decision: "approve", duration: "forever" }), /once, session, or project/);
+});
+
+test("parses a task with one of the four product modes", () => {
+  assert.deepEqual(parseCreateSessionRequest({
+    projectId: "project-1",
+    mode: "build",
+    runtimeId: "codex",
+    modelId: "gpt-5.6-sol",
+    prompt: " Add a health check ",
+    attachments: [{ id: "project-file:src/index.ts", name: "index.ts", path: "src/index.ts" }],
+    skillIds: ["skill-a", "skill-a", "skill-b"],
+  }), {
+    projectId: "project-1",
+    mode: "build",
+    runtimeId: "codex",
+    modelId: "gpt-5.6-sol",
+    prompt: "Add a health check",
+    attachments: [{ id: "project-file:src/index.ts", name: "index.ts", path: "src/index.ts" }],
+    skillIds: ["skill-a", "skill-b"],
+  });
+  assert.throws(() => parseCreateSessionRequest({ projectId: "p", mode: "auto", runtimeId: "r", prompt: "x" }), /not supported/);
+  assert.throws(() => parseCreateSessionRequest({
+    projectId: "p",
+    mode: "ask",
+    runtimeId: "r",
+    prompt: "x",
+    attachments: [{ id: "escape", name: "secret.txt", path: "../secret.txt" }],
+  }), /project-relative/);
+  assert.throws(() => parseCreateSessionRequest({
+    projectId: "p",
+    mode: "ask",
+    runtimeId: "r",
+    prompt: "x",
+    attachments: Array.from({ length: 6 }, (_, index) => ({ id: `file-${index}`, name: `${index}.ts`, path: `src/${index}.ts` })),
+  }), /no more than 5/);
+  assert.throws(() => parseCreateSessionRequest({
+    projectId: "p",
+    mode: "ask",
+    runtimeId: "r",
+    prompt: "x",
+    skillIds: Array.from({ length: 9 }, (_, index) => `skill-${index}`),
+  }), /no more than 8/);
+  assert.deepEqual(parseCreateSessionRequest({
+    projectId: "project-1",
+    mode: "ask",
+    runtimeId: "codex",
+    prompt: "Compare these files",
+    attachments: [{
+      id: "imported-file:12345678-1234-1234-1234-123456789abc",
+      name: "notes.txt",
+      path: "12345678-1234-1234-1234-123456789abc",
+      source: "imported",
+      mediaType: "text/plain",
+      size: 12,
+    }],
+    attachmentConsent: {
+      attachmentIds: ["imported-file:12345678-1234-1234-1234-123456789abc"],
+      runtimeId: "codex",
+      confirmed: true,
+    },
+  }), {
+    projectId: "project-1",
+    mode: "ask",
+    runtimeId: "codex",
+    prompt: "Compare these files",
+    attachments: [{
+      id: "imported-file:12345678-1234-1234-1234-123456789abc",
+      name: "notes.txt",
+      path: "12345678-1234-1234-1234-123456789abc",
+      source: "imported",
+      mediaType: "text/plain",
+      size: 12,
+    }],
+    attachmentConsent: {
+      attachmentIds: ["imported-file:12345678-1234-1234-1234-123456789abc"],
+      runtimeId: "codex",
+      confirmed: true,
+    },
+  });
+});
+
+test("parses a follow-up runtime selection and rejects an empty follow-up", () => {
+  assert.deepEqual(parseAppendMessageRequest({
+    prompt: " Continue the review ",
+    mode: "review",
+    runtimeId: "claude-code",
+    modelId: null,
+    skillIds: ["skill-a", "skill-a"],
+  }), {
+    prompt: "Continue the review",
+    mode: "review",
+    runtimeId: "claude-code",
+    modelId: null,
+    skillIds: ["skill-a"],
+  });
+  assert.throws(() => parseAppendMessageRequest({ prompt: " " }), /Task must be a non-empty string/);
+});
+
+test("parses durable application settings", () => {
+  assert.equal(defaultUserSettings.theme, "graphite-dark");
+  assert.deepEqual(parseUpdateSettingsRequest({ theme: "graphite-dark" }), { theme: "graphite-dark" });
+  assert.deepEqual(parseUpdateSettingsRequest({
+    theme: "graphite",
+    defaultMode: "build",
+    defaultRuntimeId: "codex",
+    runtimeModels: { codex: "gpt-5.6-sol", opencode: null },
+    disabledRuntimeIds: ["claude-code", "claude-code"],
+  }), {
+    theme: "graphite",
+    defaultMode: "build",
+    defaultRuntimeId: "codex",
+    runtimeModels: { codex: "gpt-5.6-sol", opencode: null },
+    disabledRuntimeIds: ["claude-code"],
+  });
+  assert.throws(() => parseUpdateSettingsRequest({ theme: "midnight" }), /Theme is not supported/);
+  assert.throws(() => parseUpdateSettingsRequest({}), /at least one setting/);
+});
+
+test("parses model provider connections without inventing optional fields", () => {
+  assert.deepEqual(parseConnectModelProviderRequest({
+    provider: "zai",
+    apiKey: "secret",
+    model: "glm-4.7-flash",
+  }), {
+    provider: "zai",
+    apiKey: "secret",
+    model: "glm-4.7-flash",
+  });
+  assert.throws(() => parseConnectModelProviderRequest({ provider: "unknown" }), /not supported/);
+});

@@ -1,0 +1,24 @@
+# Changelog
+
+All notable changes to Vraxis Code will be documented here. The project follows semantic versioning once a public release is tagged.
+
+## Unreleased
+
+### Added
+
+- Four-mode coding-agent workspace with provider-neutral agent-v runtime discovery and execution.
+- Isolated Build worktrees with exact diffs, selective apply, conflict evidence, rollback, archive, and recovery.
+- Product-owned approvals for filesystem changes, commands, network access, browser actuation, credentials, and destructive actions.
+- Streaming PTY terminal receipts and an isolated, agent-controllable browser with mapped controls, screenshots, console, network, and action evidence.
+- Project-owned verification recipes with governed services, commands, browser assertions, and visual comparison.
+- Signed task proof, cross-install trust enrollment, key rotation attestations, and secret-minimized signed Understand artifacts.
+- Desktop packaging, unexpected-exit recovery, support diagnostics, cross-platform CI, browser coverage, and packaged application smoke tests.
+- Immutable GitHub Action pins, dependency review, lockfile vulnerability auditing, CodeQL analysis, issue forms, and private vulnerability-reporting guidance for the public repository.
+- Published `@vraxis/agent-v@0.10.0` integration for governed local-harness MCP tools, scoped approvals, browser evidence, and project inspection.
+- Published `@vraxis/osx-components@0.12.2` integration that preserves native `title` behavior without Vue custom-element collision warnings.
+- Self-contained offline browser evidence replay with before/after playback, actor and approval provenance, embedded retained frames, and no external network authority.
+
+### Security
+
+- Redact portable proof receipts before signing so JSON and HTML exports remove common tokens, authorization values, secret assignments, command secret flags, URL credentials, queries, and fragments without mutating exact local evidence.
+- Apply restrictive CSP, framing, referrer, permissions, MIME-sniffing, and cross-origin headers to the local service; constrain product data and attachment storage to owner-only permissions on supported platforms.

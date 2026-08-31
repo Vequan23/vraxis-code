@@ -1,0 +1,27 @@
+import { spawn } from "node:child_process";
+
+const children = [
+  spawn("npm", ["run", "dev:service"], { stdio: "inherit", shell: false }),
+  spawn("npm", ["run", "dev:web"], { stdio: "inherit", shell: false }),
+];
+
+let closing = false;
+function close(code = 0) {
+  if (closing) return;
+  closing = true;
+  for (const child of children) child.kill("SIGTERM");
+  process.exitCode = code;
+}
+
+for (const child of children) {
+  child.once("error", (error) => {
+    console.error(error.message);
+    close(1);
+  });
+  child.once("exit", (code, signal) => {
+    if (!closing && code !== 0 && signal !== "SIGTERM") close(code ?? 1);
+  });
+}
+
+process.on("SIGINT", () => close());
+process.on("SIGTERM", () => close());

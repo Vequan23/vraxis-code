@@ -1,0 +1,23 @@
+{
+  "name": "@vraxis/code-test-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@vraxis/agent-v": "^0.10.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.0"
+  }
+}

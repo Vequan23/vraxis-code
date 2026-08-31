@@ -1,0 +1,48 @@
+{
+  "name": "vraxis-code",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A local workspace for directing coding agents and reviewing their work.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/prepare-node-pty.mjs",
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "npm run dev --workspace @vraxis/code-web",
+    "dev:service": "npm run dev --workspace @vraxis/code-service",
+    "build": "npm run build:contracts && npm run build:test-runtime && npm run build:service && npm run build:web && node scripts/prepare-desktop.mjs",
+    "build:contracts": "npm run build --workspace @vraxis/code-contracts",
+    "build:test-runtime": "npm run build --workspace @vraxis/code-test-runtime",
+    "build:service": "npm run build --workspace @vraxis/code-service",
+    "build:web": "npm run build --workspace @vraxis/code-web",
+    "typecheck": "npm run build:contracts && npm run typecheck --workspace @vraxis/code-contracts && npm run typecheck --workspace @vraxis/code-test-runtime && npm run typecheck --workspace @vraxis/code-service && npm run typecheck --workspace @vraxis/code-web",
+    "test": "npm run build:contracts && npm run test --workspace @vraxis/code-contracts && npm run test --workspace @vraxis/code-test-runtime && npm run build:test-runtime && npm run test --workspace @vraxis/code-service && npm run test --workspace @vraxis/code-web",
+    "test:browser": "npm run test:browser --workspace @vraxis/code-web",
+    "lint": "eslint .",
+    "audit:ui": "node node_modules/@vraxis/osx-components/skills/build-with-osx-components/scripts/audit-osx-ui.mjs apps/web/src --strict",
+    "desktop:validate": "vraxis-desktop validate apps/desktop/vraxis.desktop.config.mjs",
+    "predesktop:test-package": "npm run build",
+    "desktop:test-package": "vraxis-desktop test-package apps/desktop/vraxis.desktop.config.mjs",
+    "desktop:package": "vraxis-desktop package apps/desktop/vraxis.desktop.config.mjs",
+    "desktop:release": "vraxis-desktop release apps/desktop/vraxis.desktop.config.mjs",
+    "check": "npm run lint && npm run typecheck && npm run test && npm run build && npm run audit:ui && npm run desktop:validate"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.35.0",
+    "@types/node": "^24.10.0",
+    "@vraxis/desktop": "^0.1.0",
+    "esbuild": "^0.25.9",
+    "eslint": "^9.35.0",
+    "eslint-plugin-vue": "^10.4.0",
+    "globals": "^16.4.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.43.0",
+    "vue-eslint-parser": "^10.2.0"
+  }
+}

@@ -1,0 +1,39 @@
+name: Feature request
+description: Propose a focused improvement to the governed coding-agent workflow.
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user outcome is difficult or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Proposed workflow
+      description: Describe the user-visible flow, not only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: trust
+    attributes:
+      label: Trust and recovery implications
+      description: Which files, commands, network access, browser actions, credentials, approvals, worktrees, or retained evidence would this touch?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: I searched existing issues and the public roadmap for related work.
+          required: true
+        - label: This proposal keeps provider adapters in agent-v and reusable interface primitives in osx-components.
+          required: true

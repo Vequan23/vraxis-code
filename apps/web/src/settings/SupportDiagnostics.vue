@@ -1,0 +1,79 @@
+<script setup lang="ts">
+import { ref } from "vue";
+
+const exporting = ref(false);
+const error = ref("");
+const notice = ref("");
+
+async function exportBundle(): Promise<void> {
+  if (exporting.value) return;
+  exporting.value = true;
+  error.value = "";
+  notice.value = "";
+  try {
+    const response = await fetch("/api/support-bundle");
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(result.error ?? "Support diagnostics could not be generated.");
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    const disposition = response.headers.get("content-disposition") ?? "";
+    link.download = /filename="([^"]+)"/.exec(disposition)?.[1] ?? "vraxis-code-support.json";
+    link.click();
+    URL.revokeObjectURL(url);
+    notice.value = "Private support bundle exported. Review it before sharing.";
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : "Support diagnostics could not be generated.";
+  } finally {
+    exporting.value = false;
+  }
+}
+</script>
+
+<template>
+  <section class="settings-section support-diagnostics" aria-labelledby="support-diagnostics-heading">
+    <header>
+      <span class="section-icon"><osx-icon name="life-buoy" :size="19" /></span>
+      <div>
+        <h2 id="support-diagnostics-heading">Recovery & diagnostics</h2>
+        <p>Export enough system state to diagnose startup and recovery problems without exporting your work.</p>
+      </div>
+    </header>
+
+    <osx-alert v-if="error" tone="error" title="Diagnostics unavailable" :description="error" />
+    <osx-alert v-if="notice" tone="success" title="Support bundle ready" :description="notice" />
+
+    <div class="support-summary">
+      <div>
+        <strong>Included</strong>
+        <span>App and contract versions, platform, harness readiness, unexpected-exit detection, and interrupted-state counts.</span>
+      </div>
+      <div>
+        <strong>Excluded</strong>
+        <span>Project names and paths, prompts, source, diffs, command text and output, browser content, and credentials.</span>
+      </div>
+    </div>
+
+    <footer>
+      <span><osx-icon name="lock" :size="14" /> Generated locally. Nothing is uploaded.</span>
+      <osx-button size="small" icon="download" :loading="exporting" @click="exportBundle">Export support bundle</osx-button>
+    </footer>
+  </section>
+</template>
+
+<style scoped>
+.support-diagnostics { display: grid; gap: 14px; }
+.support-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--osx-border-soft); border-radius: 10px; background: var(--osx-border-soft); }
+.support-summary > div { display: grid; gap: 4px; padding: 13px 14px; background: var(--osx-surface-sunken); }
+.support-summary strong { font-size: 13px; font-weight: 620; }
+.support-summary span, footer { color: var(--osx-muted); font-size: 12px; line-height: 1.45; }
+footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+footer > span { display: inline-flex; align-items: center; gap: 6px; }
+@media (max-width: 680px) {
+  .support-summary { grid-template-columns: 1fr; }
+  footer { align-items: stretch; flex-direction: column; }
+}
+</style>
