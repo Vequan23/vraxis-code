@@ -30,6 +30,9 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+        if: runner.os != 'Windows'
+      - run: npm run test:windows
+        if: runner.os == 'Windows'
       - run: npm run build
       - run: npm run audit:ui
       - run: npm run desktop:validate

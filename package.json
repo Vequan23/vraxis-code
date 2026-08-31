@@ -23,6 +23,7 @@
     "build:web": "npm run build --workspace @vraxis/code-web",
     "typecheck": "npm run build:contracts && npm run typecheck --workspace @vraxis/code-contracts && npm run typecheck --workspace @vraxis/code-test-runtime && npm run typecheck --workspace @vraxis/code-service && npm run typecheck --workspace @vraxis/code-web",
     "test": "npm run build:contracts && npm run test --workspace @vraxis/code-contracts && npm run test --workspace @vraxis/code-test-runtime && npm run build:test-runtime && npm run test --workspace @vraxis/code-service && npm run test --workspace @vraxis/code-web",
+    "test:windows": "npm run build:contracts && npm run test --workspace @vraxis/code-contracts && npm run test --workspace @vraxis/code-test-runtime && npm run build:test-runtime && npm run test:windows --workspace @vraxis/code-service && npm run test --workspace @vraxis/code-web",
     "pretest:browser": "npm run build:contracts",
     "test:browser": "npm run test:browser --workspace @vraxis/code-web",
     "lint": "eslint .",
