@@ -1,0 +1,93 @@
+name: Release macOS
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: release-macos-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  signed-release:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Require signing and notarization credentials
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          test -n "$MACOS_CERTIFICATE_P12_BASE64"
+          test -n "$MACOS_CERTIFICATE_PASSWORD"
+          test -n "$APPLE_SIGNING_IDENTITY"
+          test -n "$APPLE_ID"
+          test -n "$APPLE_APP_SPECIFIC_PASSWORD"
+          test -n "$APPLE_TEAM_ID"
+      - run: npm ci
+      - name: Require tag to match package version
+        run: test "$GITHUB_REF_NAME" = "v$(node -p "require('./package.json').version")"
+      - run: npm run check
+      - run: npx playwright install chromium
+      - run: npm run test:browser
+      - run: npm audit --omit=dev --audit-level=high
+      - name: Import Apple Developer ID certificate
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/vraxis-code-release.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/vraxis-code-signing.keychain-db"
+          printf '%s' "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$MACOS_CERTIFICATE_PASSWORD" -t cert -f pkcs12 -k "$KEYCHAIN_PATH" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
+      - name: Build, smoke-test, sign, and notarize
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npm run desktop:release -- --sign "$APPLE_SIGNING_IDENTITY" --notarize
+      - name: Verify release boundary
+        run: |
+          MANIFEST_PATH="$(find out -maxdepth 1 -name 'vraxis-code-*-darwin-*.json' -print -quit)"
+          DISK_IMAGE_PATH="$(find out -maxdepth 1 -name 'vraxis-code-*-darwin-*.dmg' -print -quit)"
+          test -n "$MANIFEST_PATH"
+          test -n "$DISK_IMAGE_PATH"
+          xcrun stapler validate "$DISK_IMAGE_PATH"
+          npm run desktop:verify-release -- "$MANIFEST_PATH" "$GITHUB_REF_NAME"
+      - name: Publish verified GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          MANIFEST_PATH="$(find out -maxdepth 1 -name 'vraxis-code-*-darwin-*.json' -print -quit)"
+          DISK_IMAGE_PATH="$(find out -maxdepth 1 -name 'vraxis-code-*-darwin-*.dmg' -print -quit)"
+          test -n "$MANIFEST_PATH"
+          test -n "$DISK_IMAGE_PATH"
+          gh release create "$GITHUB_REF_NAME" "$DISK_IMAGE_PATH" "$MANIFEST_PATH" --verify-tag --generate-notes --title "Vraxis Code $GITHUB_REF_NAME"
+      - name: Remove temporary signing material
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/vraxis-code-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/vraxis-code-release.p12"

@@ -21,6 +21,8 @@ Run the full project gate:
 npm run check
 ```
 
+Public macOS releases use a tag-gated, fail-closed signing and notarization workflow. See the [release procedure](docs/product/releasing.md) for required secrets, artifact verification, and the current update-delivery boundary.
+
 ## Repository map
 
 ```text

@@ -22,10 +22,11 @@
     "build:service": "npm run build --workspace @vraxis/code-service",
     "build:web": "npm run build --workspace @vraxis/code-web",
     "typecheck": "npm run build:contracts && npm run typecheck --workspace @vraxis/code-contracts && npm run typecheck --workspace @vraxis/code-test-runtime && npm run typecheck --workspace @vraxis/code-service && npm run typecheck --workspace @vraxis/code-web",
-    "test": "npm run build:contracts && npm run test --workspace @vraxis/code-contracts && npm run test --workspace @vraxis/code-test-runtime && npm run build:test-runtime && npm run test --workspace @vraxis/code-service && npm run test --workspace @vraxis/code-web",
+    "test": "npm run build:contracts && npm run test --workspace @vraxis/code-contracts && npm run test --workspace @vraxis/code-test-runtime && npm run build:test-runtime && npm run test --workspace @vraxis/code-service && npm run test --workspace @vraxis/code-web && npm run test:release",
     "test:windows": "npm run build:contracts && npm run test --workspace @vraxis/code-contracts && npm run test --workspace @vraxis/code-test-runtime && npm run build:test-runtime && npm run test:windows --workspace @vraxis/code-service && npm run test --workspace @vraxis/code-web",
     "pretest:browser": "npm run build:contracts",
     "test:browser": "npm run test:browser --workspace @vraxis/code-web",
+    "test:release": "node --test scripts/*.test.mjs",
     "lint": "eslint .",
     "audit:ui": "node node_modules/@vraxis/osx-components/skills/build-with-osx-components/scripts/audit-osx-ui.mjs apps/web/src --strict",
     "desktop:validate": "vraxis-desktop validate apps/desktop/vraxis.desktop.config.mjs",
@@ -33,6 +34,7 @@
     "desktop:test-package": "vraxis-desktop test-package apps/desktop/vraxis.desktop.config.mjs",
     "desktop:package": "vraxis-desktop package apps/desktop/vraxis.desktop.config.mjs",
     "desktop:release": "vraxis-desktop release apps/desktop/vraxis.desktop.config.mjs",
+    "desktop:verify-release": "node scripts/verify-desktop-release.mjs",
     "check": "npm run lint && npm run typecheck && npm run test && npm run build && npm run audit:ui && npm run desktop:validate"
   },
   "devDependencies": {

@@ -47,6 +47,12 @@ export default defineDesktopApp({
     },
     protocols: [{ scheme: "vraxis-code", name: "Vraxis Code task" }],
   },
+  updates: {
+    provider: "github",
+    owner: "Vequan23",
+    repository: "vraxis-code",
+    channel: "stable",
+  },
   packaging: {
     outputDirectory: "../../out",
     asar: true,

@@ -18,6 +18,7 @@ All notable changes to Vraxis Code will be documented here. The project follows 
 - Published `@vraxis/osx-components@0.12.2` integration that preserves native `title` behavior without Vue custom-element collision warnings.
 - Self-contained offline browser evidence replay with before/after playback, actor and approval provenance, embedded retained frames, and no external network authority.
 - Signed portable team-policy packs with trusted-signer import, ask-or-deny precedence, approval provenance, audit inclusion, and explicit local removal.
+- Tag-gated macOS release automation that requires signing and notarization, reruns quality and browser gates, verifies artifact identity, size, SHA-256, and download URL, and refuses unsigned publication.
 
 ### Security
 
