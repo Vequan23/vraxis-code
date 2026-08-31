@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import { access, mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
-import { basename, delimiter, dirname, extname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import type { TerminalRunSummary } from "@vraxis/code-contracts";
 import { spawn as spawnPty, type IPty } from "node-pty";
 
@@ -112,16 +112,23 @@ function killWindowsProcessTree(pid: number): void {
   });
 }
 
-function executableCandidates(executable: string, environment: Record<string, string>): string[] {
+export function executableCandidates(
+  executable: string,
+  environment: Record<string, string>,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  const pathDelimiter = platform === "win32" ? ";" : ":";
   const paths = isAbsolute(executable) || executable.includes("/") || executable.includes("\\")
     ? [resolve(executable)]
-    : (environment.PATH ?? "").split(delimiter).filter(Boolean).map((directory) => resolve(directory, executable));
-  if (process.platform !== "win32" || extname(executable)) return paths;
+    : (environment.PATH ?? "").split(pathDelimiter).filter(Boolean).map((directory) => resolve(directory, executable));
+  if (platform !== "win32" || extname(executable)) return paths;
   const extensions = (environment.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
     .split(";")
     .map((extension) => extension.trim().toLowerCase())
     .filter((extension) => [".com", ".exe", ".bat", ".cmd"].includes(extension));
-  return paths.flatMap((candidate) => [candidate, ...extensions.map((extension) => `${candidate}${extension}`)]);
+  // Windows resolves extensionless commands through PATHEXT. Do not prefer the
+  // adjacent POSIX shim (for example npm) over npm.cmd, which ConPTY cannot run.
+  return paths.flatMap((candidate) => extensions.map((extension) => `${candidate}${extension}`));
 }
 
 async function nodeShim(commandPath: string, environment: Record<string, string>): Promise<ResolvedCommand | undefined> {

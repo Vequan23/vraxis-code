@@ -23,6 +23,7 @@ test("refuses to apply a Build over overlapping project edits", async (context) 
   await git(project, "init", "-b", "main");
   await git(project, "config", "user.name", "Vraxis Test");
   await git(project, "config", "user.email", "test@vraxis.local");
+  await git(project, "config", "core.autocrlf", "false");
   await git(project, "add", ".");
   await git(project, "commit", "-m", "Initial fixture");
 
@@ -49,6 +50,7 @@ test("applies added, deleted, and binary Build changes without committing the pr
   await git(project, "init", "-b", "main");
   await git(project, "config", "user.name", "Vraxis Test");
   await git(project, "config", "user.email", "test@vraxis.local");
+  await git(project, "config", "core.autocrlf", "false");
   await git(project, "add", ".");
   await git(project, "commit", "-m", "Initial fixture");
   const projectHead = await git(project, "rev-parse", "HEAD");
@@ -85,6 +87,7 @@ test("reverts an exact applied checkpoint and preserves project HEAD", async (co
   await git(project, "init", "-b", "main");
   await git(project, "config", "user.name", "Vraxis Test");
   await git(project, "config", "user.email", "test@vraxis.local");
+  await git(project, "config", "core.autocrlf", "false");
   await git(project, "add", ".");
   await git(project, "commit", "-m", "Initial fixture");
   const projectHead = await git(project, "rev-parse", "HEAD");
@@ -110,6 +113,7 @@ test("applies selected checkpoint paths without touching remaining files", async
   await git(project, "init", "-b", "main");
   await git(project, "config", "user.name", "Vraxis Test");
   await git(project, "config", "user.email", "test@vraxis.local");
+  await git(project, "config", "core.autocrlf", "false");
   await git(project, "add", ".");
   await git(project, "commit", "-m", "Initial fixture");
   const worktrees = new GitWorktrees(join(root, "data"));
@@ -135,6 +139,7 @@ test("applies an immutable checkpoint hunk without touching another hunk in the 
   await git(project, "init", "-b", "main");
   await git(project, "config", "user.name", "Vraxis Test");
   await git(project, "config", "user.email", "test@vraxis.local");
+  await git(project, "config", "core.autocrlf", "false");
   await git(project, "add", ".");
   await git(project, "commit", "-m", "Initial fixture");
 
@@ -166,6 +171,7 @@ test("reports exact conflicting hunks and can apply a safe hunk separately", asy
   await git(project, "init", "-b", "main");
   await git(project, "config", "user.name", "Vraxis Test");
   await git(project, "config", "user.email", "test@vraxis.local");
+  await git(project, "config", "core.autocrlf", "false");
   await git(project, "add", ".");
   await git(project, "commit", "-m", "Initial fixture");
 
@@ -213,6 +219,7 @@ test("cleans and restores an archived worktree from its checkpoint branch", asyn
   await git(project, "init", "-b", "main");
   await git(project, "config", "user.name", "Vraxis Test");
   await git(project, "config", "user.email", "test@vraxis.local");
+  await git(project, "config", "core.autocrlf", "false");
   await git(project, "add", ".");
   await git(project, "commit", "-m", "Initial fixture");
   const worktrees = new GitWorktrees(join(root, "data"));

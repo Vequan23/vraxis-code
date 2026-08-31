@@ -37,6 +37,11 @@ function receipt(): TaskReceiptV1 {
   };
 }
 
+async function assertPrivateMode(path: string, expected: number): Promise<void> {
+  const metadata = await stat(path);
+  if (process.platform !== "win32") assert.equal(metadata.mode & 0o777, expected);
+}
+
 test("creates a self-verifying signed task proof with a stable local identity", async () => {
   const root = await mkdtemp(join(tmpdir(), "vraxis-task-proof-"));
   const first = await new TaskProofSigner(root).create(receipt());
@@ -51,8 +56,8 @@ test("creates a self-verifying signed task proof with a stable local identity", 
   assert.equal(first.integrity.keyId, second.integrity.keyId);
   assert.equal(first.integrity.signature, second.integrity.signature);
   assert.equal(verifyTaskProof(first), true);
-  assert.equal((await stat(join(root, "proof"))).mode & 0o777, 0o700);
-  assert.equal((await stat(join(root, "proof", "signing-key.json"))).mode & 0o777, 0o600);
+  await assertPrivateMode(join(root, "proof"), 0o700);
+  await assertPrivateMode(join(root, "proof", "signing-key.json"), 0o600);
   assert.doesNotMatch(JSON.stringify(first), /PRIVATE KEY/);
 });
 
@@ -126,7 +131,7 @@ test("enrolls, verifies, and revokes a portable proof identity without private k
   const trusted = await trust.verify(remoteProof, localIdentity);
   assert.equal(trusted.trust, "trusted");
   assert.equal(trusted.signerLabel, "Build server");
-  assert.equal((await stat(join(localRoot, "proof", "trusted-signers.json"))).mode & 0o777, 0o600);
+  await assertPrivateMode(join(localRoot, "proof", "trusted-signers.json"), 0o600);
 
   await trust.revoke(remoteIdentity.keyId);
   assert.equal((await trust.verify(remoteProof, localIdentity)).trust, "untrusted");
@@ -156,9 +161,9 @@ test("rotates the local signing identity while preserving old proof trust and a 
   assert.equal((await trust.verify(previousProof, nextIdentity)).trust, "trusted");
   assert.equal((await trust.verify(nextProof, nextIdentity)).trust, "local");
   assert.equal((await signer.rotationHistory())[0]?.artifactId, attestation.artifactId);
-  assert.equal((await stat(join(root, "proof", "rotations"))).mode & 0o777, 0o700);
+  await assertPrivateMode(join(root, "proof", "rotations"), 0o700);
   const rotationNames = await import("node:fs/promises").then(({ readdir }) => readdir(join(root, "proof", "rotations")));
-  assert.equal((await stat(join(root, "proof", "rotations", rotationNames[0]!))).mode & 0o777, 0o600);
+  await assertPrivateMode(join(root, "proof", "rotations", rotationNames[0]!), 0o600);
   assert.doesNotMatch(JSON.stringify(attestation), /PRIVATE KEY/);
 
   const tampered = structuredClone(attestation);

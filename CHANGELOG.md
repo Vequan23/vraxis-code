@@ -32,3 +32,4 @@ All notable changes to Vraxis Code will be documented here. The project follows 
 - Preserve quoted Windows executable paths, resolve `PATHEXT` commands, and unwrap verified Node package-manager shims without granting a shell so governed terminal and verification commands work consistently across platforms.
 - Close live terminal processes, browser contexts, and test HTTP resources deterministically so shutdown receipts remain accurate and cross-platform quality jobs cannot be stranded by open handles.
 - Terminate approved Windows PTY process trees through the operating-system task controller instead of passing unsupported POSIX signals into ConPTY.
+- Resolve Windows commands through `PATHEXT` before extensionless POSIX shims, enforce project-root boundaries with native separators, and keep cross-platform tests focused on product behavior rather than PTY or filesystem encoding details.

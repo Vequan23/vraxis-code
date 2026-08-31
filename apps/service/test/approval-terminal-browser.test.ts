@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { extname, join } from "node:path";
 import test from "node:test";
 import { chromium, type BrowserContext } from "playwright";
 import { MemoryCredentialStore, defineOutput, localExecutionScope, type ApprovalRequest, type CodingRuntimeRequest, type CodingRuntimeResult, type RuntimeReadiness } from "@vraxis/agent-v";
@@ -10,7 +10,7 @@ import { LocalCliRuntimeEngine } from "@vraxis/agent-v/local-cli";
 import { executeAgentTool } from "@vraxis/agent-v/tools";
 import { ApprovalRegistry } from "../src/approvals/approval-registry.js";
 import { BrowserWorkspace } from "../src/browser/browser-workspace.js";
-import { commandArguments, TerminalRegistry, terminatePty } from "../src/terminal/terminal-registry.js";
+import { commandArguments, executableCandidates, TerminalRegistry, terminatePty } from "../src/terminal/terminal-registry.js";
 import { createAgentTerminalTool } from "../src/terminal/agent-terminal-tool.js";
 import { ModelProviderRegistry } from "../src/model-providers/model-provider-registry.js";
 import { VraxisCodeRuntimeEngine } from "../src/runtimes/vraxis-code-runtime.js";
@@ -20,6 +20,11 @@ async function closeHttpServer(server: ReturnType<typeof createServer>): Promise
   const closed = new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   server.closeAllConnections();
   await closed;
+}
+
+async function assertPrivateMode(path: string, expected: number): Promise<void> {
+  const metadata = await stat(path);
+  if (process.platform !== "win32") assert.equal(metadata.mode & 0o777, expected);
 }
 
 async function pendingApproval(approvals: ApprovalRegistry, sessionId: string) {
@@ -208,6 +213,8 @@ test("tokenizes and executes an approved command without a shell", async () => {
     ["C:\\Program Files\\nodejs\\node.exe", "-e", "console.log('ready')"],
   );
   assert.throws(() => commandArguments("node 'unfinished"), /unfinished quote/);
+  const candidates = executableCandidates("npm", { PATH: "C:\\tools", PATHEXT: ".EXE;.CMD" }, "win32");
+  assert.deepEqual(candidates.map((candidate) => extname(candidate).toLowerCase()), [".exe", ".cmd"]);
   const terminationSignals: Array<string | undefined> = [];
   const terminatedWindowsProcesses: number[] = [];
   const observedPty = { pid: 42, kill: (signal?: string) => { terminationSignals.push(signal); } };
@@ -221,7 +228,7 @@ test("tokenizes and executes an approved command without a shell", async () => {
   const completed = await terminal.execute(run.id, root);
   assert.equal(completed.status, "success");
   assert.equal(completed.exitCode, 0);
-  assert.equal(completed.output.trim(), "ready");
+  assert.match(completed.output, /ready/);
 });
 
 test("streams bounded terminal output while a command is still running", async () => {
@@ -303,7 +310,7 @@ test("an agent terminal command waits for approval and retains the exact termina
   await approvals.decide(pending.id, "approve");
   const result = await execution as { runId: string; status: string; output: string };
   assert.equal(result.status, "success");
-  assert.equal(result.output.trim(), "agent-ready");
+  assert.match(result.output, /agent-ready/);
   const [receipt] = await terminal.list("session-agent");
   assert.equal(receipt?.id, result.runId);
   assert.equal(receipt?.approvalId, pending.id);
@@ -570,7 +577,7 @@ test("persists browser evidence and encrypted authentication state across a serv
   const registry = JSON.parse(await readFile(registryFile, "utf8")) as { schemaVersion: number; sessions: Array<{ sessionId: string }> };
   assert.equal(registry.schemaVersion, 1);
   assert.ok(registry.sessions.some((item) => item.sessionId === sessionId));
-  assert.equal((await stat(registryFile)).mode & 0o777, 0o600);
+  await assertPrivateMode(registryFile, 0o600);
   const encryptedState = await readFile(join(root, "browser-state", `${sessionId}.json`), "utf8");
   assert.doesNotMatch(encryptedState, /private-cookie|private-local-storage/);
 

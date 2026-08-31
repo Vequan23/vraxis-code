@@ -1,5 +1,5 @@
 import { readFile, realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { inspectProject, planProjectVerification, type ProjectDoctorReport } from "@vraxis/agent-v/node";
 import type {
   ProjectDoctorSummary,
@@ -27,6 +27,10 @@ interface VerificationRecipeFile {
 
 const recipePath = ".vraxis/verify.json";
 const categories = new Set(["lint", "typecheck", "test", "build", "check"]);
+
+function escapesRoot(relativePath: string): boolean {
+  return relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath);
+}
 
 function text(value: unknown, label: string, maximum: number): string {
   if (typeof value !== "string" || !value.trim() || value.length > maximum || value.includes("\0")) {
@@ -63,7 +67,7 @@ function projectCwd(rootPath: string, value: unknown): string {
   if (isAbsolute(cwd)) throw new TypeError("Verification working directories must be project-relative.");
   const absolute = resolve(rootPath, cwd);
   const fromRoot = relative(rootPath, absolute);
-  if (fromRoot === ".." || fromRoot.startsWith("../") || isAbsolute(fromRoot)) {
+  if (escapesRoot(fromRoot)) {
     throw new TypeError("Verification working directories must stay inside the project.");
   }
   return cwd || ".";
@@ -236,7 +240,7 @@ async function projectRecipe(rootPath: string): Promise<ReturnType<typeof parseR
     const approvedRoot = await realpath(rootPath);
     const actualFile = await realpath(file);
     const fromRoot = relative(approvedRoot, actualFile);
-    if (fromRoot === ".." || fromRoot.startsWith("../") || isAbsolute(fromRoot)) {
+    if (escapesRoot(fromRoot)) {
       throw new TypeError(`${recipePath} must resolve inside the approved project.`);
     }
     const fileStat = await stat(actualFile);
