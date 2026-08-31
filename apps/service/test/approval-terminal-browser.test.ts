@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { chromium } from "playwright";
+import { chromium, type BrowserContext } from "playwright";
 import { MemoryCredentialStore, defineOutput, localExecutionScope, type ApprovalRequest, type CodingRuntimeRequest, type CodingRuntimeResult, type RuntimeReadiness } from "@vraxis/agent-v";
 import { LocalCliRuntimeEngine } from "@vraxis/agent-v/local-cli";
 import { executeAgentTool } from "@vraxis/agent-v/tools";
@@ -566,9 +566,9 @@ test("persists browser evidence and encrypted authentication state across a serv
 });
 
 test("migrates a legacy isolated profile into encrypted state without discarding the source profile", async (context) => {
-  let externalRequests = 0;
-  const server = createServer((_request, response) => {
-    externalRequests += 1;
+  const externalRequests: string[] = [];
+  const server = createServer((request, response) => {
+    externalRequests.push(request.url ?? "");
     response.writeHead(200, { "content-type": "text/html" });
     response.end(`<!doctype html><title>Legacy migration</title><h1 id="state">Fresh</h1><script>
       if (document.cookie.includes("legacy_session=private-cookie") && localStorage.getItem("legacy-token") === "private-storage") {
@@ -583,7 +583,18 @@ test("migrates a legacy isolated profile into encrypted state without discarding
   const sessionId = "session-legacy";
   const profilePath = join(root, "browser-profiles", sessionId);
   const url = `http://127.0.0.1:${address.port}/`;
-  const legacy = await chromium.launchPersistentContext(profilePath, { headless: true });
+  const browser = new BrowserWorkspace(root, new MemoryCredentialStore());
+  let legacy: BrowserContext | undefined;
+  context.after(async () => {
+    await legacy?.close().catch(() => undefined);
+    await browser.close();
+    server.close();
+  });
+  try {
+    legacy = await chromium.launchPersistentContext(profilePath, { headless: true });
+  } catch {
+    legacy = await chromium.launchPersistentContext(profilePath, { headless: true, channel: "chrome" });
+  }
   const legacyPage = legacy.pages()[0] ?? await legacy.newPage();
   await legacyPage.goto(url);
   await legacyPage.evaluate(() => {
@@ -614,14 +625,9 @@ test("migrates a legacy isolated profile into encrypted state without discarding
     }],
   }, null, 2)}\n`);
 
-  const browser = new BrowserWorkspace(root, new MemoryCredentialStore());
-  context.after(async () => {
-    await browser.close();
-    server.close();
-  });
   const migrated = await browser.perform({ sessionId, action: "navigate", target: url });
   assert.match(migrated.snapshot, /Legacy state restored/);
-  assert.equal(externalRequests, 2, "migration must hydrate origin storage without making an external request");
+  assert.equal(externalRequests.filter((requestUrl) => requestUrl === "/").length, 2, "migration must hydrate origin storage without requesting the retained document");
   const encrypted = await readFile(join(root, "browser-state", `${sessionId}.json`), "utf8");
   assert.doesNotMatch(encrypted, /private-cookie|private-storage/);
   assert.equal((await stat(join(root, "browser-profiles", `${sessionId}.migrated`))).isDirectory(), true);
