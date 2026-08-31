@@ -75,7 +75,11 @@ export class ApprovalRegistry {
 
   constructor(
     dataDirectory: string,
-    private readonly govern?: (input: Omit<ApprovalSummary, "id" | "requestedAt" | "state">) => Promise<{ forceFresh: boolean }>,
+    private readonly govern?: (input: Omit<ApprovalSummary, "id" | "requestedAt" | "state">) => Promise<{
+      forceFresh: boolean;
+      deny?: string;
+      teamPolicy?: NonNullable<ApprovalSummary["teamPolicy"]>;
+    }>,
   ) {
     this.file = join(dataDirectory, "approvals.json");
   }
@@ -141,18 +145,23 @@ export class ApprovalRegistry {
     const approval = await this.mutate((data) => {
       if (data.approvals.some((item) => item.id === requestedId)) throw new TypeError("Approval request already exists.");
       const earlyCancellation = this.earlyCancellations.get(requestedId);
+      const blocked = !earlyCancellation && governance?.deny;
       const approval: ApprovalSummary = {
         ...governedInput,
         scope: safeApprovalScope(governedInput.scope),
         id: requestedId,
         requestedAt: new Date().toISOString(),
-        state: earlyCancellation ? "interrupted" : "pending",
+        state: earlyCancellation ? "interrupted" : blocked ? "denied" : "pending",
         ...(earlyCancellation ? {
           resolvedAt: new Date().toISOString(),
           failure: earlyCancellation,
+        } : blocked ? {
+          resolvedAt: new Date().toISOString(),
+          failure: governance.deny,
         } : {}),
+        ...(governance?.teamPolicy ? { teamPolicy: governance.teamPolicy } : {}),
       };
-      const matchingRules = !earlyCancellation && matchRememberedRules && !governance?.forceFresh ? data.rules.filter((item) => !item.revokedAt
+      const matchingRules = approval.state === "pending" && matchRememberedRules && !governance?.forceFresh ? data.rules.filter((item) => !item.revokedAt
         && item.projectId === approval.projectId
         && (!item.sessionId || item.sessionId === approval.sessionId)
         && item.capability === approval.capability

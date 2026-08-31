@@ -32,6 +32,9 @@ import {
   type SessionLiveEvidenceResponse,
   type SessionSummary,
   type TerminalRunSummary,
+  type TeamPolicyBundleV1,
+  type TeamPolicyCreateRequest,
+  type TeamPolicyState,
   type TaskProofEnvelopeV1,
   type TaskEvidenceKindV1,
   type UnderstandArtifactEnvelopeV1,
@@ -51,6 +54,7 @@ import AgentHarnessSettings from "./settings/AgentHarnessSettings.vue";
 import AgentDefaults from "./settings/AgentDefaults.vue";
 import PermissionCenter from "./settings/PermissionCenter.vue";
 import ProofTrustSettings from "./settings/ProofTrustSettings.vue";
+import TeamPolicySettings from "./settings/TeamPolicySettings.vue";
 import SupportDiagnostics from "./settings/SupportDiagnostics.vue";
 import FirstRunJourney from "./onboarding/FirstRunJourney.vue";
 import type { FirstRunActionId } from "./onboarding/first-run-readiness.js";
@@ -113,6 +117,10 @@ const permissionError = ref("");
 const permissionNotice = ref("");
 const permissionActionId = ref("");
 const permissionExporting = ref(false);
+const teamPolicy = ref<TeamPolicyState>({ status: "none" });
+const teamPolicyBusy = ref(false);
+const teamPolicyError = ref("");
+const teamPolicyNotice = ref("");
 const terminalCommand = ref("");
 const terminalCwd = ref(".");
 const terminalInput = ref("");
@@ -530,7 +538,12 @@ function verificationTone(run: VerificationRunSummary): "neutral" | "info" | "su
 }
 
 function approvalDescription(approval: ApprovalSummary): string {
-  return approval.failure ? `${approval.description} ${approval.failure}` : approval.description;
+  const detail = approval.failure ? `${approval.description} ${approval.failure}` : approval.description;
+  if (!approval.teamPolicy) return detail;
+  const requirement = approval.teamPolicy.effect === "deny"
+    ? `${approval.teamPolicy.organization} policy blocks this capability.`
+    : `${approval.teamPolicy.organization} policy requires a fresh decision.`;
+  return `${detail} ${requirement}`;
 }
 
 function updateTerminalCommand(event: Event): void {
@@ -1278,6 +1291,96 @@ async function exportPermissionAudit(): Promise<void> {
   }
 }
 
+async function refreshTeamPolicy(): Promise<void> {
+  if (previewMode || teamPolicyBusy.value) return;
+  teamPolicyBusy.value = true;
+  teamPolicyError.value = "";
+  try {
+    const response = await fetch("/api/team-policy");
+    const result = await response.json() as TeamPolicyState & { error?: string };
+    if (!response.ok) throw new Error(result.error ?? "Team policy could not be loaded.");
+    teamPolicy.value = result;
+  } catch (error) {
+    teamPolicyError.value = error instanceof Error ? error.message : "Team policy could not be loaded.";
+  } finally {
+    teamPolicyBusy.value = false;
+  }
+}
+
+async function createTeamPolicy(request: TeamPolicyCreateRequest): Promise<void> {
+  if (teamPolicyBusy.value) return;
+  teamPolicyBusy.value = true;
+  teamPolicyError.value = "";
+  teamPolicyNotice.value = "";
+  try {
+    const response = await fetch("/api/team-policy/sign", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(result.error ?? "The signed team policy could not be created.");
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `vraxis-team-policy-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    teamPolicyNotice.value = "The signed policy pack was downloaded. Share it with installations that trust this proof identity.";
+  } catch (error) {
+    teamPolicyError.value = error instanceof Error ? error.message : "The signed team policy could not be created.";
+  } finally {
+    teamPolicyBusy.value = false;
+  }
+}
+
+async function importTeamPolicy(bundle: TeamPolicyBundleV1): Promise<void> {
+  if (teamPolicyBusy.value) return;
+  teamPolicyBusy.value = true;
+  teamPolicyError.value = "";
+  teamPolicyNotice.value = "";
+  try {
+    const response = await fetch("/api/team-policy", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(bundle),
+    });
+    const result = await response.json() as TeamPolicyState & { error?: string };
+    if (!response.ok) throw new Error(result.error ?? "The signed team policy could not be imported.");
+    teamPolicy.value = result;
+    teamPolicyNotice.value = "The signed team policy is active.";
+  } catch (error) {
+    teamPolicyError.value = error instanceof Error ? error.message : "The signed team policy could not be imported.";
+  } finally {
+    teamPolicyBusy.value = false;
+  }
+}
+
+async function removeTeamPolicy(): Promise<void> {
+  if (teamPolicyBusy.value) return;
+  teamPolicyBusy.value = true;
+  teamPolicyError.value = "";
+  teamPolicyNotice.value = "";
+  try {
+    const response = await fetch("/api/team-policy", {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirmed: true }),
+    });
+    const result = await response.json() as TeamPolicyState & { error?: string };
+    if (!response.ok) throw new Error(result.error ?? "The team policy could not be removed.");
+    teamPolicy.value = result;
+    teamPolicyNotice.value = "The team policy was removed. Local approval decisions apply again.";
+  } catch (error) {
+    teamPolicyError.value = error instanceof Error ? error.message : "The team policy could not be removed.";
+  } finally {
+    teamPolicyBusy.value = false;
+  }
+}
+
 async function requestBrowserAction(
   action: "navigate" | "click" | "type" | "capture" | "reload" | "back" | "new-tab" | "select-tab" | "close-tab",
   options: { target?: string; tabId?: string } = {},
@@ -1542,6 +1645,7 @@ function openSettings(): void {
   runtimeActionNotice.value = "";
   activeView.value = "settings";
   void refreshPermissionRules();
+  void refreshTeamPolicy();
 }
 
 async function openHarnessSetup(): Promise<void> {
@@ -2016,6 +2120,18 @@ onBeforeUnmount(() => {
             />
 
             <ProofTrustSettings />
+
+            <TeamPolicySettings
+              :state="teamPolicy"
+              :busy="teamPolicyBusy"
+              :error="teamPolicyError"
+              :notice="teamPolicyNotice"
+              @refresh="refreshTeamPolicy"
+              @create="createTeamPolicy"
+              @import="importTeamPolicy"
+              @remove="removeTeamPolicy"
+              @error="teamPolicyError = $event"
+            />
 
             <SupportDiagnostics />
 

@@ -137,9 +137,9 @@ The August 31 audit chose the trustworthy single-agent loop over parallelism or 
 The recovery, scoped approval, PTY, durable browser-evidence, portable browser-replay, first verification, secret-minimized offline proof, runtime capability negotiation, governed harness-maintenance, and first signed Understand loops are implemented. The next build sequence is deliberately narrow:
 
 1. Keep Codex, Claude Code, stable OpenCode, and Cursor ACP locked to the shipped adapter conformance contract, version-bound live probe, pre-task capability matrix, official install/auth/update actions, and secret-safe evidence tool.
-2. Keep the shipped local key-rotation attestations and cross-install trust enrollment stable; add centrally distributed organization policy only after authority precedence and local-revocation semantics are explicitly decided.
+2. Harden the shipped signed team-policy pack, trusted import, ask-or-deny precedence, approval provenance, audit integration, and explicit local removal; add administrator-locked distribution only with an operating-system enforcement boundary.
 3. Harden the shipped deterministic project recipes, including governed service health, route and visible-page assertions, and visual comparison, as part of signed task proof.
-4. Harden the shipped Permission Center with enterprise trust enrollment and organization policy overlays without weakening local revocation.
+4. Harden the shipped Permission Center and team-policy surface with broader accessibility coverage, policy-expiration guidance, and device-management integration without weakening or overstating local authority.
 5. Keep the shipped clean-install readiness budget, packaged smoke, unexpected-exit recovery, and keyboard/current-step coverage green; finish signed desktop packaging, auto-update, broader accessibility, privacy-preserving crash reporting, and release automation before expanding Understand into persistent project memory.
 6. Extend the shipped `vraxis.understand-artifact@1` changed-path coverage, retained-risk, rollback, and teach-back surface with symbol/dependency mapping only when those claims can cite deterministic evidence.
 

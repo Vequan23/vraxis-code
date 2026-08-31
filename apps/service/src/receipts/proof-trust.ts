@@ -142,6 +142,23 @@ export class ProofTrustRegistry {
     };
   }
 
+  async trustIdentity(
+    keyId: string,
+    publicKey: string,
+    localIdentity: ProofIdentitySummary,
+  ): Promise<{ trust: "local" | "trusted" | "untrusted"; label?: string }> {
+    let identity: ProofIdentitySummary;
+    try { identity = normalizePublicKey(publicKey); } catch { return { trust: "untrusted" }; }
+    if (identity.keyId !== keyId) return { trust: "untrusted" };
+    if (identity.keyId === localIdentity.keyId && identity.publicKey === localIdentity.publicKey) {
+      return { trust: "local", label: "This installation" };
+    }
+    const signer = (await this.read()).signers.find((item) => !item.revokedAt
+      && item.keyId === identity.keyId
+      && item.publicKey === identity.publicKey);
+    return signer ? { trust: "trusted", label: signer.label } : { trust: "untrusted" };
+  }
+
   private async read(): Promise<ProofTrustData> {
     await this.mutations;
     return this.readSnapshot();

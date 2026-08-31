@@ -444,6 +444,64 @@ test("exports the local proof identity and manages enrolled signer trust", async
   assert.ok(revokedState.state.signers[0]?.revokedAt);
 });
 
+test("creates, installs, audits, and deliberately removes a signed team policy", async (context) => {
+  const app = await fixture();
+  context.after(() => app.close());
+
+  const initial = await (await fetch(`${app.baseUrl}/api/team-policy`)).json() as { status: string };
+  assert.equal(initial.status, "none");
+
+  const signed = await fetch(`${app.baseUrl}/api/team-policy/sign`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      organization: "Example Engineering",
+      rules: [
+        { capability: "command", effect: "ask" },
+        { capability: "credentials", effect: "deny" },
+      ],
+    }),
+  });
+  assert.equal(signed.status, 200);
+  assert.equal(signed.headers.get("content-type"), "application/vnd.vraxis.team-policy+json; charset=utf-8");
+  const bundle = await signed.json() as { artifactId: string; organization: string };
+  assert.match(bundle.artifactId, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(bundle.organization, "Example Engineering");
+
+  const installed = await fetch(`${app.baseUrl}/api/team-policy`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(bundle),
+  });
+  assert.equal(installed.status, 201);
+  const installedState = await installed.json() as { status: string; policy?: { organization: string; rules: unknown[] } };
+  assert.equal(installedState.status, "active");
+  assert.equal(installedState.policy?.organization, "Example Engineering");
+  assert.equal(installedState.policy?.rules.length, 2);
+
+  const audit = await fetch(`${app.baseUrl}/api/approval-rules/audit`);
+  assert.equal(audit.status, 200);
+  const auditBody = await audit.json() as { teamPolicy?: { artifactId: string; status: string } };
+  assert.equal(auditBody.teamPolicy?.artifactId, bundle.artifactId);
+  assert.equal(auditBody.teamPolicy?.status, "active");
+
+  const unconfirmed = await fetch(`${app.baseUrl}/api/team-policy`, {
+    method: "DELETE",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ confirmed: false }),
+  });
+  assert.equal(unconfirmed.status, 400);
+  assert.equal((await (await fetch(`${app.baseUrl}/api/team-policy`)).json() as { status: string }).status, "active");
+
+  const removed = await fetch(`${app.baseUrl}/api/team-policy`, {
+    method: "DELETE",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ confirmed: true }),
+  });
+  assert.equal(removed.status, 200);
+  assert.equal((await removed.json() as { status: string }).status, "none");
+});
+
 test("prepares runtime maintenance as a dedicated approval-gated terminal task", async (context) => {
   const app = await fixture(undefined, new DeterministicCodingRuntimeEngine(), {
     discover: async () => [{

@@ -63,6 +63,7 @@ import { renderTaskReceiptHtml } from "../receipts/task-receipt-html.js";
 import { TaskProofSigner } from "../receipts/task-proof.js";
 import { createUnderstandArtifact } from "../receipts/understand-artifact.js";
 import { ProofTrustRegistry } from "../receipts/proof-trust.js";
+import { TeamPolicyRegistry } from "../team-policy/team-policy-registry.js";
 import { createSupportBundle } from "../diagnostics/support-bundle.js";
 import { redactTaskReceipt } from "../receipts/portable-redaction.js";
 import { DesktopSession } from "./desktop-session.js";
@@ -137,12 +138,13 @@ export function createApp(options: AppOptions) {
   const importedAttachments = new AttachmentStore(options.dataDirectory);
   const skills = new SkillRegistry(options.discoverSkills);
   const worktrees = new GitWorktrees(options.dataDirectory);
-  const approvals = new ApprovalRegistry(options.dataDirectory);
+  const proofSigner = new TaskProofSigner(options.dataDirectory);
+  const proofTrust = new ProofTrustRegistry(options.dataDirectory);
+  const teamPolicy = new TeamPolicyRegistry(options.dataDirectory, proofSigner, proofTrust);
+  const approvals = new ApprovalRegistry(options.dataDirectory, (input) => teamPolicy.decision(input));
   const terminal = new TerminalRegistry(options.dataDirectory);
   const browser = options.browserWorkspace ?? new BrowserWorkspace(options.dataDirectory, credentials);
   const verifications = new VerificationRegistry(options.dataDirectory);
-  const proofSigner = new TaskProofSigner(options.dataDirectory);
-  const proofTrust = new ProofTrustRegistry(options.dataDirectory);
   async function proofTrustState() {
     return proofTrust.state(await proofSigner.identity(), await proofSigner.rotationHistory());
   }
@@ -713,6 +715,34 @@ export function createApp(options: AppOptions) {
 
       if (request.method === "GET" && url.pathname === "/api/proof/trust") {
         json(response, 200, await proofTrustState());
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/team-policy") {
+        json(response, 200, await teamPolicy.state());
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/team-policy/sign") {
+        const bundle = await teamPolicy.create(await body(request));
+        response.writeHead(200, {
+          "content-type": "application/vnd.vraxis.team-policy+json; charset=utf-8",
+          "content-disposition": `attachment; filename="vraxis-team-policy-${bundle.policyId}.json"`,
+          "cache-control": "no-store",
+          "x-content-type-options": "nosniff",
+        });
+        response.end(`${JSON.stringify(bundle, null, 2)}\n`);
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/team-policy") {
+        json(response, 201, await teamPolicy.install(await body(request)));
+        return;
+      }
+
+      if (request.method === "DELETE" && url.pathname === "/api/team-policy") {
+        const input = await body(request) as { confirmed?: unknown };
+        json(response, 200, await teamPolicy.remove(input.confirmed === true));
         return;
       }
 
@@ -1489,13 +1519,18 @@ export function createApp(options: AppOptions) {
 
       if (request.method === "GET" && url.pathname === "/api/approval-rules/audit") {
         const audit = await approvals.audit();
+        const policyState = await teamPolicy.state();
+        const exportedAudit = {
+          ...audit,
+          ...(policyState.policy ? { teamPolicy: policyState.policy } : {}),
+        };
         response.writeHead(200, {
           "content-type": "application/vnd.vraxis.approval-policy-audit+json; charset=utf-8",
           "content-disposition": `attachment; filename="vraxis-code-approval-policy-${audit.generatedAt.slice(0, 10)}.json"`,
           "cache-control": "no-store",
           "x-content-type-options": "nosniff",
         });
-        response.end(`${JSON.stringify(audit)}\n`);
+        response.end(`${JSON.stringify(exportedAudit)}\n`);
         return;
       }
 

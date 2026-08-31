@@ -223,7 +223,29 @@ test("makes durable authority visible, revocable, and exportable", async ({ page
     { id: "rule-allow", projectId: project.id, effect: "allow", duration: "project", capability: "command", source: "terminal", scope: ". · npm run check", createdAt: "2026-08-31T10:00:00.000Z" },
     { id: "rule-deny", projectId: otherProject.id, sessionId: "session-other", effect: "deny", duration: "session", capability: "browser", source: "browser", scope: "https://example.com/review", createdAt: "2026-08-30T10:00:00.000Z" },
   ];
+  let teamPolicyState: Record<string, unknown> = {
+    status: "active",
+    policy: {
+      kind: "vraxis.team-policy",
+      version: 1,
+      policyId: "policy-example",
+      artifactId: "a".repeat(64),
+      organization: "Example Engineering",
+      issuedAt: "2026-08-31T10:00:00.000Z",
+      rules: [
+        { id: "command:ask", capability: "command", effect: "ask", reason: "Commands require a fresh decision." },
+        { id: "credentials:deny", capability: "credentials", effect: "deny", reason: "Credentials are blocked." },
+      ],
+      signerKeyId: "b".repeat(64),
+      signerLabel: "Security team",
+      status: "active",
+    },
+  };
   await routeProofTrust(page);
+  await page.route("**/api/team-policy", async (route) => {
+    if (route.request().method() === "DELETE") teamPolicyState = { status: "none" };
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(teamPolicyState) });
+  });
   await page.route("**/api/bootstrap", async (route) => route.fulfill({
     status: 200,
     contentType: "application/json",
@@ -258,6 +280,13 @@ test("makes durable authority visible, revocable, and exportable", async ({ page
   await expect(center.getByText(". · npm run check", { exact: true })).toBeVisible();
   await expect(center.getByText("other-project · this task", { exact: false })).toBeVisible();
 
+  const teamPolicy = page.locator(".team-policy");
+  await expect(teamPolicy.getByRole("heading", { name: "Team policy" })).toBeVisible();
+  await expect(teamPolicy.getByText("Example Engineering", { exact: true })).toBeVisible();
+  await expect(teamPolicy.getByText("Signed by Security team", { exact: true })).toBeVisible();
+  await expect(teamPolicy.getByText("Always ask", { exact: true })).toBeVisible();
+  await expect(teamPolicy.getByText("Blocked", { exact: true })).toBeVisible();
+
   const auditDownload = page.waitForEvent("download");
   await page.getByRole("button", { name: "Download audit" }).click();
   await expect((await auditDownload).suggestedFilename()).toMatch(/approval-policy-.*\.json$/);
@@ -266,6 +295,11 @@ test("makes durable authority visible, revocable, and exportable", async ({ page
   await allowedRule.getByRole("button", { name: "Revoke" }).click();
   await expect(page.getByText("The next matching action will ask for approval again.")).toBeVisible();
   await expect(page.getByText(". · npm run check", { exact: true })).toHaveCount(0);
+  await teamPolicy.getByRole("button", { name: "Remove policy" }).click();
+  await expect(teamPolicy.getByText("Removing this policy widens local authority.", { exact: false })).toBeVisible();
+  await teamPolicy.getByRole("button", { name: "Remove policy" }).click();
+  await expect(teamPolicy.getByText("No team policy", { exact: true })).toBeVisible();
+  await expect(teamPolicy.getByText("The team policy was removed. Local approval decisions apply again.", { exact: true })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("permission-center.png"), fullPage: true });
   expect(browserErrors).toEqual([]);
 });

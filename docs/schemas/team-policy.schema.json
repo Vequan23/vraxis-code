@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vraxis.dev/schemas/team-policy.schema.json",
+  "title": "Vraxis Code signed team policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "version", "policyId", "organization", "issuedAt", "rules", "artifactId", "integrity"],
+  "properties": {
+    "kind": { "const": "vraxis.team-policy" },
+    "version": { "const": 1 },
+    "policyId": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "organization": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "issuedAt": { "type": "string", "format": "date-time", "maxLength": 40 },
+    "expiresAt": { "type": "string", "format": "date-time", "maxLength": 40 },
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 7,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "capability", "effect", "reason"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "capability": { "enum": ["write", "command", "network", "browser", "credentials", "destructive", "other"] },
+          "effect": { "enum": ["ask", "deny"] },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 240 }
+        }
+      }
+    },
+    "artifactId": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "integrity": { "$ref": "#/$defs/integrity" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "canonicalization", "digestAlgorithm", "digest", "signature", "publicKey", "publicKeyFormat", "keyId"],
+      "properties": {
+        "algorithm": { "const": "Ed25519" },
+        "canonicalization": { "const": "vraxis-json-c14n-v1" },
+        "digestAlgorithm": { "const": "SHA-256" },
+        "digest": { "$ref": "#/$defs/digest" },
+        "signature": { "type": "string", "minLength": 1, "maxLength": 512, "contentEncoding": "base64" },
+        "publicKey": { "type": "string", "minLength": 1, "maxLength": 4096, "contentEncoding": "base64" },
+        "publicKeyFormat": { "const": "spki-base64" },
+        "keyId": { "$ref": "#/$defs/digest" }
+      }
+    }
+  }
+}

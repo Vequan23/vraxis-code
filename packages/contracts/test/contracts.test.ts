@@ -9,8 +9,10 @@ import {
   parseBrowserActionRequest,
   parseCommandRequest,
   parseConnectModelProviderRequest,
+  parseCreateTeamPolicyRequest,
   parseCreateSessionRequest,
   parseRegisterProjectRequest,
+  parseTeamPolicyBundle,
   parseUpdateSettingsRequest,
 } from "../src/index.js";
 
@@ -196,4 +198,45 @@ test("parses model provider connections without inventing optional fields", () =
     model: "glm-4.7-flash",
   });
   assert.throws(() => parseConnectModelProviderRequest({ provider: "unknown" }), /not supported/);
+});
+
+test("parses bounded team-policy requests and signed bundles", () => {
+  assert.deepEqual(parseCreateTeamPolicyRequest({
+    organization: "Example Engineering",
+    rules: [
+      { capability: "credentials", effect: "deny" },
+      { capability: "command", effect: "ask" },
+    ],
+  }), {
+    organization: "Example Engineering",
+    rules: [
+      { capability: "credentials", effect: "deny" },
+      { capability: "command", effect: "ask" },
+    ],
+  });
+  const bundle = parseTeamPolicyBundle({
+    kind: "vraxis.team-policy",
+    version: 1,
+    policyId: "policy-1",
+    organization: "Example Engineering",
+    issuedAt: "2026-08-31T12:00:00.000Z",
+    rules: [{ id: "credentials:deny", capability: "credentials", effect: "deny", reason: "Credentials stay local." }],
+    artifactId: `sha256:${"a".repeat(64)}`,
+    integrity: {
+      algorithm: "Ed25519",
+      canonicalization: "vraxis-json-c14n-v1",
+      digestAlgorithm: "SHA-256",
+      digest: "a".repeat(64),
+      signature: "signature",
+      publicKey: "public-key",
+      publicKeyFormat: "spki-base64",
+      keyId: "b".repeat(64),
+    },
+  });
+  assert.equal(bundle.rules[0]?.effect, "deny");
+  assert.throws(() => parseCreateTeamPolicyRequest({
+    organization: "Example Engineering",
+    rules: [{ capability: "command", effect: "ask" }, { capability: "command", effect: "deny" }],
+  }), /duplicated/);
+  assert.throws(() => parseTeamPolicyBundle({ kind: "vraxis.team-policy", version: 2 }), /not supported/);
 });

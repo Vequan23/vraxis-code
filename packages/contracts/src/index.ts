@@ -358,6 +358,7 @@ export interface ActivityEvent {
 }
 
 export type ApprovalCapability = "write" | "command" | "network" | "browser" | "credentials" | "destructive" | "other";
+export const approvalCapabilities: ApprovalCapability[] = ["write", "command", "network", "browser", "credentials", "destructive", "other"];
 export type ApprovalRisk = "low" | "medium" | "high";
 export type ApprovalState = "pending" | "approved" | "denied" | "executing" | "completed" | "failed" | "interrupted";
 export type ApprovalRuleEffect = "deny" | "ask" | "allow";
@@ -379,6 +380,13 @@ export interface ApprovalSummary {
   failure?: string;
   matchedRuleId?: string;
   rememberable?: boolean;
+  teamPolicy?: {
+    artifactId: string;
+    policyId: string;
+    organization: string;
+    ruleId: string;
+    effect: "ask" | "deny";
+  };
 }
 
 export interface ApprovalRuleSummary {
@@ -405,6 +413,7 @@ export interface ApprovalPolicyAuditV1 {
     denied: number;
   };
   rules: ApprovalRuleSummary[];
+  teamPolicy?: TeamPolicySummary;
 }
 
 export interface ApprovalDecisionRequest {
@@ -743,6 +752,48 @@ export interface TaskProofIntegrityV1 {
   keyId: string;
 }
 
+export type TeamPolicyEffect = "ask" | "deny";
+
+export interface TeamPolicyRuleV1 {
+  id: string;
+  capability: ApprovalCapability;
+  effect: TeamPolicyEffect;
+  reason: string;
+}
+
+export interface TeamPolicyPayloadV1 {
+  kind: "vraxis.team-policy";
+  version: 1;
+  policyId: string;
+  organization: string;
+  issuedAt: string;
+  expiresAt?: string;
+  rules: TeamPolicyRuleV1[];
+}
+
+export interface TeamPolicyBundleV1 extends TeamPolicyPayloadV1 {
+  artifactId: string;
+  integrity: TaskProofIntegrityV1;
+}
+
+export interface TeamPolicyCreateRequest {
+  organization: string;
+  expiresAt?: string;
+  rules: Array<Pick<TeamPolicyRuleV1, "capability" | "effect">>;
+}
+
+export interface TeamPolicySummary extends TeamPolicyPayloadV1 {
+  artifactId: string;
+  signerKeyId: string;
+  signerLabel: string;
+  status: "active" | "expired" | "untrusted";
+}
+
+export interface TeamPolicyState {
+  status: "none" | TeamPolicySummary["status"];
+  policy?: TeamPolicySummary;
+}
+
 export type TaskEvidenceKindV1 = "change" | "terminal" | "approval" | "browser";
 
 export interface TaskEvidenceLinkV1 {
@@ -1007,6 +1058,74 @@ function boundedString(value: unknown, label: string, maximumLength: number, all
   return result;
 }
 
+function approvalCapability(value: unknown, label: string): ApprovalCapability {
+  const candidate = boundedString(value, label, 32);
+  if (!approvalCapabilities.includes(candidate as ApprovalCapability)) throw new TypeError(`${label} is not supported.`);
+  return candidate as ApprovalCapability;
+}
+
+function teamPolicyEffect(value: unknown, label: string): TeamPolicyEffect {
+  if (value !== "ask" && value !== "deny") throw new TypeError(`${label} must be ask or deny.`);
+  return value;
+}
+
+function teamPolicyDate(value: unknown, label: string): string {
+  const candidate = boundedString(value, label, 40);
+  if (!Number.isFinite(Date.parse(candidate))) throw new TypeError(`${label} must be an ISO date.`);
+  return candidate;
+}
+
+function teamPolicyRules(value: unknown, includeSignedFields: boolean): TeamPolicyRuleV1[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > approvalCapabilities.length) {
+    throw new TypeError(`Team policy rules must contain between 1 and ${approvalCapabilities.length} entries.`);
+  }
+  const seen = new Set<ApprovalCapability>();
+  return value.map((item, index) => {
+    const input = record(item, `Team policy rule ${index + 1}`);
+    const capability = approvalCapability(input.capability, `Team policy rule ${index + 1} capability`);
+    if (seen.has(capability)) throw new TypeError(`Team policy capability ${capability} is duplicated.`);
+    seen.add(capability);
+    const effect = teamPolicyEffect(input.effect, `Team policy rule ${index + 1} effect`);
+    return {
+      id: includeSignedFields
+        ? boundedString(input.id, `Team policy rule ${index + 1} ID`, 64)
+        : `${capability}:${effect}`,
+      capability,
+      effect,
+      reason: includeSignedFields
+        ? boundedString(input.reason, `Team policy rule ${index + 1} reason`, 240)
+        : effect === "deny"
+          ? `${capability} actions are blocked by team policy.`
+          : `${capability} actions require a fresh decision under team policy.`,
+    };
+  });
+}
+
+function taskProofIntegrity(value: unknown): TaskProofIntegrityV1 {
+  const input = record(value, "Team policy integrity");
+  if (input.algorithm !== "Ed25519"
+    || input.canonicalization !== "vraxis-json-c14n-v1"
+    || input.digestAlgorithm !== "SHA-256"
+    || input.publicKeyFormat !== "spki-base64") {
+    throw new TypeError("Team policy integrity metadata is not supported.");
+  }
+  const digest = boundedString(input.digest, "Team policy digest", 64);
+  const keyId = boundedString(input.keyId, "Team policy signer key ID", 64);
+  if (!/^[0-9a-f]{64}$/.test(digest) || !/^[0-9a-f]{64}$/.test(keyId)) {
+    throw new TypeError("Team policy digest and signer key ID must be SHA-256 hex values.");
+  }
+  return {
+    algorithm: "Ed25519",
+    canonicalization: "vraxis-json-c14n-v1",
+    digestAlgorithm: "SHA-256",
+    digest,
+    signature: boundedString(input.signature, "Team policy signature", 512),
+    publicKey: boundedString(input.publicKey, "Team policy public key", 4_096),
+    publicKeyFormat: "spki-base64",
+    keyId,
+  };
+}
+
 function promptAttachments(value: unknown): PromptAttachment[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) throw new TypeError("Attachments must be an array.");
@@ -1172,6 +1291,44 @@ export function parseConnectModelProviderRequest(value: unknown): ConnectModelPr
   if (baseURL) result.baseURL = baseURL;
   if (model) result.model = model;
   return result;
+}
+
+export function parseCreateTeamPolicyRequest(value: unknown): TeamPolicyCreateRequest {
+  const input = record(value, "Team policy");
+  const expiresAt = input.expiresAt === undefined || input.expiresAt === ""
+    ? undefined
+    : teamPolicyDate(input.expiresAt, "Team policy expiration");
+  if (expiresAt && Date.parse(expiresAt) <= Date.now()) throw new TypeError("Team policy expiration must be in the future.");
+  return {
+    organization: boundedString(input.organization, "Team policy organization", 120),
+    ...(expiresAt ? { expiresAt } : {}),
+    rules: teamPolicyRules(input.rules, false).map(({ capability, effect }) => ({ capability, effect })),
+  };
+}
+
+export function parseTeamPolicyBundle(value: unknown): TeamPolicyBundleV1 {
+  const input = record(value, "Team policy bundle");
+  if (input.kind !== "vraxis.team-policy" || input.version !== 1) {
+    throw new TypeError("Team policy bundle kind or version is not supported.");
+  }
+  const issuedAt = teamPolicyDate(input.issuedAt, "Team policy issue date");
+  const expiresAt = input.expiresAt === undefined ? undefined : teamPolicyDate(input.expiresAt, "Team policy expiration");
+  if (expiresAt && Date.parse(expiresAt) <= Date.parse(issuedAt)) {
+    throw new TypeError("Team policy expiration must be later than its issue date.");
+  }
+  const artifactId = boundedString(input.artifactId, "Team policy artifact ID", 71);
+  if (!/^sha256:[0-9a-f]{64}$/.test(artifactId)) throw new TypeError("Team policy artifact ID is invalid.");
+  return {
+    kind: "vraxis.team-policy",
+    version: 1,
+    policyId: boundedString(input.policyId, "Team policy ID", 80),
+    organization: boundedString(input.organization, "Team policy organization", 120),
+    issuedAt,
+    ...(expiresAt ? { expiresAt } : {}),
+    rules: teamPolicyRules(input.rules, true),
+    artifactId,
+    integrity: taskProofIntegrity(input.integrity),
+  };
 }
 
 export function parseCommandRequest(value: unknown): CommandRequest {

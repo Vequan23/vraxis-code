@@ -17,6 +17,7 @@ All notable changes to Vraxis Code will be documented here. The project follows 
 - Published `@vraxis/agent-v@0.10.0` integration for governed local-harness MCP tools, scoped approvals, browser evidence, and project inspection.
 - Published `@vraxis/osx-components@0.12.2` integration that preserves native `title` behavior without Vue custom-element collision warnings.
 - Self-contained offline browser evidence replay with before/after playback, actor and approval provenance, embedded retained frames, and no external network authority.
+- Signed portable team-policy packs with trusted-signer import, ask-or-deny precedence, approval provenance, audit inclusion, and explicit local removal.
 
 ### Security
 
@@ -25,6 +26,7 @@ All notable changes to Vraxis Code will be documented here. The project follows 
 - Replace reusable plaintext Playwright profiles with ephemeral browser contexts and AES-256-GCM authentication-state envelopes whose keys live in the operating-system credential store and whose integrity is bound to the session identity.
 - Migrate legacy isolated browser profiles without external network access, retain the source profile owner-only for recovery, and fail closed when state decryption or integrity verification fails.
 - Flush encrypted browser authentication state and close live browser resources before a graceful service shutdown is marked complete.
+- Prevent imported team policy from granting authority: bundles can only force a fresh decision or deny a capability, and invalid, expired, or untrusted installed policy fails safe.
 
 ### Fixed
 
