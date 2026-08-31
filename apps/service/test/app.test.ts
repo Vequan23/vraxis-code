@@ -469,7 +469,10 @@ test("prepares runtime maintenance as a dedicated approval-gated terminal task",
   let completed: { terminalRuns: Array<{ status: string; output: string }>; events: Array<{ title: string }> } | undefined;
   for (let attempt = 0; attempt < 80; attempt += 1) {
     completed = await (await fetch(`${app.baseUrl}/api/bootstrap`)).json() as typeof completed;
-    if (completed?.terminalRuns[0]?.status === "success") break;
+    if (
+      completed?.terminalRuns[0]?.status === "success"
+      && completed.events.some((event) => event.title === "Runtime maintenance complete")
+    ) break;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   assert.equal(completed?.terminalRuns[0]?.status, "success");
