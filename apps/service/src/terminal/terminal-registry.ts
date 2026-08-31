@@ -93,6 +93,15 @@ interface ResolvedCommand {
   prefixArguments: string[];
 }
 
+export function terminatePty(
+  child: Pick<IPty, "kill">,
+  signal = "SIGTERM",
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform === "win32") child.kill();
+  else child.kill(signal);
+}
+
 function executableCandidates(executable: string, environment: Record<string, string>): string[] {
   const paths = isAbsolute(executable) || executable.includes("/") || executable.includes("\\")
     ? [resolve(executable)]
@@ -337,7 +346,7 @@ export class TerminalRegistry {
   }
 
   private terminateProcess(child: IPty, signal = "SIGTERM"): void {
-    child.kill(signal);
+    terminatePty(child, signal);
   }
 
   private closeDeadline(milliseconds: number): Promise<void> {

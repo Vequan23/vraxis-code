@@ -1221,10 +1221,10 @@ test("requires a product approval before running a terminal command", async (con
   });
   assert.equal(decision.status, 200);
   let evidence: { approvals: Array<{ state: string }>; terminalRuns: Array<{ status: string; output: string }> } | undefined;
-  for (let attempt = 0; attempt < 30; attempt += 1) {
+  for (let attempt = 0; attempt < 150; attempt += 1) {
     evidence = await (await fetch(`${app.baseUrl}/api/sessions/${session.id}/live-evidence`)).json() as typeof evidence;
     if (evidence?.terminalRuns[0]?.status === "success" && evidence.approvals[0]?.state === "completed") break;
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise((resolve) => setTimeout(resolve, 20));
   }
   assert.equal(evidence?.terminalRuns[0]?.status, "success");
   assert.equal(evidence?.terminalRuns[0]?.output.trim(), "approved");

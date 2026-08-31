@@ -10,7 +10,7 @@ import { LocalCliRuntimeEngine } from "@vraxis/agent-v/local-cli";
 import { executeAgentTool } from "@vraxis/agent-v/tools";
 import { ApprovalRegistry } from "../src/approvals/approval-registry.js";
 import { BrowserWorkspace } from "../src/browser/browser-workspace.js";
-import { commandArguments, TerminalRegistry } from "../src/terminal/terminal-registry.js";
+import { commandArguments, TerminalRegistry, terminatePty } from "../src/terminal/terminal-registry.js";
 import { createAgentTerminalTool } from "../src/terminal/agent-terminal-tool.js";
 import { ModelProviderRegistry } from "../src/model-providers/model-provider-registry.js";
 import { VraxisCodeRuntimeEngine } from "../src/runtimes/vraxis-code-runtime.js";
@@ -208,6 +208,11 @@ test("tokenizes and executes an approved command without a shell", async () => {
     ["C:\\Program Files\\nodejs\\node.exe", "-e", "console.log('ready')"],
   );
   assert.throws(() => commandArguments("node 'unfinished"), /unfinished quote/);
+  const terminationSignals: Array<string | undefined> = [];
+  const observedPty = { kill: (signal?: string) => { terminationSignals.push(signal); } };
+  terminatePty(observedPty, "SIGTERM", "win32");
+  terminatePty(observedPty, "SIGTERM", "linux");
+  assert.deepEqual(terminationSignals, [undefined, "SIGTERM"]);
   const root = await mkdtemp(join(tmpdir(), "vraxis-terminal-test-"));
   const terminal = new TerminalRegistry(root);
   const run = await terminal.prepare("session-1", "approval-1", "node -e \"console.log('ready')\"", ".");
