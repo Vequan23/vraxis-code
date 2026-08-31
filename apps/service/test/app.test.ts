@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { copyFile, mkdtemp, mkdir, readFile, realpath, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import {
@@ -33,7 +33,7 @@ async function fixture(
   await mkdir(join(project, ".idea"), { recursive: true });
   await writeFile(join(project, "src", "index.ts"), "export const ready = true;\n");
   await writeFile(join(project, ".idea", "workspace.xml"), "<project />\n");
-  const server = createServer(createApp({
+  const application = createApp({
     dataDirectory,
     discover: async () => [{
       id: "codex",
@@ -47,11 +47,23 @@ async function fixture(
     discoverSkills: async () => ({ generatedAt: new Date().toISOString(), skills: [], sources: [], unresolvedSources: [] }),
     ...providerOptions,
     ...(folderPicker ? { folderPicker } : {}),
-  }));
+  });
+  const server = createServer(application);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Test service did not start.");
-  return { project, dataDirectory, server, baseUrl: `http://127.0.0.1:${address.port}` };
+  return {
+    project,
+    dataDirectory,
+    server,
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    async close() {
+      const closed = new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      server.closeAllConnections();
+      await closed;
+      await application.close();
+    },
+  };
 }
 
 const execFileAsync = promisify(execFile);
@@ -104,7 +116,7 @@ test("uses the system folder chooser to register a browser project", async (cont
   let selectedProject = "";
   const app = await fixture(async () => selectedProject);
   selectedProject = app.project;
-  context.after(() => app.server.close());
+  context.after(() => app.close());
 
   const response = await fetch(`${app.baseUrl}/api/projects/pick-folder`, { method: "POST" });
   const result = await response.json() as { cancelled: boolean; project?: { path: string } };
@@ -115,7 +127,7 @@ test("uses the system folder chooser to register a browser project", async (cont
 
 test("leaves project state unchanged when the system folder chooser is cancelled", async (context) => {
   const app = await fixture(async () => null);
-  context.after(() => app.server.close());
+  context.after(() => app.close());
 
   const response = await fetch(`${app.baseUrl}/api/projects/pick-folder`, { method: "POST" });
   assert.deepEqual(await response.json(), { cancelled: true });
@@ -125,7 +137,7 @@ test("leaves project state unchanged when the system folder chooser is cancelled
 
 test("registers and reopens a project with indexed files", async (context) => {
   const app = await fixture();
-  context.after(() => app.server.close());
+  context.after(() => app.close());
   const registered = await fetch(`${app.baseUrl}/api/projects`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -140,7 +152,7 @@ test("registers and reopens a project with indexed files", async (context) => {
 
 test("previews text files inside the approved project and rejects escaping symlinks", async (context) => {
   const app = await fixture();
-  context.after(() => app.server.close());
+  context.after(() => app.close());
   const outside = join(await mkdtemp(join(tmpdir(), "vraxis-code-outside-")), "secret.txt");
   await writeFile(outside, "not approved\n");
   await symlink(outside, join(app.project, "src", "outside.txt"));
@@ -165,7 +177,7 @@ test("previews text files inside the approved project and rejects escaping symli
 
 test("persists settings through the local service", async (context) => {
   const app = await fixture();
-  context.after(() => app.server.close());
+  context.after(() => app.close());
   const initial = await (await fetch(`${app.baseUrl}/api/bootstrap`)).json() as { settings: { theme: string } };
   assert.equal(initial.settings.theme, "graphite-dark");
   const updated = await fetch(`${app.baseUrl}/api/settings`, {
@@ -201,7 +213,7 @@ test("persists settings through the local service", async (context) => {
 
 test("rotates the local proof identity only after confirmation and returns a portable attestation", async (context) => {
   const app = await fixture();
-  context.after(() => app.server.close());
+  context.after(() => app.close());
   const before = await (await fetch(`${app.baseUrl}/api/proof/trust`)).json() as ProofTrustState;
 
   const unconfirmed = await fetch(`${app.baseUrl}/api/proof/rotate`, {
@@ -228,7 +240,7 @@ test("rotates the local proof identity only after confirmation and returns a por
 
 test("refreshes the local harness inventory on demand", async (context) => {
   const app = await fixture();
-  context.after(() => app.server.close());
+  context.after(() => app.close());
   const response = await fetch(`${app.baseUrl}/api/runtimes/refresh`, { method: "POST" });
   assert.equal(response.status, 200);
   const result = await response.json() as { runtimes: Array<{ id: string }> };
@@ -264,7 +276,7 @@ test("runs an explicit bounded runtime probe and persists version-bound conforma
       },
     },
   });
-  context.after(() => app.server.close());
+  context.after(() => app.close());
 
   const rejected = await fetch(`${app.baseUrl}/api/runtimes/codex/probe`, {
     method: "POST",
@@ -318,7 +330,7 @@ test("completes the clean-install journey from harness verification to portable 
       },
     },
   });
-  context.after(() => app.server.close());
+  context.after(() => app.close());
   await writeFile(join(app.project, "package.json"), JSON.stringify({
     name: "first-run-fixture",
     private: true,
@@ -398,7 +410,7 @@ test("completes the clean-install journey from harness verification to portable 
 test("exports the local proof identity and manages enrolled signer trust", async (context) => {
   const app = await fixture();
   const remoteRoot = await mkdtemp(join(tmpdir(), "vraxis-remote-proof-identity-"));
-  context.after(() => app.server.close());
+  context.after(() => app.close());
   const remoteIdentity = await new TaskProofSigner(remoteRoot).identity();
 
   const initial = await (await fetch(`${app.baseUrl}/api/proof/trust`)).json() as {
@@ -447,7 +459,7 @@ test("prepares runtime maintenance as a dedicated approval-gated terminal task",
       }],
     }],
   });
-  context.after(() => app.server.close());
+  context.after(() => app.close());
 
   const projectResponse = await fetch(`${app.baseUrl}/api/projects`, {
     method: "POST",
@@ -512,7 +524,7 @@ test("connects a direct model provider without exposing its credential", async (
     }), { status: 200, headers: { "content-type": "application/json" } });
   }) as typeof globalThis.fetch;
   const app = await fixture(undefined, new DeterministicCodingRuntimeEngine(), { credentialStore: credentials, providerFetch });
-  context.after(() => app.server.close());
+  context.after(() => app.close());
 
   const connectedResponse = await fetch(`${app.baseUrl}/api/model-providers`, {
     method: "POST",
@@ -558,14 +570,14 @@ test("connects a direct model provider without exposing its credential", async (
 
 test("rejects non-loopback origins", async (context) => {
   const app = await fixture();
-  context.after(() => app.server.close());
+  context.after(() => app.close());
   const response = await fetch(`${app.baseUrl}/api/health`, { headers: { origin: "https://example.com" } });
   assert.equal(response.status, 403);
 });
 
 test("applies a restrictive browser security policy to every local response", async (context) => {
   const app = await fixture();
-  context.after(() => app.server.close());
+  context.after(() => app.close());
   const response = await fetch(`${app.baseUrl}/api/health`);
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-security-policy") ?? "", /default-src 'self'/);
@@ -580,9 +592,15 @@ test("applies a restrictive browser security policy to every local response", as
 
 test("requires the desktop session before protected routes", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "vraxis-code-auth-"));
-  const server = createServer(createApp({ dataDirectory: root, desktopToken: "secret", discover: async () => [] }));
+  const application = createApp({ dataDirectory: root, desktopToken: "secret", discover: async () => [] });
+  const server = createServer(application);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  context.after(() => server.close());
+  context.after(async () => {
+    const closed = new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    server.closeAllConnections();
+    await closed;
+    await application.close();
+  });
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Test service did not start.");
   const baseUrl = `http://127.0.0.1:${address.port}`;
@@ -608,7 +626,7 @@ test("requires the desktop session before protected routes", async (context) => 
 test("executes an Ask task and restores its ordered agent-v events", async (context) => {
   const runtime = new DeterministicCodingRuntimeEngine();
   const app = await fixture(undefined, runtime);
-  context.after(() => app.server.close());
+  context.after(() => app.close());
   const projectResponse = await fetch(`${app.baseUrl}/api/projects`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -676,7 +694,7 @@ test("discovers, attaches, persists, and applies agent-v skills", async (context
   const skillRoot = "/private/skills/ux-fundamentals";
   const app = await fixture(undefined, runtime, {
     discoverSkills: async (options) => {
-      assert.ok(options?.cwd?.endsWith("/project"));
+      assert.equal(basename(options?.cwd ?? ""), "project");
       return {
         generatedAt: new Date().toISOString(),
         sources: [],
@@ -713,7 +731,7 @@ test("discovers, attaches, persists, and applies agent-v skills", async (context
       };
     },
   });
-  context.after(() => app.server.close());
+  context.after(() => app.close());
   const projectResponse = await fetch(`${app.baseUrl}/api/projects`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -776,7 +794,7 @@ test("discovers, attaches, persists, and applies agent-v skills", async (context
 test("imports external files with colliding names and requires destination consent", async (context) => {
   const runtime = new DeterministicCodingRuntimeEngine();
   const app = await fixture(undefined, runtime);
-  context.after(() => app.server.close());
+  context.after(() => app.close());
   const outsideDirectory = await mkdtemp(join(tmpdir(), "vraxis-code-attachments-"));
   const outsideFile = join(outsideDirectory, "notes.txt");
   await writeFile(outsideFile, "outside workspace\n");
@@ -860,7 +878,7 @@ test("imports external files with colliding names and requires destination conse
 test("runs Plan read-only and rejects Build when the runtime cannot write workspaces", async (context) => {
   const runtime = new DeterministicCodingRuntimeEngine();
   const app = await fixture(undefined, runtime);
-  context.after(() => app.server.close());
+  context.after(() => app.close());
   const projectResponse = await fetch(`${app.baseUrl}/api/projects`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -936,8 +954,9 @@ test("runs Build inside an isolated worktree and returns exact change evidence",
       capabilities: ["structured-output", "local-workspace", "read-only-workspace", "artifacts"],
     }],
   });
-  context.after(() => app.server.close());
+  context.after(() => app.close());
   await git(app.project, "init", "-b", "main");
+  await git(app.project, "config", "core.autocrlf", "false");
   await git(app.project, "config", "user.name", "Vraxis Test");
   await git(app.project, "config", "user.email", "test@vraxis.local");
   await git(app.project, "add", ".");
@@ -1095,8 +1114,9 @@ test("runs Build from a repository without a first commit", async (context) => {
       capabilities: ["structured-output", "local-workspace", "read-only-workspace", "workspace-write", "artifacts"],
     }],
   });
-  context.after(() => app.server.close());
+  context.after(() => app.close());
   await git(app.project, "init", "-b", "main");
+  await git(app.project, "config", "core.autocrlf", "false");
   const projectResponse = await fetch(`${app.baseUrl}/api/projects`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1134,7 +1154,7 @@ test("runs Build from a repository without a first commit", async (context) => {
 
 test("stops and resumes a running task without losing its history", async (context) => {
   const app = await fixture(undefined, new InterruptibleCodingRuntimeEngine());
-  context.after(() => app.server.close());
+  context.after(() => app.close());
   const projectResponse = await fetch(`${app.baseUrl}/api/projects`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1169,7 +1189,7 @@ test("stops and resumes a running task without losing its history", async (conte
 
 test("requires a product approval before running a terminal command", async (context) => {
   const app = await fixture();
-  context.after(() => app.server.close());
+  context.after(() => app.close());
   const projectResponse = await fetch(`${app.baseUrl}/api/projects`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1277,7 +1297,7 @@ test("runs a project-owned verification recipe through approvals and retains its
       timeoutMs: 10_000,
     }],
   }));
-  context.after(() => app.server.close());
+  context.after(() => app.close());
   const project = await (await fetch(`${app.baseUrl}/api/projects`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1380,7 +1400,7 @@ test("runs a project-owned verification recipe through approvals and retains its
 test("starts a declared service, proves loopback health, and tears it down after verification", async (context) => {
   const port = await freeLoopbackPort();
   const app = await fixture();
-  context.after(() => app.server.close());
+  context.after(() => app.close());
   await mkdir(join(app.project, ".vraxis"), { recursive: true });
   await writeFile(join(app.project, ".vraxis", "verify.json"), JSON.stringify({
     schemaVersion: 1,
@@ -1458,9 +1478,8 @@ test("evaluates project browser assertions against captured visible evidence", a
   const browserWorkspace = new BrowserWorkspace(browserRoot);
   const app = await fixture(undefined, new DeterministicCodingRuntimeEngine(), { browserWorkspace });
   context.after(async () => {
-    app.server.close();
-    pageServer.close();
-    await browserWorkspace.close();
+    await app.close();
+    await new Promise<void>((resolve, reject) => pageServer.close((error) => error ? reject(error) : resolve()));
   });
   await mkdir(join(app.project, ".vraxis"), { recursive: true });
   await writeFile(join(app.project, ".vraxis", "verify.json"), JSON.stringify({

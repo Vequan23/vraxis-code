@@ -1571,5 +1571,9 @@ export function createApp(options: AppOptions) {
       json(response, error instanceof TypeError ? 400 : 500, { error: message });
     }
   };
-  return Object.assign(app, { close: () => browser.close() });
+  return Object.assign(app, {
+    close: async () => {
+      await Promise.all([browser.close(), terminal.close()]);
+    },
+  });
 }

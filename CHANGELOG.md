@@ -29,3 +29,5 @@ All notable changes to Vraxis Code will be documented here. The project follows 
 ### Fixed
 
 - Build the private contracts workspace before Playwright starts so the browser suite is reliable on a clean clone instead of depending on stale local build output.
+- Preserve quoted Windows executable paths, resolve `PATHEXT` commands, and unwrap verified Node package-manager shims without granting a shell so governed terminal and verification commands work consistently across platforms.
+- Close live terminal processes, browser contexts, and test HTTP resources deterministically so shutdown receipts remain accurate and cross-platform quality jobs cannot be stranded by open handles.

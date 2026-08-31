@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
-import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { access, mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { basename, delimiter, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import type { TerminalRunSummary } from "@vraxis/code-contracts";
 import { spawn, type IPty } from "node-pty";
 
@@ -12,11 +12,33 @@ interface TerminalData {
 
 const emptyData: TerminalData = { schemaVersion: 1, runs: [] };
 const maximumOutputBytes = 1024 * 1024;
-const inheritedEnvironment = ["HOME", "LANG", "LC_ALL", "LOGNAME", "PATH", "SHELL", "TEMP", "TERM", "TMP", "TMPDIR", "USER"] as const;
+const inheritedEnvironment = [
+  "APPDATA",
+  "COLORTERM",
+  "COMSPEC",
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "LOGNAME",
+  "LOCALAPPDATA",
+  "PATH",
+  "PATHEXT",
+  "PROGRAMDATA",
+  "SHELL",
+  "SYSTEMROOT",
+  "TEMP",
+  "TERM",
+  "TMP",
+  "TMPDIR",
+  "USER",
+  "USERPROFILE",
+  "WINDIR",
+] as const;
 
 function commandEnvironment(): Record<string, string> {
   return Object.fromEntries(inheritedEnvironment.flatMap((name) => {
-    const value = process.env[name];
+    const value = process.env[name]
+      ?? Object.entries(process.env).find(([candidate]) => candidate.toUpperCase() === name)?.[1];
     return value === undefined ? [] : [[name, value]];
   }));
 }
@@ -26,14 +48,22 @@ export function commandArguments(command: string): string[] {
   let current = "";
   let quote: "'" | '"' | undefined;
   let escaping = false;
-  for (const character of command.trim()) {
+  const source = command.trim();
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]!;
     if (escaping) {
       current += character;
       escaping = false;
       continue;
     }
     if (character === "\\" && quote !== "'") {
-      escaping = true;
+      const next = source[index + 1];
+      const escapable = next === "\\" || next === '"' || (!quote && next !== undefined && /\s/.test(next));
+      if (escapable) {
+        escaping = true;
+        continue;
+      }
+      current += character;
       continue;
     }
     if (quote) {
@@ -58,14 +88,60 @@ export function commandArguments(command: string): string[] {
   return result;
 }
 
-async function resolveExecutable(executable: string, environment: Record<string, string>): Promise<string> {
-  const candidates = isAbsolute(executable) || executable.includes("/")
+interface ResolvedCommand {
+  executable: string;
+  prefixArguments: string[];
+}
+
+function executableCandidates(executable: string, environment: Record<string, string>): string[] {
+  const paths = isAbsolute(executable) || executable.includes("/") || executable.includes("\\")
     ? [resolve(executable)]
     : (environment.PATH ?? "").split(delimiter).filter(Boolean).map((directory) => resolve(directory, executable));
+  if (process.platform !== "win32" || extname(executable)) return paths;
+  const extensions = (environment.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+    .split(";")
+    .map((extension) => extension.trim().toLowerCase())
+    .filter((extension) => [".com", ".exe", ".bat", ".cmd"].includes(extension));
+  return paths.flatMap((candidate) => [candidate, ...extensions.map((extension) => `${candidate}${extension}`)]);
+}
+
+async function nodeShim(commandPath: string, environment: Record<string, string>): Promise<ResolvedCommand | undefined> {
+  if (process.platform !== "win32" || !/[.](?:cmd|bat)$/i.test(commandPath)) return undefined;
+  const source = await readFile(commandPath, "utf8");
+  if (Buffer.byteLength(source) > 64 * 1024) return undefined;
+  const matches = [...source.matchAll(/["']%dp0%[\\/]([^"']+[.](?:c?m?js))["']\s+%\*/gi)];
+  const shimName = basename(commandPath).replace(/[.](?:cmd|bat)$/i, "").toLowerCase();
+  const knownNpmEntry = shimName === "npm" || shimName === "npx"
+    ? `node_modules/npm/bin/${shimName}-cli.js`
+    : undefined;
+  const relativeEntry = matches.at(-1)?.[1] ?? knownNpmEntry;
+  if (!relativeEntry) return undefined;
+  const entry = resolve(dirname(commandPath), relativeEntry.replace(/[\\/]+/g, "/"));
+  try {
+    if (!(await stat(entry)).isFile()) return undefined;
+  } catch {
+    return undefined;
+  }
+  const node = await resolveExecutable("node", environment, false);
+  return { executable: node.executable, prefixArguments: [entry] };
+}
+
+async function resolveExecutable(
+  executable: string,
+  environment: Record<string, string>,
+  unwrapNodeShims = true,
+): Promise<ResolvedCommand> {
+  const candidates = executableCandidates(executable, environment);
   for (const candidate of candidates) {
     try {
-      await access(candidate, constants.X_OK);
-      return realpath(candidate);
+      await access(candidate, process.platform === "win32" ? constants.F_OK : constants.X_OK);
+      const actual = await realpath(candidate);
+      if (unwrapNodeShims && process.platform === "win32" && /[.](?:cmd|bat)$/i.test(actual)) {
+        const unwrapped = await nodeShim(actual, environment);
+        if (unwrapped) return unwrapped;
+        continue;
+      }
+      return { executable: actual, prefixArguments: [] };
     } catch {
       // Keep searching the inherited PATH without invoking a shell.
     }
@@ -77,6 +153,8 @@ export class TerminalRegistry {
   readonly file: string;
   private mutations: Promise<void> = Promise.resolve();
   private readonly processes = new Map<string, IPty>();
+  private readonly executions = new Map<string, Promise<TerminalRunSummary>>();
+  private readonly interrupted = new Set<string>();
 
   constructor(dataDirectory: string) {
     this.file = join(dataDirectory, "terminal-runs.json");
@@ -116,11 +194,11 @@ export class TerminalRegistry {
     const [executable, ...args] = commandArguments(prepared.command);
     if (!executable) throw new TypeError("Command executable is missing.");
     const environment = commandEnvironment();
-    const executablePath = await resolveExecutable(executable, environment);
+    const resolvedCommand = await resolveExecutable(executable, environment);
     const startedAt = Date.now();
     await this.update(id, { status: "running", startedAt: new Date(startedAt).toISOString() });
-    return new Promise((resolve) => {
-      const child = spawn(executablePath, args, {
+    const execution = new Promise<TerminalRunSummary>((resolve, reject) => {
+      const child = spawn(resolvedCommand.executable, [...resolvedCommand.prefixArguments, ...args], {
         cwd: absoluteCwd,
         env: environment,
         name: "xterm-256color",
@@ -164,14 +242,15 @@ export class TerminalRegistry {
       const timeout = setTimeout(() => terminate(), maximumDurationMs);
       const abort = () => terminate();
       abortSignal?.addEventListener("abort", abort, { once: true });
-      child.onExit(async ({ exitCode, signal }) => {
+      child.onExit(({ exitCode, signal }) => void (async () => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
         abortSignal?.removeEventListener("abort", abort);
         this.processes.delete(id);
         await persistOutput();
-        const status = signal ? "interrupted" : exitCode === 0 ? "success" : "error";
+        const status = signal || this.interrupted.has(id) ? "interrupted" : exitCode === 0 ? "success" : "error";
+        this.interrupted.delete(id);
         const run = await this.update(id, {
           status,
           output,
@@ -181,13 +260,16 @@ export class TerminalRegistry {
           outputTruncated: truncated,
         });
         resolve(run);
-      });
+      })().catch(reject));
     });
+    this.executions.set(id, execution);
+    return execution.finally(() => this.executions.delete(id));
   }
 
   async interrupt(id: string): Promise<void> {
     const child = this.processes.get(id);
     if (!child) throw new TypeError("This command is not running.");
+    this.interrupted.add(id);
     this.terminateProcess(child);
   }
 
@@ -218,6 +300,23 @@ export class TerminalRegistry {
     });
   }
 
+  async close(): Promise<void> {
+    const active = [...this.executions.values()];
+    for (const [id, child] of this.processes) {
+      this.interrupted.add(id);
+      this.terminateProcess(child);
+    }
+    if (active.length) {
+      const settled = Promise.allSettled(active);
+      await Promise.race([settled, this.closeDeadline(1_500)]);
+      if (this.processes.size) {
+        for (const child of this.processes.values()) this.terminateProcess(child, "SIGKILL");
+        await Promise.race([settled, this.closeDeadline(1_500)]);
+      }
+    }
+    await this.reconcile();
+  }
+
   async reconcile(): Promise<void> {
     await this.mutate((data) => {
       for (const run of data.runs) {
@@ -239,6 +338,13 @@ export class TerminalRegistry {
 
   private terminateProcess(child: IPty, signal = "SIGTERM"): void {
     child.kill(signal);
+  }
+
+  private closeDeadline(milliseconds: number): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, milliseconds);
+      timer.unref();
+    });
   }
 
   private async update(id: string, changes: Partial<TerminalRunSummary>): Promise<TerminalRunSummary> {

@@ -13,6 +13,7 @@ on:
 
 jobs:
   quality:
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -35,6 +36,7 @@ jobs:
 
   browser:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -47,6 +49,7 @@ jobs:
 
   desktop-smoke:
     name: Packaged desktop · ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -69,6 +72,7 @@ jobs:
   dependency-audit:
     name: Dependency vulnerability audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0

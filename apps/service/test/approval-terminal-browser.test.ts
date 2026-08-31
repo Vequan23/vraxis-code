@@ -197,6 +197,10 @@ test("fresh-only requests never match remembered destructive rules", async () =>
 
 test("tokenizes and executes an approved command without a shell", async () => {
   assert.deepEqual(commandArguments("node -e \"console.log('ready')\""), ["node", "-e", "console.log('ready')"]);
+  assert.deepEqual(
+    commandArguments(String.raw`"C:\\Program Files\\nodejs\\node.exe" -e "console.log('ready')"`),
+    ["C:\\Program Files\\nodejs\\node.exe", "-e", "console.log('ready')"],
+  );
   assert.throws(() => commandArguments("node 'unfinished"), /unfinished quote/);
   const root = await mkdtemp(join(tmpdir(), "vraxis-terminal-test-"));
   const terminal = new TerminalRegistry(root);
@@ -223,6 +227,21 @@ test("streams bounded terminal output while a command is still running", async (
   const completed = await execution;
   assert.equal(completed.status, "success");
   assert.match(completed.output, /first.*second/s);
+});
+
+test("interrupts and retains active terminal work during graceful application shutdown", async () => {
+  const root = await mkdtemp(join(tmpdir(), "vraxis-terminal-close-test-"));
+  const terminal = new TerminalRegistry(root);
+  const run = await terminal.prepare("session-close", "approval-close", "node -e \"setInterval(() => {}, 1000)\"", ".");
+  const execution = terminal.execute(run.id, root);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if ((await terminal.list("session-close"))[0]?.status === "running") break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  await terminal.close();
+  const completed = await execution;
+  assert.equal(completed.status, "interrupted");
+  assert.equal((await terminal.list("session-close"))[0]?.status, "interrupted");
 });
 
 test("accepts interactive PTY input and persists its replay", async () => {
