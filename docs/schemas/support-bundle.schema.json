@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vraxis.dev/schemas/support-bundle.schema.json",
+  "title": "Vraxis Code privacy-bounded support bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "version", "generatedAt", "application", "environment", "inventory", "recovery", "security"],
+  "properties": {
+    "kind": { "const": "vraxis.support-bundle" },
+    "version": { "const": 1 },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "application": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "contractVersion"],
+      "properties": {
+        "name": { "const": "Vraxis Code" },
+        "version": { "$ref": "#/$defs/label" },
+        "contractVersion": { "$ref": "#/$defs/count" }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "architecture", "node", "desktop"],
+      "properties": {
+        "platform": { "$ref": "#/$defs/label" },
+        "architecture": { "$ref": "#/$defs/label" },
+        "node": { "$ref": "#/$defs/label" },
+        "desktop": { "type": "boolean" }
+      }
+    },
+    "inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projects", "sessions", "runtimes"],
+      "properties": {
+        "projects": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["total", "ready", "unavailable"],
+          "properties": {
+            "total": { "$ref": "#/$defs/count" },
+            "ready": { "$ref": "#/$defs/count" },
+            "unavailable": { "$ref": "#/$defs/count" }
+          }
+        },
+        "sessions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["idle", "running", "interrupted", "failed"],
+          "properties": {
+            "idle": { "$ref": "#/$defs/count" },
+            "running": { "$ref": "#/$defs/count" },
+            "interrupted": { "$ref": "#/$defs/count" },
+            "failed": { "$ref": "#/$defs/count" }
+          }
+        },
+        "runtimes": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "name", "availability"],
+            "properties": {
+              "id": { "$ref": "#/$defs/label" },
+              "name": { "$ref": "#/$defs/label" },
+              "availability": { "enum": ["missing", "installed", "setup-required"] },
+              "version": { "$ref": "#/$defs/label" },
+              "authentication": { "enum": ["authenticated", "required", "unknown", "not-required"] },
+              "updateStatus": { "enum": ["available", "current", "unknown"] },
+              "conformance": { "enum": ["unverified", "ready", "limited", "failed", "stale"] }
+            }
+          }
+        }
+      }
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["previousUnexpectedExit", "approvalsInterrupted", "terminalRunsInterrupted", "verificationsInterrupted", "worktreesNeedingReview"],
+      "properties": {
+        "previousUnexpectedExit": { "type": "boolean" },
+        "approvalsInterrupted": { "$ref": "#/$defs/count" },
+        "terminalRunsInterrupted": { "$ref": "#/$defs/count" },
+        "verificationsInterrupted": { "$ref": "#/$defs/count" },
+        "worktreesNeedingReview": { "$ref": "#/$defs/count" }
+      }
+    },
+    "security": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["loopbackOnly", "desktopSessionProtected", "rendererNodeAccess", "includesProjectContent", "includesCredentials"],
+      "properties": {
+        "loopbackOnly": { "const": true },
+        "desktopSessionProtected": { "type": "boolean" },
+        "rendererNodeAccess": { "const": false },
+        "includesProjectContent": { "const": false },
+        "includesCredentials": { "const": false }
+      }
+    }
+  },
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0 },
+    "label": { "type": "string", "minLength": 1, "maxLength": 1024 }
+  }
+}

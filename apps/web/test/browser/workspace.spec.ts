@@ -351,6 +351,51 @@ test("enrolls a proof signer and verifies an exported proof without exposing pri
   expect(browserErrors).toEqual([]);
 });
 
+test("hands off a privacy-preserving incident report without automatic upload", async ({ page, context }) => {
+  const browserErrors = collectBrowserErrors(page);
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  const bundle = {
+    kind: "vraxis.support-bundle",
+    version: 1,
+    generatedAt: "2026-08-31T12:00:00.000Z",
+    application: { name: "Vraxis Code", version: "0.1.0", contractVersion: 24 },
+    environment: { platform: "darwin", architecture: "arm64", node: "22.14.0", desktop: true },
+    inventory: {
+      projects: { total: 1, ready: 1, unavailable: 0 },
+      sessions: { idle: 0, running: 0, failed: 0, interrupted: 1 },
+      runtimes: [{ id: "codex", name: "Codex CLI", availability: "installed", version: "0.149.1" }],
+    },
+    recovery: { previousUnexpectedExit: true, approvalsInterrupted: 1, terminalRunsInterrupted: 1, verificationsInterrupted: 0, worktreesNeedingReview: 1 },
+    security: { loopbackOnly: true, desktopSessionProtected: true, rendererNodeAccess: false, includesProjectContent: false, includesCredentials: false },
+  };
+  await page.route("**/api/support-bundle", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/vnd.vraxis.support-bundle+json",
+    headers: { "content-disposition": 'attachment; filename="vraxis-code-support-2026-08-31.json"' },
+    body: JSON.stringify(bundle),
+  }));
+  await context.route("https://github.com/**", async (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<title>Bug report</title>" }));
+
+  await page.goto("/?preview=project");
+  await page.getByRole("button", { name: "Settings" }).click();
+  const section = page.locator(".support-diagnostics");
+  await section.getByRole("button", { name: "Copy safe summary" }).click();
+  const clipboard = await page.evaluate(() => navigator.clipboard.readText());
+  expect(clipboard).toContain("Unexpected previous exit: yes");
+  expect(clipboard).toContain("Codex CLI (installed, 0.149.1)");
+  expect(clipboard).toContain("no project content, paths, prompts, commands, output, browser content, or credentials");
+  expect(clipboard).not.toContain("secret");
+
+  const download = page.waitForEvent("download");
+  await section.getByRole("button", { name: "Export support bundle" }).click();
+  expect((await download).suggestedFilename()).toBe("vraxis-code-support-2026-08-31.json");
+
+  const popup = page.waitForEvent("popup");
+  await section.getByRole("button", { name: "Open bug report" }).click();
+  await expect(await popup).toHaveURL("https://github.com/Vequan23/vraxis-code/issues/new?template=bug.yml");
+  expect(browserErrors).toEqual([]);
+});
+
 test("reopens the exact signed-proof evidence target without reloading the task flow", async ({ page }) => {
   const browserErrors = collectBrowserErrors(page);
   const project = { id: "project-evidence", name: "evidence-project", path: "/Users/engineer/evidence-project", branch: "main", status: "ready" };

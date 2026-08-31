@@ -25,6 +25,8 @@ Public macOS releases use a tag-gated, fail-closed signing and notarization work
 
 Core product states run through automated WCAG 2.0/2.1 A and AA checks in Playwright. The [accessibility quality contract](docs/product/accessibility.md) records automated coverage and the manual assistive-technology checks still required for a stable release.
 
+Unexpected exits can be handed off through [privacy-bounded recovery diagnostics](docs/product/recovery-diagnostics.md): copy a safe incident summary, export a versioned local support bundle, or open the public bug form. No report or local artifact is uploaded automatically.
+
 ## Repository map
 
 ```text

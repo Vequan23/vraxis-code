@@ -62,6 +62,12 @@ body:
       label: Expected behavior
     validations:
       required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Safe incident summary or reviewed support bundle
+      description: Paste the safe summary from Recovery & diagnostics, or drag in the exported JSON after reviewing it. Do not attach raw logs or private task evidence.
+      placeholder: Optional. Generated locally by Vraxis Code.
   - type: checkboxes
     id: safety
     attributes:

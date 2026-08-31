@@ -20,6 +20,7 @@ All notable changes to Vraxis Code will be documented here. The project follows 
 - Signed portable team-policy packs with trusted-signer import, ask-or-deny precedence, approval provenance, audit inclusion, and explicit local removal.
 - Tag-gated macOS release automation that requires signing and notarization, reruns quality and browser gates, verifies artifact identity, size, SHA-256, and download URL, and refuses unsigned publication.
 - Automated axe WCAG 2.0/2.1 A and AA regression coverage across onboarding, the active workspace, all evidence views, and Settings, including open osx Components shadow roots.
+- User-mediated incident reporting with a safe clipboard summary, versioned privacy-bounded support bundle, and empty public bug-report handoff that never uploads local data automatically.
 
 ### Security
 
