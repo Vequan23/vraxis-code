@@ -19,6 +19,7 @@ All notable changes to Vraxis Code will be documented here. The project follows 
 - Self-contained offline browser evidence replay with before/after playback, actor and approval provenance, embedded retained frames, and no external network authority.
 - Signed portable team-policy packs with trusted-signer import, ask-or-deny precedence, approval provenance, audit inclusion, and explicit local removal.
 - Tag-gated macOS release automation that requires signing and notarization, reruns quality and browser gates, verifies artifact identity, size, SHA-256, and download URL, and refuses unsigned publication.
+- Automated axe WCAG 2.0/2.1 A and AA regression coverage across onboarding, the active workspace, all evidence views, and Settings, including open osx Components shadow roots.
 
 ### Security
 

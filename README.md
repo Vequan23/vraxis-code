@@ -23,6 +23,8 @@ npm run check
 
 Public macOS releases use a tag-gated, fail-closed signing and notarization workflow. See the [release procedure](docs/product/releasing.md) for required secrets, artifact verification, and the current update-delivery boundary.
 
+Core product states run through automated WCAG 2.0/2.1 A and AA checks in Playwright. The [accessibility quality contract](docs/product/accessibility.md) records automated coverage and the manual assistive-technology checks still required for a stable release.
+
 ## Repository map
 
 ```text
