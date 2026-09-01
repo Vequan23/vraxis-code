@@ -693,6 +693,11 @@ export interface StartupRecoverySummary {
 
 export interface BootstrapState {
   contractVersion: typeof contractVersion;
+  realtime?: {
+    sessionEvents: boolean;
+    terminalOutput: boolean;
+    reconnectSnapshots: boolean;
+  };
   projects: ProjectSummary[];
   sessions: SessionSummary[];
   runtimes: RuntimeSummary[];
@@ -736,6 +741,13 @@ export interface SessionLiveEvidenceResponse {
   verificationRuns?: VerificationRunSummary[];
   verificationHandoffs?: VerificationHandoffSummary[];
   browser?: BrowserSessionSummary;
+}
+
+export interface SessionStreamPayload {
+  session: SessionSummary;
+  events: ActivityEvent[];
+  evidence: SessionLiveEvidenceResponse;
+  cursor: number;
 }
 
 export interface TaskReceiptV1 {

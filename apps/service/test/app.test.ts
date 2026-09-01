@@ -83,6 +83,64 @@ test("exposes graceful resource shutdown for the service host", async () => {
   assert.equal(browser.closed, true);
 });
 
+test("advertises and streams reconnectable session updates", async (context) => {
+  const app = await fixture();
+  context.after(() => app.close());
+  const registered = await fetch(`${app.baseUrl}/api/projects`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path: app.project }),
+  });
+  const project = await registered.json() as { id: string };
+  const created = await fetch(`${app.baseUrl}/api/sessions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ projectId: project.id, mode: "ask", runtimeId: "codex", prompt: "First question" }),
+  });
+  const session = await created.json() as { id: string };
+  await waitForIdle(app.baseUrl);
+
+  const bootstrap = await (await fetch(`${app.baseUrl}/api/bootstrap`)).json() as {
+    realtime?: { sessionEvents: boolean; terminalOutput: boolean; reconnectSnapshots: boolean };
+  };
+  assert.deepEqual(bootstrap.realtime, {
+    sessionEvents: true,
+    terminalOutput: true,
+    reconnectSnapshots: true,
+  });
+
+  const abort = new AbortController();
+  context.after(() => abort.abort());
+  const response = await fetch(`${app.baseUrl}/api/sessions/${session.id}/stream`, { signal: abort.signal });
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /text\/event-stream/);
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let streamText = "";
+  const readUntil = async (pattern: RegExp): Promise<void> => {
+    while (!pattern.test(streamText)) {
+      const result = await Promise.race([
+        reader.read(),
+        new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Session stream timed out.")), 1_000)),
+      ]);
+      if (result.done) break;
+      streamText += decoder.decode(result.value, { stream: true });
+    }
+    assert.match(streamText, pattern);
+  };
+  await readUntil(/event: snapshot[\s\S]*First question/);
+
+  const appended = await fetch(`${app.baseUrl}/api/sessions/${session.id}/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Follow-up question" }),
+  });
+  assert.equal(appended.status, 201);
+  await readUntil(/event: update[\s\S]*Follow-up question/);
+  assert.match(streamText, /"evidence":\{"approvals":\[\]/);
+  abort.abort();
+});
+
 async function git(cwd: string, ...args: string[]): Promise<string> {
   const result = await execFileAsync("git", args, { cwd, encoding: "utf8" });
   return result.stdout.trim();

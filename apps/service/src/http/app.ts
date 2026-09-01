@@ -20,6 +20,8 @@ import {
   type AttachmentHandoffConsent,
   type ApprovalSummary,
   type PromptAttachment,
+  type SessionLiveEvidenceResponse,
+  type SessionStreamPayload,
   type SessionSummary,
   type TaskProofEnvelopeV1,
   type TaskReceiptV1,
@@ -515,6 +517,26 @@ export function createApp(options: AppOptions) {
     }
   }
 
+  async function sessionLiveEvidence(sessionId: string): Promise<SessionLiveEvidenceResponse> {
+    const session = await sessions.get(sessionId);
+    const [browserState, sessionApprovals, approvalRules, terminalRuns, verificationRuns, verificationHandoffs] = await Promise.all([
+      browser.state(sessionId),
+      approvals.list(sessionId),
+      approvals.listRules(session.projectId, session.id),
+      terminal.list(sessionId),
+      verifications.list(sessionId),
+      verifications.listHandoffs(sessionId),
+    ]);
+    return {
+      approvals: sessionApprovals,
+      approvalRules,
+      terminalRuns,
+      verificationRuns,
+      verificationHandoffs,
+      ...(browserState ? { browser: browserState } : {}),
+    };
+  }
+
   async function taskReceipt(sessionId: string): Promise<TaskReceiptV1> {
     const session = await sessions.get(sessionId);
     const projectData = await registry.read();
@@ -699,6 +721,11 @@ export function createApp(options: AppOptions) {
         ]);
         const state: BootstrapState = {
           contractVersion,
+          realtime: {
+            sessionEvents: true,
+            terminalOutput: true,
+            reconnectSnapshots: true,
+          },
           projects: data.projects,
           sessions: sessionData.sessions,
           runtimes: withProductCapabilityMatrix([...localRuntimes, ...providerRuntimes]),
@@ -1007,18 +1034,70 @@ export function createApp(options: AppOptions) {
         return;
       }
 
+      const sessionStreamMatch = /^\/api\/sessions\/([^/]+)\/stream$/.exec(url.pathname);
+      if (request.method === "GET" && sessionStreamMatch?.[1]) {
+        const sessionId = sessionStreamMatch[1];
+        const buffered: Parameters<Parameters<typeof sessions.subscribe>[1]>[0][] = [];
+        let ready = false;
+        let closed = false;
+        let delivery = Promise.resolve();
+        const send = (event: "snapshot" | "update", payload: SessionStreamPayload) => {
+          if (closed) return;
+          response.write(`id: ${payload.cursor}\nevent: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+        };
+        const deliver = (update: Parameters<Parameters<typeof sessions.subscribe>[1]>[0]) => {
+          delivery = delivery.then(async () => {
+            if (closed) return;
+            send("update", { ...update, evidence: await sessionLiveEvidence(sessionId) });
+          }).catch(() => {
+            if (!closed) response.write("event: refresh\ndata: {}\n\n");
+          });
+        };
+        const unsubscribe = sessions.subscribe(sessionId, (update) => {
+          if (ready) deliver(update);
+          else buffered.push(update);
+        });
+        let heartbeat: ReturnType<typeof setInterval> | undefined;
+        try {
+          const snapshot = await sessions.streamSnapshot(sessionId);
+          const evidence = await sessionLiveEvidence(sessionId);
+          response.writeHead(200, {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-store",
+            connection: "keep-alive",
+            "x-accel-buffering": "no",
+          });
+          response.write("retry: 1000\n\n");
+          send("snapshot", { ...snapshot, evidence });
+          ready = true;
+          for (const update of buffered) {
+            if (JSON.stringify(update.session) !== JSON.stringify(snapshot.session)
+              || update.cursor > snapshot.cursor || update.events.some((event) => {
+              const snapshotted = snapshot.events.find((item) => item.id === event.id);
+              return !snapshotted || JSON.stringify(snapshotted) !== JSON.stringify(event);
+            })) {
+              deliver(update);
+            }
+          }
+          heartbeat = setInterval(() => {
+            if (!closed) response.write(": keep-alive\n\n");
+          }, 15_000);
+          heartbeat.unref();
+        } catch (error) {
+          unsubscribe();
+          throw error;
+        }
+        request.once("close", () => {
+          closed = true;
+          if (heartbeat) clearInterval(heartbeat);
+          unsubscribe();
+        });
+        return;
+      }
+
       const liveEvidenceMatch = /^\/api\/sessions\/([^/]+)\/live-evidence$/.exec(url.pathname);
       if (request.method === "GET" && liveEvidenceMatch?.[1]) {
-        const session = await sessions.get(liveEvidenceMatch[1]);
-        const browserState = await browser.state(liveEvidenceMatch[1]);
-        json(response, 200, {
-          approvals: await approvals.list(liveEvidenceMatch[1]),
-          approvalRules: await approvals.listRules(session.projectId, session.id),
-          terminalRuns: await terminal.list(liveEvidenceMatch[1]),
-          verificationRuns: await verifications.list(liveEvidenceMatch[1]),
-          verificationHandoffs: await verifications.listHandoffs(liveEvidenceMatch[1]),
-          ...(browserState ? { browser: browserState } : {}),
-        });
+        json(response, 200, await sessionLiveEvidence(liveEvidenceMatch[1]));
         return;
       }
 

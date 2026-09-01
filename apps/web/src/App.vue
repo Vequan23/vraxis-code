@@ -30,6 +30,7 @@ import {
   type SessionEventsResponse,
   type SessionMutationResponse,
   type SessionLiveEvidenceResponse,
+  type SessionStreamPayload,
   type SessionSummary,
   type TerminalRunSummary,
   type TeamPolicyBundleV1,
@@ -146,6 +147,9 @@ const receiptExporting = ref<"html" | "json" | "">("");
 const browserReplayExporting = ref(false);
 const firstRunJourneyClosed = ref(false);
 let runPollTimer: ReturnType<typeof setTimeout> | undefined;
+let taskStream: EventSource | undefined;
+let taskStreamSessionId = "";
+let taskStreamConnected = false;
 let stopProtocolListener: (() => void) | undefined;
 let stopBrowserStateListener: (() => void) | undefined;
 let browserResizeObserver: ResizeObserver | undefined;
@@ -1808,8 +1812,79 @@ function clearRunPoll(): void {
   runPollTimer = undefined;
 }
 
+function closeTaskStream(): void {
+  taskStream?.close();
+  taskStream = undefined;
+  taskStreamSessionId = "";
+  taskStreamConnected = false;
+}
+
+async function applyTaskStreamPayload(update: SessionStreamPayload): Promise<void> {
+  if (session.value?.id !== update.session.id) return;
+  const followNewestActivity = taskPaneIsNearBottom();
+  const sessionIndex = state.sessions.findIndex((item) => item.id === update.session.id);
+  const wasRunning = sessionIndex >= 0 && state.sessions[sessionIndex]?.status === "running";
+  if (sessionIndex >= 0) state.sessions[sessionIndex] = update.session;
+  else state.sessions.unshift(update.session);
+
+  let activityChanged = false;
+  for (const event of update.events) {
+    const eventIndex = state.events.findIndex((item) => item.id === event.id);
+    if (eventIndex < 0) {
+      state.events.push(event);
+      activityChanged = true;
+    } else if (JSON.stringify(state.events[eventIndex]) !== JSON.stringify(event)) {
+      state.events[eventIndex] = event;
+      activityChanged = true;
+    }
+  }
+  applyLiveEvidence(update.evidence);
+  serviceOnline.value = true;
+  cacheCurrentWorkspace();
+  if (followNewestActivity && activityChanged) await scrollTaskToBottom();
+  if (wasRunning && update.session.status !== "running" && update.session.worktree) {
+    await refreshWorkspaceEvidence(update.session.id);
+  }
+}
+
+function connectTaskStream(): void {
+  const sessionId = session.value?.id;
+  if (previewMode || !state.realtime?.sessionEvents || !sessionId) {
+    closeTaskStream();
+    scheduleRunPoll();
+    return;
+  }
+  if (taskStream && taskStreamSessionId === sessionId) return;
+  closeTaskStream();
+  taskStreamSessionId = sessionId;
+  const source = new EventSource(`/api/sessions/${encodeURIComponent(sessionId)}/stream`);
+  taskStream = source;
+  const receive = (message: Event) => {
+    if (taskStream !== source) return;
+    const update = JSON.parse((message as MessageEvent<string>).data) as SessionStreamPayload;
+    void applyTaskStreamPayload(update);
+  };
+  source.addEventListener("snapshot", receive);
+  source.addEventListener("update", receive);
+  source.addEventListener("refresh", () => {
+    if (taskStream === source) scheduleRunPoll(true);
+  });
+  source.onopen = () => {
+    if (taskStream !== source) return;
+    taskStreamConnected = true;
+    serviceOnline.value = true;
+    clearRunPoll();
+  };
+  source.onerror = () => {
+    if (taskStream !== source) return;
+    taskStreamConnected = false;
+    scheduleRunPoll(true);
+  };
+}
+
 function scheduleRunPoll(force = false): void {
   clearRunPoll();
+  if (!force && taskStreamConnected) return;
   if (previewMode || !session.value || (!force && session.value.status !== "running" && !liveEvidenceActive.value)) return;
   runPollTimer = setTimeout(() => void pollRun(), 500);
 }
@@ -2250,6 +2325,7 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   clearRunPoll();
+  closeTaskStream();
   bootstrapAbortController?.abort();
   if (workspaceRefreshTimer) clearTimeout(workspaceRefreshTimer);
   stopProtocolListener?.();
@@ -2270,6 +2346,10 @@ onBeforeUnmount(() => {
 watch([browserLiveSurface, desktopBrowserVisible, () => session.value?.id, browserDetailsOpen], async () => {
   observeDesktopBrowserSurface();
   await syncDesktopBrowserLayout();
+});
+
+watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () => {
+  connectTaskStream();
 });
 </script>
 

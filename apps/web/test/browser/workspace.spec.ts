@@ -189,6 +189,57 @@ test("discloses recovery after an unexpected service exit", async ({ page }) => 
   expect(browserErrors).toEqual([]);
 });
 
+test("applies task activity from the real-time session stream", async ({ page }) => {
+  const browserErrors = collectBrowserErrors(page);
+  const project = { id: "project-stream", name: "stream-project", path: "/Users/engineer/stream-project", branch: "main", status: "ready" };
+  const session = { id: "session-stream", projectId: project.id, title: "Stream task", mode: "ask", runtimeId: "codex", updatedAt: "2026-09-01T12:00:00.000Z", status: "running" };
+  const userEvent = { id: "event-user", sessionId: session.id, sequence: 1, timestamp: "2026-09-01T12:00:00.000Z", runtimeId: "codex", kind: "message", title: "Watch this task", detail: "", state: "complete", actor: "user" };
+  const agentEvent = { id: "event-agent", sessionId: session.id, sequence: 2, timestamp: "2026-09-01T12:00:01.000Z", runtimeId: "codex", kind: "message", title: "This arrived through the task stream.", detail: "", state: "complete", actor: "agent" };
+  let streamRequests = 0;
+  await page.route("**/api/bootstrap", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      contractVersion: 26,
+      realtime: { sessionEvents: true, terminalOutput: true, reconnectSnapshots: true },
+      projects: [project], sessions: [session], selectedProjectId: project.id, selectedSessionId: session.id,
+      runtimes: [{ id: "codex", name: "Codex CLI", availability: "installed", detail: "Ready", acceptsCustomModel: true, models: [], capabilities: ["read-only-workspace"] }],
+      modelProviders: [], skills: [], files: [], changes: [], events: [userEvent], approvals: [], approvalRules: [], terminalRuns: [], verificationRuns: [], verificationHandoffs: [],
+      settings: { theme: "graphite-dark", defaultMode: "ask", defaultRuntimeId: "codex" },
+    }),
+  }));
+  await page.route("**/api/sessions/session-stream/stream", async (route) => {
+    streamRequests += 1;
+    const payload = {
+      session: { ...session, status: "idle", updatedAt: "2026-09-01T12:00:01.000Z" },
+      events: [userEvent, agentEvent],
+      evidence: { approvals: [], approvalRules: [], terminalRuns: [], verificationRuns: [], verificationHandoffs: [] },
+      cursor: 2,
+    };
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store" },
+      body: `retry: 1000\n\nid: 2\nevent: snapshot\ndata: ${JSON.stringify(payload)}\n\n`,
+    });
+  });
+  await page.route("**/api/sessions/session-stream/events?*", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ session: { ...session, status: "idle" }, events: [] }),
+  }));
+  await page.route("**/api/sessions/session-stream/live-evidence", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ approvals: [], approvalRules: [], terminalRuns: [], verificationRuns: [], verificationHandoffs: [] }),
+  }));
+
+  await page.goto("/");
+  await expect.poll(() => streamRequests).toBeGreaterThan(0);
+  await expect(page.getByText("This arrived through the task stream.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Agent is working", { exact: true })).toHaveCount(0);
+  expect(browserErrors).toEqual([]);
+});
+
 test("switches projects immediately from cache while workspace data revalidates", async ({ page }) => {
   const browserErrors = collectBrowserErrors(page);
   const projects = [

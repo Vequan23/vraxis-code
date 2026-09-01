@@ -22,6 +22,10 @@ interface SessionData {
   events: ActivityEvent[];
 }
 
+export interface SessionStreamUpdate extends SessionEventsResponse {
+  cursor: number;
+}
+
 const emptyData: SessionData = { schemaVersion: 1, sessions: [], events: [] };
 
 function titleFrom(prompt: string): string {
@@ -32,6 +36,7 @@ function titleFrom(prompt: string): string {
 export class SessionRegistry {
   readonly file: string;
   private mutations: Promise<void> = Promise.resolve();
+  private readonly streamListeners = new Map<string, Set<(update: SessionStreamUpdate) => void>>();
 
   constructor(dataDirectory: string) {
     this.file = join(dataDirectory, "sessions.json");
@@ -40,6 +45,21 @@ export class SessionRegistry {
   async read(): Promise<SessionData> {
     await this.mutations;
     return this.readSnapshot();
+  }
+
+  subscribe(sessionId: string, listener: (update: SessionStreamUpdate) => void): () => void {
+    const listeners = this.streamListeners.get(sessionId) ?? new Set<(update: SessionStreamUpdate) => void>();
+    listeners.add(listener);
+    this.streamListeners.set(sessionId, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (!listeners.size) this.streamListeners.delete(sessionId);
+    };
+  }
+
+  async streamSnapshot(sessionId: string): Promise<SessionStreamUpdate> {
+    const update = await this.events(sessionId);
+    return { ...update, cursor: update.events.at(-1)?.sequence ?? 0 };
   }
 
   async create(
@@ -615,8 +635,36 @@ export class SessionRegistry {
     const mutation = this.mutations.then(async () => {
       const data = await this.readSnapshot();
       const before = alwaysWrite ? "" : JSON.stringify(data);
+      const previousSessions = new Map(data.sessions.map((session) => [session.id, JSON.stringify(session)]));
+      const previousEvents = new Map(data.events.map((event) => [event.id, JSON.stringify(event)]));
       result = change(data);
-      if (alwaysWrite || JSON.stringify(data) !== before) await this.write(data);
+      const changed = alwaysWrite || JSON.stringify(data) !== before;
+      if (!changed) return;
+      await this.write(data);
+      const changedSessionIds = new Set<string>();
+      for (const session of data.sessions) {
+        if (previousSessions.get(session.id) !== JSON.stringify(session)) changedSessionIds.add(session.id);
+      }
+      for (const event of data.events) {
+        if (previousEvents.get(event.id) !== JSON.stringify(event)) changedSessionIds.add(event.sessionId);
+      }
+      const notifications = [...changedSessionIds].flatMap((sessionId) => {
+        const session = data.sessions.find((item) => item.id === sessionId);
+        if (!session) return [];
+        const events = data.events
+          .filter((event) => event.sessionId === sessionId && previousEvents.get(event.id) !== JSON.stringify(event))
+          .sort((left, right) => left.sequence - right.sequence);
+        const cursor = data.events.reduce(
+          (highest, event) => event.sessionId === sessionId ? Math.max(highest, event.sequence) : highest,
+          0,
+        );
+        return [{ session: structuredClone(session), events: structuredClone(events), cursor }];
+      });
+      for (const update of notifications) {
+        for (const listener of this.streamListeners.get(update.session.id) ?? []) {
+          try { listener(update); } catch { /* A disconnected stream cannot fail persisted session state. */ }
+        }
+      }
     });
     this.mutations = mutation.catch(() => undefined);
     await mutation;
