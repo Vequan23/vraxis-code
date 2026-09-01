@@ -2,8 +2,10 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   appThemes,
+  authorityModes,
   defaultUserSettings,
   sessionModes,
+  type AuthorityMode,
   type UpdateSettingsRequest,
   type UserSettings,
 } from "@vraxis/code-contracts";
@@ -40,11 +42,15 @@ export class SettingsRegistry {
       if (!sessionModes.includes(parsed.defaultMode as UserSettings["defaultMode"])) {
         throw new Error("Unsupported saved task mode.");
       }
+      const authorityMode = authorityModes.includes(parsed.authorityMode as AuthorityMode)
+        ? parsed.authorityMode as AuthorityMode
+        : defaultUserSettings.authorityMode ?? "supervised";
       const runtimeModels = savedRuntimeModels(parsed.runtimeModels);
       const disabledRuntimeIds = savedRuntimeIds(parsed.disabledRuntimeIds);
       return {
         theme: parsed.theme as UserSettings["theme"],
         defaultMode: parsed.defaultMode as UserSettings["defaultMode"],
+        authorityMode,
         ...(typeof parsed.defaultRuntimeId === "string" && parsed.defaultRuntimeId
           ? { defaultRuntimeId: parsed.defaultRuntimeId }
           : {}),
@@ -70,6 +76,7 @@ export class SettingsRegistry {
     const settings: UserSettings = {
       theme: input.theme ?? current.theme,
       defaultMode: input.defaultMode ?? current.defaultMode,
+      authorityMode: input.authorityMode ?? current.authorityMode ?? defaultUserSettings.authorityMode ?? "supervised",
       ...(defaultRuntimeId ? { defaultRuntimeId } : {}),
       ...(Object.keys(runtimeModels).length ? { runtimeModels } : {}),
       ...((input.disabledRuntimeIds ?? current.disabledRuntimeIds)?.length

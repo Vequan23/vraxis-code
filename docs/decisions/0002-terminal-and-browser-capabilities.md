@@ -10,9 +10,9 @@ Terminal commands and browser automation are central evidence surfaces, but both
 
 The right inspector owns Files, Changes, Terminal, and Browser views. Agent requests enter the local service as typed capability requests.
 
-Terminal requests include the exact command, working directory, session, timeout, and expected side effect. Browser requests are limited to navigation, mapped-control click and type, capture, bounded waits, tab management, back, and reload. Each request includes a session and explicit target. Script execution and arbitrary selectors are not part of the contract.
+Terminal requests include the exact command, working directory, session, timeout, and expected side effect. Browser requests are limited to navigation, mapped-control click and type, capture, bounded waits, tab management, back, forward, and reload. Each request includes a session and explicit target. Script execution and arbitrary selectors are not part of the contract.
 
-Read-only capture, tab selection, new blank tabs, and tab closure do not interrupt the user. Navigation, typing, reload/back, credential use, and external side effects require policy evaluation and an inspectable approval. Downloads are blocked; uploads are not exposed. Agents may request their first HTTP loopback or HTTPS origin, but execution receives the approval receipt and the new origin is granted only after that decision.
+Direct browser-chrome gestures from the authenticated user—capture, navigation, reload, back, forward, tab selection, new blank tabs, and tab closure—execute immediately and are recorded as user actions. Page actuation and every agent-originated navigation or action still pass through policy evaluation and an inspectable approval. Downloads are blocked; uploads are not exposed. Agents may request their first HTTP loopback or HTTPS origin, but execution receives the approval receipt and the new origin is granted only after that decision.
 
 ## Consequences
 

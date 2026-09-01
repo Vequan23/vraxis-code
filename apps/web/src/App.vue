@@ -17,6 +17,7 @@ import {
   type ApprovalRuleSummary,
   type ApprovalSummary,
   type ActivityEvent,
+  type BrowserActionRequest,
   type BrowserSessionSummary,
   type BrowserControlSummary,
   type BootstrapState,
@@ -51,6 +52,7 @@ import { chooseProjectFolder } from "./projects/project-picker.js";
 import ModelProviderSettings from "./settings/ModelProviderSettings.vue";
 import AgentHarnessSettings from "./settings/AgentHarnessSettings.vue";
 import AgentDefaults from "./settings/AgentDefaults.vue";
+import AuthorityModeSettings from "./settings/AuthorityModeSettings.vue";
 import PermissionCenter from "./settings/PermissionCenter.vue";
 import ProofTrustSettings from "./settings/ProofTrustSettings.vue";
 import TeamPolicySettings from "./settings/TeamPolicySettings.vue";
@@ -60,6 +62,7 @@ import TerminalWorkbench from "./terminal/TerminalWorkbench.vue";
 import type { FirstRunActionId } from "./onboarding/first-run-readiness.js";
 import { highlightCode } from "./workspace/syntax-highlight.js";
 import { normalizeMode, selectedProject, selectedSession } from "./workspace/workspace-state.js";
+import { normalizeBrowserAddress } from "./browser/browser-address.js";
 import {
   captureWorkspaceState,
   cloneWorkspaceValue,
@@ -133,6 +136,13 @@ const teamPolicyNotice = ref("");
 const terminalError = ref("");
 const terminalStarting = ref(false);
 const browserUrl = ref("http://127.0.0.1:4318/");
+const browserAddressInput = ref<HTMLInputElement>();
+const browserAddressEditing = ref(false);
+const browserActionPending = ref<BrowserActionRequest["action"] | "">("");
+const browserHostReady = ref(false);
+const browserHostLoading = ref(false);
+const browserCanGoBack = ref(false);
+const browserCanGoForward = ref(false);
 const browserText = ref("");
 const browserError = ref("");
 const browserDetailsOpen = ref(false);
@@ -380,6 +390,11 @@ const browserScreenshot = computed(() => state.browser?.url && state.browser?.sc
   ? `/api/browser/${state.browser.sessionId}/screenshot?v=${state.browser.screenshotVersion}`
   : "");
 const browserIsLive = computed(() => state.browser?.status === "ready");
+const browserCanNavigate = computed(() => browserIsLive.value || (desktopBrowserAvailable && browserHostReady.value));
+const browserLoading = computed(() => browserHostLoading.value || Boolean(browserActionPending.value) || state.browser?.loading === true);
+const browserBackAvailable = computed(() => browserCanGoBack.value || state.browser?.canGoBack === true);
+const browserForwardAvailable = computed(() => browserCanGoForward.value || state.browser?.canGoForward === true);
+const browserLocationIcon = computed(() => browserUrl.value.trim().startsWith("https://") ? "lock" : "external");
 const desktopBrowserVisible = computed(() => desktopBrowserAvailable
   && activeView.value === "workspace"
   && inspector.value === "browser"
@@ -446,11 +461,14 @@ const composerError = computed(() => taskError.value
   || (mode.value === "build" && buildWorktreeBlocked.value ? "Finish or recover the current Build worktree before continuing." : "")
   || (mode.value === "build" && !runtimeCanBuild.value ? "Choose a runtime that supports guarded isolated-workspace writes for Build mode." : "")
   || (runtime.value && runtime.value.availability !== "installed" ? runtime.value.detail : ""));
+const authorityModeLabel = computed(() => state.settings.authorityMode === "full-access"
+  ? "Project-scoped approvals"
+  : state.settings.authorityMode === "trusted-worktree" ? "Task-scoped approvals" : "Approve each action");
 const composerStatus = computed(() => `${modeLabel.value} · ${runtime.value?.name ?? "Choose runtime"} · ${mode.value === "build"
   ? session.value?.worktree && ["applied", "reverted", "archived", "cleaned"].includes(session.value.worktree.status)
     ? "New isolated worktree on send"
     : "Isolated worktree"
-  : "Read only"}`);
+  : "Read only"} · ${authorityModeLabel.value}`);
 const pendingImportedAttachments = computed(() => pendingAttachmentHandoff.value?.attachments.filter((item) => item.source === "imported") ?? []);
 const pendingHandoffDestination = computed(() => {
   const pending = pendingAttachmentHandoff.value;
@@ -561,7 +579,7 @@ function restoreCachedWorkspace(projectId: string, sessionId?: string): boolean 
   restoreWorkspaceView(workspaceStateKey(snapshot.projectId, snapshot.sessionId));
   mode.value = modeForSession(state.sessions.find((item) => item.id === snapshot.sessionId), state.settings.defaultMode);
   syncTaskSelection();
-  if (state.browser?.url) browserUrl.value = state.browser.url;
+  if (state.browser?.url) syncBrowserAddress(state.browser.url);
   scheduleRunPoll();
   return true;
 }
@@ -613,7 +631,7 @@ async function loadState(options: { blocking?: boolean } = {}): Promise<void> {
     if (!next.selectedSessionId) delete state.selectedSessionId;
     if (!next.browser) delete state.browser;
     Object.assign(state, next);
-    if (next.browser?.url) browserUrl.value = next.browser.url;
+    if (next.browser?.url) syncBrowserAddress(next.browser.url);
     serviceOnline.value = true;
     const nextSession = next.sessions.find((item) => item.id === next.selectedSessionId);
     mode.value = modeForSession(nextSession, next.settings.defaultMode);
@@ -656,11 +674,29 @@ function chooseInspectorView(view: InspectorView): void {
 }
 
 function handleWorkspaceShortcut(event: KeyboardEvent): void {
-  if (event.code !== "Backquote" || !event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
   if (activeView.value !== "workspace" || !project.value) return;
-  event.preventDefault();
-  chooseInspectorView("terminal");
-  void nextTick(() => document.querySelector<HTMLElement>(".terminal-emulator .xterm-helper-textarea")?.focus());
+  if (event.code === "Backquote" && event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey) {
+    event.preventDefault();
+    chooseInspectorView("terminal");
+    void nextTick(() => document.querySelector<HTMLElement>(".terminal-emulator .xterm-helper-textarea")?.focus());
+    return;
+  }
+  if (inspector.value !== "browser") return;
+  const command = event.metaKey || event.ctrlKey;
+  if (command && event.key.toLowerCase() === "l") {
+    event.preventDefault();
+    browserAddressEditing.value = true;
+    void nextTick(() => browserAddressInput.value?.select());
+  } else if (command && event.key.toLowerCase() === "r") {
+    event.preventDefault();
+    if (browserCanNavigate.value && browserUrl.value) void requestBrowserAction("reload");
+  } else if (event.altKey && event.key === "ArrowLeft") {
+    event.preventDefault();
+    if (browserBackAvailable.value) void requestBrowserAction("back");
+  } else if (event.altKey && event.key === "ArrowRight") {
+    event.preventDefault();
+    if (browserForwardAvailable.value) void requestBrowserAction("forward");
+  }
 }
 
 function verificationLabel(run: VerificationRunSummary): string {
@@ -692,6 +728,29 @@ function updateBrowserUrl(event: Event): void {
     ? event.target.value
     : String(eventValue(event) ?? "");
   browserError.value = "";
+}
+
+function syncBrowserAddress(url: string): void {
+  if (!browserAddressEditing.value) browserUrl.value = url;
+}
+
+async function submitBrowserAddress(): Promise<void> {
+  try {
+    browserUrl.value = normalizeBrowserAddress(browserUrl.value);
+    browserAddressEditing.value = false;
+    browserAddressInput.value?.blur();
+    await requestBrowserAction("navigate");
+  } catch (error) {
+    browserError.value = error instanceof Error ? error.message : "Enter a valid browser URL.";
+    browserAddressInput.value?.focus();
+  }
+}
+
+function restoreBrowserAddress(): void {
+  browserAddressEditing.value = false;
+  browserUrl.value = state.browser?.url || "";
+  browserError.value = "";
+  browserAddressInput.value?.blur();
 }
 
 function updateBrowserText(event: Event): void {
@@ -1204,6 +1263,11 @@ function applySessionMutation(update: SessionMutationResponse): void {
     state.terminalRuns = [];
     state.verificationRuns = [];
     delete state.browser;
+    browserHostReady.value = false;
+    browserHostLoading.value = false;
+    browserCanGoBack.value = false;
+    browserCanGoForward.value = false;
+    browserAddressEditing.value = false;
     closeChangeDiff();
   }
   if (nextSession.worktree) void refreshWorkspaceEvidence(nextSession.id);
@@ -1242,7 +1306,7 @@ function applyLiveEvidence(update: SessionLiveEvidenceResponse): void {
   state.verificationHandoffs = update.verificationHandoffs ?? [];
   if (update.browser) {
     state.browser = update.browser;
-    if (update.browser.url) browserUrl.value = update.browser.url;
+    if (update.browser.url) syncBrowserAddress(update.browser.url);
   } else delete state.browser;
 
   const newApproval = update.approvals.find((item) => item.source === "agent" && item.state === "pending" && !knownApprovalIds.has(item.id));
@@ -1640,7 +1704,7 @@ async function removeTeamPolicy(): Promise<void> {
 }
 
 async function requestBrowserAction(
-  action: "navigate" | "click" | "type" | "capture" | "reload" | "back" | "new-tab" | "select-tab" | "close-tab",
+  action: BrowserActionRequest["action"],
   options: { target?: string; tabId?: string } = {},
 ): Promise<void> {
   if (!session.value) return;
@@ -1666,20 +1730,23 @@ async function requestBrowserAction(
     ...(action === "type" ? { value: browserText.value } : {}),
     ...(options.tabId ? { tabId: options.tabId } : {}),
   };
+  browserActionPending.value = action;
   try {
     const result = await post("/api/browser/actions", payload) as { approval?: ApprovalSummary; browser?: BrowserSessionSummary };
     if (result.approval) state.approvals.unshift(result.approval);
     if (result.browser) {
       state.browser = result.browser;
-      if (result.browser.url) browserUrl.value = result.browser.url;
+      syncBrowserAddress(result.browser.url);
     }
-    if (["type", "click", "navigate", "reload", "back", "select-tab", "close-tab"].includes(action)) {
+    if (["type", "click", "navigate", "reload", "back", "forward", "select-tab", "close-tab"].includes(action)) {
       browserText.value = "";
       selectedBrowserControlRef.value = "";
     }
     scheduleRunPoll();
   } catch (error) {
     browserError.value = error instanceof Error ? error.message : "The browser action could not be created.";
+  } finally {
+    browserActionPending.value = "";
   }
 }
 
@@ -2015,6 +2082,7 @@ async function updateSettings(patch: UpdateSettingsRequest): Promise<void> {
   };
   if (patch.theme) state.settings.theme = patch.theme;
   if (patch.defaultMode) state.settings.defaultMode = patch.defaultMode;
+  if (patch.authorityMode) state.settings.authorityMode = patch.authorityMode;
   if (patch.defaultRuntimeId === null) delete state.settings.defaultRuntimeId;
   else if (patch.defaultRuntimeId) state.settings.defaultRuntimeId = patch.defaultRuntimeId;
   if (patch.runtimeModels) {
@@ -2308,7 +2376,11 @@ onMounted(() => {
   });
   stopBrowserStateListener = window.vraxisDesktop?.browserView?.onState((browserState) => {
     if (browserState.sessionId !== session.value?.id) return;
-    if (browserState.url) browserUrl.value = browserState.url;
+    browserHostReady.value = true;
+    browserHostLoading.value = browserState.loading;
+    browserCanGoBack.value = browserState.canGoBack;
+    browserCanGoForward.value = browserState.canGoForward;
+    syncBrowserAddress(browserState.url);
     if (!browserState.loading) scheduleBrowserEvidenceRefresh(browserState.sessionId);
   });
   window.addEventListener("resize", syncDesktopBrowserLayout);
@@ -2482,6 +2554,12 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
             </section>
 
             <AgentDefaults />
+
+            <AuthorityModeSettings
+              :value="state.settings.authorityMode ?? 'supervised'"
+              :saving="settingsSaving"
+              @change="updateSettings({ authorityMode: $event })"
+            />
 
             <PermissionCenter
               :rules="permissionRules"
@@ -2681,8 +2759,9 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
             </template>
             <div v-if="session?.status === 'failed' || session?.status === 'interrupted'" class="resume-run">
               <div>
-                <strong>{{ session.status === "interrupted" ? "Continue this task" : "Try the runtime again" }}</strong>
-                <span>Your messages and completed activity will stay in this task.</span>
+                <strong>{{ session.settlement?.state === "recovery-needed" ? "Recovered unfinished task" : session.status === "interrupted" ? "Continue this task" : "Try the runtime again" }}</strong>
+                <span>{{ session.settlement?.reason ?? "Your messages and completed activity will stay in this task." }}</span>
+                <small v-if="session.settlement">Attempt {{ session.settlement.attempt }} · completed activity and receipts were retained</small>
               </div>
               <osx-button size="small" icon="play" :loading="submitting" @click="resumeRun">Resume task</osx-button>
             </div>
@@ -2719,9 +2798,25 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                 @reject="decideApproval(approval, 'deny')"
               />
               <div v-if="approval.rememberable !== false" class="approval-duration-actions" aria-label="Remember this approval">
-                <span>Trust this exact scope:</span>
-                <osx-button size="small" variant="secondary" :disabled="Boolean(approvalActionId)" @click="decideApproval(approval, 'approve', 'session')">For this task</osx-button>
-                <osx-button size="small" variant="secondary" :disabled="Boolean(approvalActionId)" @click="decideApproval(approval, 'approve', 'project')">For this project</osx-button>
+                <span>{{ approval.authority?.reason ?? 'Trust this exact scope:' }}</span>
+                <osx-button
+                  v-if="(state.settings.authorityMode ?? 'supervised') !== 'supervised' && approval.capability !== 'credentials' && approval.capability !== 'destructive'"
+                  size="small"
+                  variant="secondary"
+                  :disabled="Boolean(approvalActionId)"
+                  @click="decideApproval(approval, 'approve', 'session')"
+                >
+                  For this task
+                </osx-button>
+                <osx-button
+                  v-if="state.settings.authorityMode === 'full-access' && approval.capability !== 'credentials' && approval.capability !== 'destructive'"
+                  size="small"
+                  variant="secondary"
+                  :disabled="Boolean(approvalActionId)"
+                  @click="decideApproval(approval, 'approve', 'project')"
+                >
+                  For this project
+                </osx-button>
               </div>
             </div>
           </section>
@@ -3268,15 +3363,15 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                   class="browser-tab"
                   :class="{ selected: tab.active }"
                 >
-                  <button type="button" :disabled="!browserIsLive || tab.active" :aria-current="tab.active ? 'page' : undefined" @click="!tab.active && requestBrowserAction('select-tab', { tabId: tab.id })">
-                    <osx-icon name="eye" :size="13" />
+                  <button type="button" :disabled="!browserCanNavigate || tab.active" :aria-current="tab.active ? 'page' : undefined" @click="!tab.active && requestBrowserAction('select-tab', { tabId: tab.id })">
+                    <osx-icon name="external" :size="13" />
                     <span>{{ tab.title || "New tab" }}</span>
                   </button>
-                  <osx-icon-button label="Close tab" icon="close" size="small" :disabled="!browserIsLive" @click="requestBrowserAction('close-tab', { tabId: tab.id })" />
+                  <osx-icon-button label="Close tab" icon="close" size="small" :disabled="!browserCanNavigate" @click="requestBrowserAction('close-tab', { tabId: tab.id })" />
                 </div>
-                <osx-icon-button label="New tab" icon="plus" size="small" :disabled="!browserIsLive" @click="requestBrowserAction('new-tab')" />
+                <osx-icon-button label="New tab" icon="plus" size="small" :disabled="!browserCanNavigate" @click="requestBrowserAction('new-tab')" />
               </nav>
-              <span v-else class="browser-window-label"><osx-icon name="eye" :size="14" /> Agent browser</span>
+              <span v-else class="browser-window-label"><osx-icon name="external" :size="14" /> Browser</span>
               <div class="browser-chrome-actions">
                 <osx-icon-button :label="browserIsLive ? 'Sync current page' : 'Restore browser'" icon="refresh" size="small" :disabled="!state.browser?.url" @click="requestBrowserAction('capture')" />
                 <osx-icon-button v-if="state.browser?.frames?.length" label="Export replay" icon="download" size="small" :disabled="browserReplayExporting" @click="exportBrowserReplay" />
@@ -3284,27 +3379,88 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
               </div>
             </header>
 
-            <form class="browser-address" @submit.prevent="requestBrowserAction('navigate')">
+            <form class="browser-address" @submit.prevent="submitBrowserAddress">
               <div class="browser-history-actions">
-                <osx-icon-button label="Back" icon="chevron-left" size="small" :disabled="!browserIsLive || !state.browser?.url" @click="requestBrowserAction('back')" />
-                <osx-icon-button label="Reload" icon="refresh" size="small" :disabled="!browserIsLive || !state.browser?.url" @click="requestBrowserAction('reload')" />
+                <osx-icon-button label="Back (Option-Left)" icon="chevron-left" size="small" :disabled="!browserCanNavigate || !browserBackAvailable || browserLoading" @click="requestBrowserAction('back')" />
+                <osx-icon-button label="Forward (Option-Right)" icon="chevron-right" size="small" :disabled="!browserCanNavigate || !browserForwardAvailable || browserLoading" @click="requestBrowserAction('forward')" />
+                <osx-icon-button :label="browserLoading ? 'Loading page' : 'Reload (Command-R)'" :icon="browserLoading ? 'close' : 'refresh'" size="small" :disabled="!browserCanNavigate || !browserUrl || browserLoading" @click="requestBrowserAction('reload')" />
               </div>
               <label class="browser-location">
                 <span class="visually-hidden">Address</span>
-                <osx-icon name="external" :size="14" />
+                <osx-spinner v-if="browserLoading" size="small" label="Loading page" />
+                <osx-icon v-else :name="browserLocationIcon" :size="14" />
                 <input
+                  ref="browserAddressInput"
                   name="browser-address"
-                  type="url"
+                  type="text"
+                  inputmode="url"
+                  autocomplete="off"
+                  autocapitalize="none"
+                  spellcheck="false"
                   aria-label="Address"
                   :value="browserUrl"
                   :disabled="!session"
-                  placeholder="http://127.0.0.1:3000/"
+                  placeholder="Enter a URL"
+                  @focus="browserAddressEditing = true"
+                  @blur="browserAddressEditing = false"
+                  @keydown.esc.prevent="restoreBrowserAddress"
                   @input="updateBrowserUrl"
                 >
               </label>
-              <osx-icon-button label="Open address" icon="corner-down-left" size="small" :disabled="!session || !browserUrl.trim()" @click="requestBrowserAction('navigate')" />
             </form>
             <p v-if="browserError" class="browser-error" role="alert"><osx-icon name="warning" :size="13" /> {{ browserError }}</p>
+
+            <section
+              v-if="verificationHasRecipe || latestVerification || pendingVerificationHandoff"
+              class="browser-verification-studio"
+              aria-labelledby="browser-verification-heading"
+            >
+              <header>
+                <span class="browser-verification-icon"><osx-icon name="shield-check" :size="16" /></span>
+                <span>
+                  <h3 id="browser-verification-heading">Verify this page</h3>
+                  <small v-if="latestVerification?.browserEvidence">
+                    Captured {{ new Date(latestVerification.browserEvidence.capturedAt).toLocaleTimeString() }} · {{ latestVerification.browserEvidence.consoleErrors }} console · {{ latestVerification.browserEvidence.networkErrors }} network errors
+                  </small>
+                  <small v-else-if="latestVerification?.state === 'needs-browser'">Command checks passed. Capture the visible page and browser diagnostics.</small>
+                  <small v-else>{{ verificationBrowserTarget ?? 'Use the current page as retained verification evidence.' }}</small>
+                </span>
+                <osx-badge
+                  size="small"
+                  :label="latestVerification ? verificationLabel(latestVerification) : 'Ready'"
+                  :tone="latestVerification ? verificationTone(latestVerification) : 'neutral'"
+                />
+              </header>
+              <div class="browser-verification-progress">
+                <span><strong>{{ latestVerification?.checks.filter(item => item.state === 'passed').length ?? 0 }}/{{ latestVerification?.checks.length ?? state.projectDoctor?.verificationChecks.length ?? 0 }}</strong><small>checks passed</small></span>
+                <span><strong>{{ latestVerification?.browserAssertions.filter(item => item.state === 'passed').length ?? 0 }}/{{ latestVerification?.browserAssertions.length ?? state.projectDoctor?.verificationBrowserAssertions?.length ?? 0 }}</strong><small>page assertions</small></span>
+                <span><strong>{{ latestVerification?.browserEvidence?.actionCount ?? state.browser?.actions.length ?? 0 }}</strong><small>retained actions</small></span>
+              </div>
+              <footer>
+                <osx-button
+                  v-if="latestVerification?.state === 'needs-browser'"
+                  variant="primary"
+                  size="small"
+                  icon="camera"
+                  :loading="verificationAction === 'browser'"
+                  @click="browserMatchesVerificationTarget ? captureVerificationBrowser() : openVerificationBrowser()"
+                >
+                  {{ browserMatchesVerificationTarget ? 'Capture proof' : 'Open target' }}
+                </osx-button>
+                <osx-button
+                  v-else
+                  :variant="latestVerification?.state === 'passed' ? 'secondary' : 'primary'"
+                  size="small"
+                  icon="play"
+                  :loading="verificationAction === 'start' || verificationAction === 'rerun'"
+                  :disabled="verificationIsActive || (!verificationCanRerun && !verificationHasRecipe)"
+                  @click="verificationCanRerun ? rerunVerification() : startVerification()"
+                >
+                  {{ verificationCanRerun ? 'Rerun recipe' : verificationIsActive ? 'Checks running' : 'Run checks' }}
+                </osx-button>
+                <osx-button v-if="verificationCanStop" size="small" variant="secondary" icon="square" :loading="verificationAction === 'stop'" @click="stopVerification">Stop</osx-button>
+              </footer>
+            </section>
 
             <section v-if="selectedBrowserControl" class="browser-control-action" aria-label="Selected page control">
               <span>
@@ -3331,10 +3487,6 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
 
             <section v-if="desktopBrowserAvailable && session && (!state.browser || browserIsLive)" class="browser-live-frame" aria-label="Live embedded browser">
               <div ref="browserLiveSurface" class="browser-live-surface" />
-              <footer>
-                <span><strong>{{ state.browser?.title || "Live browser" }}</strong><small>Native interactive page</small></span>
-                <span>{{ state.browser?.controls.length ?? 0 }} mapped controls · agent context stays synchronized</span>
-              </footer>
             </section>
 
             <figure v-else-if="browserScreenshot" class="browser-frame">

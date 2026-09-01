@@ -253,6 +253,7 @@ test("persists settings through the local service", async (context) => {
   assert.deepEqual(await updated.json(), {
     theme: "graphite",
     defaultMode: "build",
+    authorityMode: "supervised",
     defaultRuntimeId: "codex",
     runtimeModels: { codex: "gpt-5.6-sol" },
     disabledRuntimeIds: ["opencode"],
@@ -263,6 +264,7 @@ test("persists settings through the local service", async (context) => {
   assert.deepEqual(state.settings, {
     theme: "graphite",
     defaultMode: "build",
+    authorityMode: "supervised",
     defaultRuntimeId: "codex",
     runtimeModels: { codex: "gpt-5.6-sol" },
     disabledRuntimeIds: ["opencode"],
@@ -1157,6 +1159,8 @@ test("retains governed tool and approval activity in the task timeline", async (
       await sink?.emit({ ...base, type: "approval.requested", approvalId: "browser-approval", toolName: "browser-navigate", reason: "Open the requested preview." });
       await sink?.emit({ ...base, type: "approval.resolved", approvalId: "browser-approval", decision: "approved" });
       await sink?.emit({ ...base, type: "tool.completed", toolCallId: "browser-call", toolName: "browser-navigate", durationMs: 1250 });
+      await sink?.emit({ ...base, type: "tool.requested", toolCallId: "read-call", toolName: "read-text" });
+      await sink?.emit({ ...base, type: "tool.completed", toolCallId: "read-call", toolName: "read-text", durationMs: 24 });
       return super.run(request, sink);
     }
   }
@@ -1186,12 +1190,20 @@ test("retains governed tool and approval activity in the task timeline", async (
     detail: event.detail,
     state: event.state,
   });
-  assert.deepEqual(state.events.filter((event) => event.kind === "tool").map(activityShape), [{
-    kind: "tool",
-    title: "Browser · navigate",
-    detail: "Completed in 1.3 seconds with a retained task receipt.",
-    state: "complete",
-  }]);
+  assert.deepEqual(state.events.filter((event) => event.kind === "tool").map(activityShape), [
+    {
+      kind: "tool",
+      title: "Browser · navigate",
+      detail: "Completed in 1.3 seconds with a retained task receipt.",
+      state: "complete",
+    },
+    {
+      kind: "tool",
+      title: "Exploring · read text",
+      detail: "Completed in 24 ms with a retained task receipt.",
+      state: "complete",
+    },
+  ]);
   assert.deepEqual(state.events.filter((event) => event.kind === "approval").map(activityShape), [{
     kind: "approval",
     title: "Approval · Browser · navigate",
@@ -1546,6 +1558,12 @@ test("stops and resumes a running task without losing its history", async (conte
 test("requires a product approval before running a terminal command", async (context) => {
   const app = await fixture();
   context.after(() => app.close());
+  const authority = await fetch(`${app.baseUrl}/api/settings`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ authorityMode: "full-access" }),
+  });
+  assert.equal(authority.status, 200);
   const projectResponse = await fetch(`${app.baseUrl}/api/projects`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1880,18 +1898,15 @@ test("evaluates project browser assertions against captured visible evidence", a
   const navigation = await (await fetch(`${app.baseUrl}/api/browser/actions`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ sessionId: session.id, action: "navigate", target }),
-  })).json() as { approval: { id: string } };
-  await fetch(`${app.baseUrl}/api/approvals/${navigation.approval.id}/decision`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ decision: "approve" }),
-  });
+  })).json() as { browser: { url: string; actions: Array<{ actor?: string }> } };
+  assert.equal(navigation.browser.url, target);
+  assert.equal(navigation.browser.actions[0]?.actor, "user");
   for (let attempt = 0; attempt < 60; attempt += 1) {
     const evidence = await (await fetch(`${app.baseUrl}/api/sessions/${session.id}/live-evidence`)).json() as {
-      approvals: Array<{ id: string; state: string }>;
       browser?: { url: string; snapshot: string; actions: Array<{ actor?: string }> };
     };
-    const navigationCompleted = evidence.approvals.find((item) => item.id === navigation.approval.id)?.state === "completed";
     const userActionRecorded = evidence.browser?.actions.some((item) => item.actor === "user") ?? false;
-    if (navigationCompleted && userActionRecorded && evidence.browser?.url === target && evidence.browser.snapshot.includes("Ready to ship")) break;
+    if (userActionRecorded && evidence.browser?.url === target && evidence.browser.snapshot.includes("Ready to ship")) break;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 

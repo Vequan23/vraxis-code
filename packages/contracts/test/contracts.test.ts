@@ -71,6 +71,13 @@ test("parses browser tab actions", () => {
   });
 });
 
+test("parses native browser history actions", () => {
+  assert.deepEqual(parseBrowserActionRequest({ sessionId: "session-1", action: "forward" }), {
+    sessionId: "session-1",
+    action: "forward",
+  });
+});
+
 test("parses explicit approval decisions", () => {
   assert.deepEqual(parseApprovalDecisionRequest({ decision: "approve" }), { decision: "approve" });
   assert.deepEqual(parseApprovalDecisionRequest({ decision: "approve", duration: "project" }), { decision: "approve", duration: "project" });
@@ -177,21 +184,25 @@ test("parses a follow-up runtime selection and rejects an empty follow-up", () =
 
 test("parses durable application settings", () => {
   assert.equal(defaultUserSettings.theme, "graphite-dark");
+  assert.equal(defaultUserSettings.authorityMode, "supervised");
   assert.deepEqual(parseUpdateSettingsRequest({ theme: "graphite-dark" }), { theme: "graphite-dark" });
   assert.deepEqual(parseUpdateSettingsRequest({
     theme: "graphite",
     defaultMode: "build",
+    authorityMode: "trusted-worktree",
     defaultRuntimeId: "codex",
     runtimeModels: { codex: "gpt-5.6-sol", opencode: null },
     disabledRuntimeIds: ["claude-code", "claude-code"],
   }), {
     theme: "graphite",
     defaultMode: "build",
+    authorityMode: "trusted-worktree",
     defaultRuntimeId: "codex",
     runtimeModels: { codex: "gpt-5.6-sol", opencode: null },
     disabledRuntimeIds: ["claude-code"],
   });
   assert.throws(() => parseUpdateSettingsRequest({ theme: "midnight" }), /Theme is not supported/);
+  assert.throws(() => parseUpdateSettingsRequest({ authorityMode: "unrestricted" }), /Authority mode is not supported/);
   assert.throws(() => parseUpdateSettingsRequest({}), /at least one setting/);
 });
 

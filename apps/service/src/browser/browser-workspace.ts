@@ -253,6 +253,9 @@ export class BrowserWorkspace {
       snapshot: observation.snapshot,
       viewport: { ...observation.viewport },
       activeTabId: observation.activeTabId,
+      loading: observation.loading ?? false,
+      canGoBack: observation.canGoBack ?? previous.canGoBack ?? false,
+      canGoForward: observation.canGoForward ?? previous.canGoForward ?? false,
       tabs: structuredClone(observation.tabs),
       controls: structuredClone(observation.controls),
       console: structuredClone(observation.console),
@@ -298,6 +301,9 @@ export class BrowserWorkspace {
       screenshotVersion: 0,
       viewport: { ...viewport },
       activeTabId: "",
+      loading: false,
+      canGoBack: false,
+      canGoForward: false,
       tabs: [],
       controls: [],
       allowedOrigins: [],
@@ -389,6 +395,8 @@ export class BrowserWorkspace {
         await pageBeforeAction.page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
       } else if (input.action === "back") {
         await pageBeforeAction.page.goBack({ waitUntil: "domcontentloaded", timeout: 30_000 });
+      } else if (input.action === "forward") {
+        await pageBeforeAction.page.goForward({ waitUntil: "domcontentloaded", timeout: 30_000 });
       }
       const afterFrameId = await this.captureActionFrame(session, actionId, "after");
       this.recordAction(session, actionId, input.action, target, "success", this.actionDetail(input.action, session.state), receipt, beforeFrameId, afterFrameId);
@@ -794,6 +802,10 @@ export class BrowserWorkspace {
     const active = this.activePage(session);
     const url = active.page.url();
     session.state.activeTabId = active.id;
+    const navigation = await this.navigationState(session.context, active.page);
+    session.state.loading = false;
+    session.state.canGoBack = navigation.canGoBack;
+    session.state.canGoForward = navigation.canGoForward;
     session.state.url = url === "about:blank" ? "" : url;
     session.state.title = await active.page.title().catch(() => "");
     session.state.snapshot = session.state.url
@@ -817,6 +829,26 @@ export class BrowserWorkspace {
     session.state.updatedAt = new Date().toISOString();
     await this.persistState(session.state);
     return structuredClone(session.state);
+  }
+
+  private async navigationState(context: BrowserContext, page: Page): Promise<{ canGoBack: boolean; canGoForward: boolean }> {
+    try {
+      const client = await context.newCDPSession(page);
+      const history = await client.send("Page.getNavigationHistory") as {
+        currentIndex?: number;
+        entries?: Array<{ url?: string }>;
+      };
+      await client.detach();
+      const currentIndex = history.currentIndex ?? 0;
+      const entries = history.entries ?? [];
+      const isMeaningful = (entry: { url?: string }): boolean => Boolean(entry.url && entry.url !== "about:blank");
+      return {
+        canGoBack: entries.slice(0, currentIndex).some(isMeaningful),
+        canGoForward: entries.slice(currentIndex + 1).some(isMeaningful),
+      };
+    } catch {
+      return { canGoBack: false, canGoForward: false };
+    }
   }
 
   private async captureActionFrame(

@@ -35,7 +35,7 @@ test("imports a trusted signed team policy and applies ask and deny precedence",
   assert.equal(installed.status, "active");
   assert.equal(installed.policy?.signerLabel, "Example policy admin");
 
-  const remembered = new ApprovalRegistry(deviceRoot);
+  const remembered = new ApprovalRegistry(deviceRoot, undefined, async () => "full-access");
   const original = await remembered.request({
     sessionId: "session-1",
     projectId: "project-1",
@@ -62,7 +62,7 @@ test("imports a trusted signed team policy and applies ask and deny precedence",
   assert.equal(command.state, "pending", "team ask must override a remembered allow");
   assert.equal(command.rememberable, false);
   assert.equal(command.teamPolicy?.effect, "ask");
-  await assert.rejects(governed.decide(command.id, "approve", "project"), /always requires a fresh decision/);
+  await assert.rejects(governed.decide(command.id, "approve", "project"), /fresh decision|does not allow/);
 
   const credential = await governed.request({
     sessionId: "session-2",

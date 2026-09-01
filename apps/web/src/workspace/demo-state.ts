@@ -49,7 +49,7 @@ export const emptyState: BootstrapState = {
   events: [],
   approvals: [],
   terminalRuns: [],
-  settings: { theme: "graphite-dark", defaultMode: "ask", defaultRuntimeId: "codex" },
+  settings: { theme: "graphite-dark", defaultMode: "ask", authorityMode: "supervised", defaultRuntimeId: "codex" },
 };
 
 export const demoState: BootstrapState = {
@@ -143,5 +143,5 @@ export const demoState: BootstrapState = {
     issues: [],
     ok: true,
   },
-  settings: { theme: "graphite-dark", defaultMode: "ask", defaultRuntimeId: "codex" },
+  settings: { theme: "graphite-dark", defaultMode: "ask", authorityMode: "supervised", defaultRuntimeId: "codex" },
 };

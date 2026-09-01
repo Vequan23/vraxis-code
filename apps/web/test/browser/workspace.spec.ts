@@ -151,6 +151,8 @@ test("starts a task from a selected project and keeps evidence truthful", async 
   await expect(page.getByText("Open a terminal", { exact: true })).toBeVisible();
 
   await page.getByRole("tab", { name: "Browser" }).click();
+  await expect(page.getByRole("heading", { name: "Verify this page" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Run checks" })).toBeVisible();
   await expect(page.getByText("Preview your app", { exact: true })).toBeVisible();
   await expectBasicAccessibility(page);
   await page.screenshot({ path: testInfo.outputPath("redesigned-workspace.png"), fullPage: true });
@@ -1004,12 +1006,18 @@ test("hosts the desktop browser as a live native surface and hides it outside th
   const project = { id: "project-native-browser", name: "native-browser", path: "/Users/engineer/native-browser", branch: "main", status: "ready" };
   const session = { id: "session-native-browser", projectId: project.id, title: "Use the live page", mode: "build", runtimeId: "codex", updatedAt: new Date().toISOString(), status: "idle" };
   await page.addInitScript(() => {
-    const host = window as Window & { __vraxisBrowserLayouts?: Array<Record<string, unknown>> };
+    const host = window as Window & {
+      __vraxisBrowserLayouts?: Array<Record<string, unknown>>;
+      __emitVraxisBrowserState?: (state: Record<string, unknown>) => void;
+    };
     host.__vraxisBrowserLayouts = [];
     host.vraxisDesktop = {
       browserView: {
         async setLayout(layout) { host.__vraxisBrowserLayouts!.push(structuredClone(layout) as unknown as Record<string, unknown>); },
-        onState() { return () => undefined; },
+        onState(callback) {
+          host.__emitVraxisBrowserState = callback as unknown as (state: Record<string, unknown>) => void;
+          return () => { host.__emitVraxisBrowserState = undefined; };
+        },
       },
     };
   });
@@ -1035,8 +1043,21 @@ test("hosts the desktop browser as a live native surface and hides it outside th
   await page.getByRole("tab", { name: "Browser" }).click();
 
   await expect(page.getByLabel("Live embedded browser")).toBeVisible();
-  await expect(page.getByText("Native interactive page", { exact: true })).toBeVisible();
   await expect(page.locator(".browser-frame img")).toHaveCount(0);
+  await page.evaluate(() => {
+    const host = window as Window & { __emitVraxisBrowserState?: (state: Record<string, unknown>) => void };
+    host.__emitVraxisBrowserState?.({
+      sessionId: "session-native-browser",
+      url: "https://example.com/docs",
+      title: "Docs",
+      loading: false,
+      canGoBack: true,
+      canGoForward: true,
+    });
+  });
+  await expect(page.getByRole("textbox", { name: "Address", exact: true })).toHaveValue("https://example.com/docs");
+  await expect(page.getByRole("button", { name: "Back (Option-Left)" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Forward (Option-Right)" })).toBeEnabled();
   await expect.poll(() => page.evaluate(() => {
     const layouts = (window as Window & { __vraxisBrowserLayouts?: Array<{ visible?: boolean; bounds?: { width?: number; height?: number } }> }).__vraxisBrowserLayouts ?? [];
     return layouts.some(layout => layout.visible && Number(layout.bounds?.width) > 1 && Number(layout.bounds?.height) > 1);
@@ -1590,7 +1611,7 @@ test("scrolls long file previews inside the Files pane", async ({ page }, testIn
   expect(browserErrors).toEqual([]);
 });
 
-test("approves browser actions without reloading the workspace", async ({ page }, testInfo) => {
+test("submits a scheme-less browser address with Enter without reloading the workspace", async ({ page }, testInfo) => {
   const browserErrors = collectBrowserErrors(page);
   const project = { id: "project-live", name: "live-project", path: "/Users/engineer/live-project", branch: "main", status: "ready" };
   const session = { id: "session-live", projectId: project.id, title: "Verify the app", mode: "build", runtimeId: "codex", updatedAt: new Date().toISOString(), status: "idle" };
@@ -1598,6 +1619,7 @@ test("approves browser actions without reloading the workspace", async ({ page }
   const terminalRuns: Array<Record<string, unknown>> = [];
   let browser: Record<string, unknown> | undefined;
   let bootstrapRequests = 0;
+  let navigationTarget = "";
 
   await page.route("**/api/bootstrap", async (route) => {
     bootstrapRequests += 1;
@@ -1624,6 +1646,7 @@ test("approves browser actions without reloading the workspace", async ({ page }
     });
   });
   await page.route("**/api/browser/actions", async (route) => {
+    navigationTarget = String((route.request().postDataJSON() as { target?: string }).target ?? "");
     approvals.unshift({ id: "approval-browser", sessionId: session.id, requestedAt: new Date().toISOString(), capability: "browser", title: "Browser navigate", description: "Open an isolated browser.", scope: "http://127.0.0.1:4318/", risk: "high", state: "pending", source: "browser" });
     await route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ approval: approvals[0] }) });
   });
@@ -1672,9 +1695,11 @@ test("approves browser actions without reloading the workspace", async ({ page }
   await page.addStyleTag({ content: ".session-pane::before { content: ''; display: block; flex: 0 0 1200px; }" });
   const taskPane = page.getByLabel("Agent task");
   await page.getByRole("tab", { name: "Browser" }).click();
-  await page.getByRole("textbox", { name: "Address", exact: true }).fill("http://127.0.0.1:4318/");
+  const address = page.getByRole("textbox", { name: "Address", exact: true });
+  await address.fill("127.0.0.1:4318");
   await taskPane.evaluate((pane) => { pane.scrollTop = 0; });
-  await page.getByRole("button", { name: "Open address", exact: true }).click();
+  await address.press("Enter");
+  expect(navigationTarget).toBe("http://127.0.0.1:4318/");
   await expect(page.getByText("Action needs your approval")).toBeVisible();
   await expectTaskPaneAtBottom(page);
   await page.getByRole("button", { name: "Allow once" }).click();

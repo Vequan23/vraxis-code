@@ -10,7 +10,9 @@ import type {
   ApprovalRuleSummary,
   ApprovalState,
   ApprovalSummary,
+  AuthorityMode,
 } from "@vraxis/code-contracts";
+import { authorityOptions } from "./authority-policy.js";
 
 interface ApprovalData {
   schemaVersion: 2;
@@ -80,6 +82,7 @@ export class ApprovalRegistry {
       deny?: string;
       teamPolicy?: NonNullable<ApprovalSummary["teamPolicy"]>;
     }>,
+    private readonly authorityMode: () => Promise<AuthorityMode> = async () => "supervised",
   ) {
     this.file = join(dataDirectory, "approvals.json");
   }
@@ -140,24 +143,36 @@ export class ApprovalRegistry {
     requestedId: string = randomUUID(),
     matchRememberedRules = true,
   ): Promise<ApprovalSummary> {
+    const mode = await this.authorityMode();
     const governance = await this.govern?.(input);
     const governedInput = governance?.forceFresh ? { ...input, rememberable: false } : input;
     const approval = await this.mutate((data) => {
       if (data.approvals.some((item) => item.id === requestedId)) throw new TypeError("Approval request already exists.");
       const earlyCancellation = this.earlyCancellations.get(requestedId);
-      const blocked = !earlyCancellation && governance?.deny;
+      const blockedReason = !earlyCancellation ? governance?.deny : undefined;
       const approval: ApprovalSummary = {
         ...governedInput,
+        actor: governedInput.actor ?? (governedInput.source === "agent" ? "agent" : "user"),
+        authority: governedInput.authority ?? {
+          mode,
+          decision: "pending",
+          reason: authorityOptions(mode, governedInput).reason,
+        },
         scope: safeApprovalScope(governedInput.scope),
         id: requestedId,
         requestedAt: new Date().toISOString(),
-        state: earlyCancellation ? "interrupted" : blocked ? "denied" : "pending",
+        state: earlyCancellation ? "interrupted" : blockedReason ? "denied" : "pending",
         ...(earlyCancellation ? {
           resolvedAt: new Date().toISOString(),
           failure: earlyCancellation,
-        } : blocked ? {
+        } : blockedReason ? {
           resolvedAt: new Date().toISOString(),
-          failure: governance.deny,
+          failure: blockedReason,
+          authority: {
+            mode,
+            decision: "policy-denied",
+            reason: blockedReason,
+          },
         } : {}),
         ...(governance?.teamPolicy ? { teamPolicy: governance.teamPolicy } : {}),
       };
@@ -172,6 +187,11 @@ export class ApprovalRegistry {
         approval.state = rule.effect === "allow" ? "approved" : "denied";
         approval.resolvedAt = approval.requestedAt;
         approval.matchedRuleId = rule.id;
+        approval.authority = {
+          mode: approval.authority?.mode ?? "supervised",
+          decision: "remembered",
+          reason: `A remembered ${rule.duration} decision matched this exact scope.`,
+        };
       }
       data.approvals.unshift(approval);
       return approval;
@@ -184,8 +204,16 @@ export class ApprovalRegistry {
     const next = await this.mutate((data) => {
       const approval = this.find(data, id);
       if (approval.state !== "pending") throw new TypeError("This approval request has already been resolved.");
+      if (!authorityOptions(approval.authority?.mode ?? "supervised", approval).durations.includes(duration)) {
+        throw new TypeError("This approval mode does not allow that decision to be remembered for so long.");
+      }
       approval.state = decision === "approve" ? "approved" : "denied";
       approval.resolvedAt = new Date().toISOString();
+      approval.authority = {
+        mode: approval.authority?.mode ?? "supervised",
+        decision: "explicit",
+        reason: decision === "approve" ? "The user approved this exact request." : "The user denied this exact request.",
+      };
       if (duration !== "once") {
         if (approval.rememberable === false) throw new TypeError("This sensitive action always requires a fresh decision.");
         if (!approval.projectId) throw new TypeError("This approval cannot be remembered because its project is unavailable.");
@@ -245,6 +273,8 @@ export class ApprovalRegistry {
       scope: scopeFor(request),
       risk: riskFor(request),
       source: "agent",
+      actor: "agent",
+      boundary: request.category === "browser" ? "controlled-browser" : "isolated-worktree",
     }, request.id);
     const persisted = (await this.list(sessionId)).find((item) => item.id === approval.id);
     if (persisted?.state === "approved") return "approved";

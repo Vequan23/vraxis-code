@@ -52,9 +52,19 @@ test("persists a sequential command and browser verification lifecycle", async (
   run = await registry.startCheck(run.id, "test", "terminal-test");
   run = await registry.finishCheck(run.id, "test", terminal("terminal-test", "success"));
   assert.equal(run.state, "needs-browser");
-  run = await registry.recordBrowser(run.id, "browser-action", 0, 0);
+  run = await registry.recordBrowser(run.id, "browser-action", 0, 0, [], undefined, {
+    url: "http://127.0.0.1:4318/",
+    title: "Vraxis Code",
+    capturedAt: "2026-09-01T12:00:00.000Z",
+    screenshotVersion: 4,
+    consoleErrors: 0,
+    networkErrors: 0,
+    actionCount: 3,
+  });
   assert.equal(run.state, "passed");
   assert.equal(run.browserState, "passed");
+  assert.equal(run.browserEvidence?.screenshotVersion, 4);
+  assert.equal(run.browserEvidence?.actionCount, 3);
   assert.equal((await registry.list("session-1"))[0]?.checks.every((item) => item.state === "passed"), true);
 });
 

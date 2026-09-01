@@ -113,6 +113,7 @@ export type ModelCapability = "text" | "vision" | "audio" | "video" | "tools" | 
 export interface UserSettings {
   theme: AppTheme;
   defaultMode: SessionMode;
+  authorityMode?: AuthorityMode;
   defaultRuntimeId?: string;
   runtimeModels?: Record<string, string>;
   disabledRuntimeIds?: string[];
@@ -121,7 +122,20 @@ export interface UserSettings {
 export const defaultUserSettings: UserSettings = {
   theme: "graphite-dark",
   defaultMode: "ask",
+  authorityMode: "supervised",
 };
+
+export const authorityModes = ["supervised", "trusted-worktree", "full-access"] as const;
+export type AuthorityMode = (typeof authorityModes)[number];
+
+export interface TaskSettlementSummary {
+  state: "running" | "complete" | "failed" | "interrupted" | "recovery-needed";
+  attempt: number;
+  startedAt: string;
+  settledAt?: string;
+  reason?: string;
+  resumable: boolean;
+}
 
 export interface ProjectSummary {
   id: string;
@@ -140,6 +154,7 @@ export interface SessionSummary {
   modelId?: string;
   updatedAt: string;
   status: "idle" | "running" | "interrupted" | "failed";
+  settlement?: TaskSettlementSummary;
   worktree?: WorktreeSummary;
   worktreeHistory?: WorktreeSummary[];
 }
@@ -388,6 +403,13 @@ export interface ApprovalSummary {
   risk: ApprovalRisk;
   state: ApprovalState;
   source: "agent" | "terminal" | "browser" | "worktree";
+  actor?: "user" | "agent" | "system";
+  boundary?: "read-only-project" | "isolated-worktree" | "controlled-browser" | "approved-project";
+  authority?: {
+    mode: AuthorityMode;
+    decision: "pending" | "explicit" | "remembered" | "automatic" | "policy-denied";
+    reason: string;
+  };
   failure?: string;
   matchedRuleId?: string;
   rememberable?: boolean;
@@ -585,6 +607,15 @@ export interface VerificationRunSummary {
   rerunOfId?: string;
   browserActionId?: string;
   browserFailure?: string;
+  browserEvidence?: {
+    url: string;
+    title: string;
+    capturedAt: string;
+    screenshotVersion: number;
+    consoleErrors: number;
+    networkErrors: number;
+    actionCount: number;
+  };
   createdAt: string;
   startedAt?: string;
   completedAt?: string;
@@ -674,6 +705,9 @@ export interface BrowserSessionSummary {
   screenshotVersion: number;
   viewport: { width: number; height: number };
   activeTabId: string;
+  loading?: boolean;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
   tabs: BrowserTabSummary[];
   controls: BrowserControlSummary[];
   allowedOrigins: string[];
@@ -755,6 +789,7 @@ export interface TaskReceiptV1 {
   version: 1;
   generatedAt: string;
   session: Pick<SessionSummary, "id" | "title" | "mode" | "status" | "runtimeId" | "modelId" | "updatedAt">;
+  settlement?: TaskSettlementSummary;
   project: Pick<ProjectSummary, "id" | "name" | "branch">;
   worktree?: WorktreeSummary;
   worktreeHistory?: WorktreeSummary[];
@@ -1027,6 +1062,7 @@ export interface AppendMessageRequest {
 export interface UpdateSettingsRequest {
   theme?: AppTheme;
   defaultMode?: SessionMode;
+  authorityMode?: AuthorityMode;
   defaultRuntimeId?: string | null;
   runtimeModels?: Record<string, string | null>;
   disabledRuntimeIds?: string[];
@@ -1042,7 +1078,7 @@ export interface ConnectModelProviderRequest {
 
 export interface BrowserActionRequest {
   sessionId: string;
-  action: "navigate" | "click" | "type" | "capture" | "reload" | "back" | "new-tab" | "select-tab" | "close-tab";
+  action: "navigate" | "click" | "type" | "capture" | "reload" | "back" | "forward" | "new-tab" | "select-tab" | "close-tab";
   target?: string;
   value?: string;
   tabId?: string;
@@ -1295,6 +1331,11 @@ export function parseUpdateSettingsRequest(value: unknown): UpdateSettingsReques
   const result: UpdateSettingsRequest = {};
   if (input.theme !== undefined) result.theme = appTheme(input.theme);
   if (input.defaultMode !== undefined) result.defaultMode = sessionMode(input.defaultMode);
+  if (input.authorityMode !== undefined) {
+    const authorityMode = requiredString(input.authorityMode, "Authority mode");
+    if (!authorityModes.includes(authorityMode as AuthorityMode)) throw new TypeError("Authority mode is not supported.");
+    result.authorityMode = authorityMode as AuthorityMode;
+  }
   if (input.defaultRuntimeId === null) result.defaultRuntimeId = null;
   else if (input.defaultRuntimeId !== undefined) {
     result.defaultRuntimeId = requiredString(input.defaultRuntimeId, "Default runtime ID");
@@ -1376,7 +1417,7 @@ export function parseCommandRequest(value: unknown): CommandRequest {
 export function parseBrowserActionRequest(value: unknown): BrowserActionRequest {
   const input = record(value, "Browser action");
   const action = requiredString(input.action, "Browser action type");
-  if (!["navigate", "click", "type", "capture", "reload", "back", "new-tab", "select-tab", "close-tab"].includes(action)) {
+  if (!["navigate", "click", "type", "capture", "reload", "back", "forward", "new-tab", "select-tab", "close-tab"].includes(action)) {
     throw new TypeError("Browser action type is not supported.");
   }
   const result: BrowserActionRequest = {

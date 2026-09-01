@@ -13,6 +13,9 @@ export interface BrowserAutomationObservation {
   snapshot: string;
   viewport: { width: number; height: number };
   activeTabId: string;
+  loading?: boolean;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
   tabs: BrowserTabSummary[];
   controls: BrowserControlSummary[];
   console: BrowserConsoleEntry[];
@@ -48,6 +51,9 @@ export function normalizeBrowserObservation(value: unknown, expectedSessionId: s
     snapshot: optionalString(input.snapshot, 40_000),
     viewport: { width, height },
     activeTabId,
+    ...(typeof input.loading === "boolean" ? { loading: input.loading } : {}),
+    ...(typeof input.canGoBack === "boolean" ? { canGoBack: input.canGoBack } : {}),
+    ...(typeof input.canGoForward === "boolean" ? { canGoForward: input.canGoForward } : {}),
     tabs,
     controls,
     console: consoleEntries,

@@ -362,6 +362,12 @@ export class SessionRegistry {
       if (session.status === "running") throw new TypeError("This task is already running.");
       session.status = "running";
       session.updatedAt = new Date().toISOString();
+      session.settlement = {
+        state: "running",
+        attempt: (session.settlement?.attempt ?? 0) + 1,
+        startedAt: session.updatedAt,
+        resumable: false,
+      };
       data.selectedSessionId = session.id;
       delete data.draftProjectId;
       this.pushEvent(data, session, {
@@ -439,7 +445,7 @@ export class SessionRegistry {
     await this.mutate((data) => {
       const session = this.session(data, sessionId);
       if (session.status !== "running") return;
-      this.settleRunningProgress(data, session.id, "complete");
+      this.settleOpenEvents(data, session.id, "complete");
       this.pushEvent(data, session, {
         kind: "message",
         title: answer,
@@ -456,6 +462,14 @@ export class SessionRegistry {
       });
       session.status = "idle";
       session.updatedAt = new Date().toISOString();
+      session.settlement = {
+        state: "complete",
+        attempt: session.settlement?.attempt ?? 1,
+        startedAt: session.settlement?.startedAt ?? session.updatedAt,
+        settledAt: session.updatedAt,
+        reason: detail,
+        resumable: false,
+      };
     });
   }
 
@@ -463,7 +477,7 @@ export class SessionRegistry {
     await this.mutate((data) => {
       const session = this.session(data, sessionId);
       if (session.status !== "running") return;
-      this.settleRunningProgress(data, session.id, "failed");
+      this.settleOpenEvents(data, session.id, "failed");
       this.pushEvent(data, session, {
         kind: "lifecycle",
         title: "Agent could not finish",
@@ -473,6 +487,14 @@ export class SessionRegistry {
       });
       session.status = "failed";
       session.updatedAt = new Date().toISOString();
+      session.settlement = {
+        state: "failed",
+        attempt: session.settlement?.attempt ?? 1,
+        startedAt: session.settlement?.startedAt ?? session.updatedAt,
+        settledAt: session.updatedAt,
+        reason: message,
+        resumable: true,
+      };
     });
   }
 
@@ -480,7 +502,7 @@ export class SessionRegistry {
     await this.mutate((data) => {
       const session = this.session(data, sessionId);
       if (session.status !== "running") return;
-      this.settleRunningProgress(data, session.id, "interrupted");
+      this.settleOpenEvents(data, session.id, "interrupted");
       this.pushEvent(data, session, {
         kind: "lifecycle",
         title: "Task stopped",
@@ -490,6 +512,14 @@ export class SessionRegistry {
       });
       session.status = "interrupted";
       session.updatedAt = new Date().toISOString();
+      session.settlement = {
+        state: "interrupted",
+        attempt: session.settlement?.attempt ?? 1,
+        startedAt: session.settlement?.startedAt ?? session.updatedAt,
+        settledAt: session.updatedAt,
+        reason: "Stopped by the user.",
+        resumable: true,
+      };
     });
   }
 
@@ -497,7 +527,7 @@ export class SessionRegistry {
     await this.mutate((data) => {
       for (const session of data.sessions) {
         if (session.status !== "running" || activeSessionIds.has(session.id)) continue;
-        this.settleRunningProgress(data, session.id, "interrupted");
+        this.settleOpenEvents(data, session.id, "interrupted");
         this.pushEvent(data, session, {
           kind: "lifecycle",
           title: "Task interrupted",
@@ -507,6 +537,14 @@ export class SessionRegistry {
         });
         session.status = "interrupted";
         session.updatedAt = new Date().toISOString();
+        session.settlement = {
+          state: "recovery-needed",
+          attempt: session.settlement?.attempt ?? 1,
+          startedAt: session.settlement?.startedAt ?? session.updatedAt,
+          settledAt: session.updatedAt,
+          reason: "The app exited before the runtime returned a final result.",
+          resumable: true,
+        };
       }
     }, false);
   }
@@ -575,6 +613,18 @@ export class SessionRegistry {
       if (event?.sessionId !== sessionId || event.kind !== "progress" || event.state !== "running") continue;
       event.state = state;
       return;
+    }
+  }
+
+  private settleOpenEvents(
+    data: SessionData,
+    sessionId: string,
+    state: "complete" | "failed" | "interrupted",
+  ): void {
+    for (const event of data.events) {
+      if (event.sessionId !== sessionId || (event.state !== "running" && event.state !== "pending")) continue;
+      event.state = state;
+      event.timestamp = new Date().toISOString();
     }
   }
 

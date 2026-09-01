@@ -73,7 +73,7 @@ test("persists a redacted agent approval and resumes the waiting policy", async 
 
 test("remembers exact-scoped approval rules and supports revocation", async () => {
   const root = await mkdtemp(join(tmpdir(), "vraxis-approval-rule-test-"));
-  const approvals = new ApprovalRegistry(root);
+  const approvals = new ApprovalRegistry(root, undefined, async () => "full-access");
   const requested = await approvals.request({
     sessionId: "session-1",
     projectId: "project-1",
@@ -133,7 +133,7 @@ test("remembers exact-scoped approval rules and supports revocation", async () =
 
 test("redacts credentials and URL query values before approval scope persistence or export", async () => {
   const root = await mkdtemp(join(tmpdir(), "vraxis-approval-redaction-test-"));
-  const approvals = new ApprovalRegistry(root);
+  const approvals = new ApprovalRegistry(root, undefined, async () => "full-access");
   const requested = await approvals.request({
     sessionId: "session-1",
     projectId: "project-1",
@@ -152,7 +152,7 @@ test("redacts credentials and URL query values before approval scope persistence
 
 test("remembered deny rules take precedence and rule listings stay project-scoped", async () => {
   const root = await mkdtemp(join(tmpdir(), "vraxis-approval-deny-test-"));
-  const approvals = new ApprovalRegistry(root);
+  const approvals = new ApprovalRegistry(root, undefined, async () => "full-access");
   const scope = ". · npm publish";
   const request = (sessionId: string, projectId: string) => ({
     sessionId,
@@ -192,7 +192,8 @@ test("fresh-only requests never match remembered destructive rules", async () =>
     risk: "high",
     source: "worktree",
   });
-  await approvals.decide(first.id, "approve", "project");
+  await assert.rejects(approvals.decide(first.id, "approve", "project"), /does not allow|fresh decision/);
+  await approvals.decide(first.id, "approve");
   const fresh = await approvals.request({
     sessionId: "session-2",
     projectId: "project-1",
@@ -615,6 +616,16 @@ test("controls an isolated browser and captures visible evidence", async (contex
   assert.equal(navigated.title, "Evidence page");
   assert.ok(navigated.allowedOrigins.includes(`http://127.0.0.1:${address.port}`));
   assert.equal(navigated.tabs.length, 1);
+  assert.equal(navigated.canGoBack, false);
+  assert.equal(navigated.canGoForward, false);
+  const secondPage = await browser.perform({ sessionId: "session-1", action: "navigate", target: `${url}second` });
+  assert.equal(secondPage.canGoBack, true);
+  const wentBack = await browser.perform({ sessionId: "session-1", action: "back" });
+  assert.equal(wentBack.url, url);
+  assert.equal(wentBack.canGoForward, true);
+  const wentForward = await browser.perform({ sessionId: "session-1", action: "forward" });
+  assert.equal(wentForward.url, `${url}second`);
+  Object.assign(navigated, await browser.perform({ sessionId: "session-1", action: "back" }));
   const simultaneousCaptures = await Promise.all([
     browser.perform({ sessionId: "session-1", action: "capture" }),
     browser.perform({ sessionId: "session-1", action: "capture" }),

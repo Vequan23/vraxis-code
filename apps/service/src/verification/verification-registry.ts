@@ -372,11 +372,13 @@ export class VerificationRegistry {
       diffAvailable?: boolean;
       failure?: string;
     },
+    browserEvidence?: VerificationRunSummary["browserEvidence"],
   ): Promise<VerificationRunSummary> {
     return this.mutate((data) => {
       const run = this.find(data, id);
       if (run.state !== "needs-browser") throw new TypeError("Command checks must pass before browser proof can be attached.");
       run.browserActionId = actionId;
+      if (browserEvidence) run.browserEvidence = structuredClone(browserEvidence);
       for (const assertion of run.browserAssertions) {
         const result = assertionResults.find((item) => item.id === assertion.id);
         assertion.state = result?.passed ? "passed" : "failed";

@@ -842,6 +842,7 @@ osx-app-shell { height: 100%; }
 .resume-run > div { display: grid; gap: 3px; }
 .resume-run strong { font-size: 13px; }
 .resume-run span { color: var(--osx-muted, #98a0a5); font-size: 12px; line-height: 1.4; }
+.resume-run small { color: var(--osx-muted, #98a0a5); font-size: 12px; }
 
 .inspector {
   height: 100%;
@@ -1115,7 +1116,7 @@ osx-app-shell { height: 100%; }
 }
 
 .browser-address {
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: 6px;
   padding: 6px 8px;
@@ -1151,12 +1152,17 @@ osx-app-shell { height: 100%; }
   border-radius: 8px;
   color: var(--osx-muted, #98a0a5);
   background: color-mix(in srgb, var(--osx-surface-raised, #22282c) 72%, transparent);
+  transition: border-color 120ms ease, background-color 120ms ease, outline-color 120ms ease;
 }
 
 .browser-location:focus-within {
   border-color: var(--osx-accent, #4aa9dc);
   outline: 2px solid color-mix(in srgb, var(--osx-accent, #4aa9dc) 28%, transparent);
+  background: var(--osx-surface-raised, #22282c);
 }
+
+.browser-location > osx-icon,
+.browser-location > osx-spinner { flex: 0 0 auto; }
 
 .browser-location input {
   width: 100%;
@@ -1173,6 +1179,24 @@ osx-app-shell { height: 100%; }
 .browser-location input::placeholder { color: var(--osx-muted, #98a0a5); }
 .browser-location input:disabled { cursor: not-allowed; opacity: .55; }
 .browser-error { display: flex; align-items: center; gap: 6px; margin: 0; padding: 6px 10px; color: var(--osx-danger, #c95b55); background: color-mix(in srgb, var(--osx-danger, #c95b55) 8%, transparent); font-size: 12px; }
+
+.browser-verification-studio {
+  display: grid;
+  gap: 9px;
+  padding: 10px;
+  border-bottom: 1px solid var(--osx-border-soft, #384148);
+  background: color-mix(in srgb, var(--osx-accent, #4aa9dc) 5%, var(--osx-surface, #15191b));
+}
+.browser-verification-studio > header { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 9px; }
+.browser-verification-icon { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: var(--osx-accent, #4aa9dc); background: color-mix(in srgb, var(--osx-accent, #4aa9dc) 12%, transparent); }
+.browser-verification-studio > header > span:nth-child(2) { min-width: 0; display: grid; gap: 2px; }
+.browser-verification-studio h3,
+.browser-verification-studio strong { margin: 0; font-size: 12px; font-weight: 650; }
+.browser-verification-studio small { overflow: hidden; color: var(--osx-muted, #98a0a5); font-size: 12px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.browser-verification-progress { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--osx-border-soft, #384148); border-radius: 7px; background: var(--osx-border-soft, #384148); }
+.browser-verification-progress > span { min-width: 0; display: grid; gap: 1px; padding: 7px 8px; background: var(--osx-surface-sunken, #101416); }
+.browser-verification-progress small { font-size: 12px; }
+.browser-verification-studio > footer { display: flex; align-items: center; gap: 6px; }
 
 .terminal-run-list { display: grid; gap: 9px; }
 .terminal-run-receipt { display: grid; gap: 4px; border-radius: 9px; scroll-margin: 18px; }
@@ -1226,36 +1250,19 @@ osx-app-shell { height: 100%; }
   min-width: 0;
   min-height: 260px;
   flex: 1 1 520px;
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  display: block;
   overflow: hidden;
   border-bottom: 1px solid var(--osx-border, #465159);
   background: #fff;
 }
 
 .browser-live-surface {
+  width: 100%;
+  height: 100%;
   min-width: 1px;
   min-height: 1px;
   background: #fff;
 }
-
-.browser-live-frame > footer {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 7px 9px;
-  color: var(--osx-muted, #98a0a5);
-  background: var(--osx-surface, #15191b);
-  font-size: 12px;
-}
-
-.browser-live-frame > footer > span:first-child { min-width: 0; display: grid; gap: 1px; }
-.browser-live-frame > footer strong,
-.browser-live-frame > footer small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.browser-live-frame > footer strong { color: var(--osx-text, #eef1f2); font-weight: 600; }
-.browser-live-frame > footer span:last-child { text-align: right; }
 
 .browser-stage { position: relative; width: 100%; aspect-ratio: 1280 / 820; overflow: hidden; background: #fff; }
 .browser-frame img { width: 100%; height: 100%; display: block; object-fit: contain; object-position: top; }

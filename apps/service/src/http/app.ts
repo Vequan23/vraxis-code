@@ -146,7 +146,11 @@ export function createApp(options: AppOptions) {
   const proofSigner = new TaskProofSigner(options.dataDirectory);
   const proofTrust = new ProofTrustRegistry(options.dataDirectory);
   const teamPolicy = new TeamPolicyRegistry(options.dataDirectory, proofSigner, proofTrust);
-  const approvals = new ApprovalRegistry(options.dataDirectory, (input) => teamPolicy.decision(input));
+  const approvals = new ApprovalRegistry(
+    options.dataDirectory,
+    (input) => teamPolicy.decision(input),
+    async () => (await settings.read()).authorityMode ?? "supervised",
+  );
   const terminal = new TerminalRegistry(options.dataDirectory);
   const browser = options.browserWorkspace ?? new BrowserWorkspace(options.dataDirectory, credentials, options.browserRelay);
   const verifications = new VerificationRegistry(options.dataDirectory);
@@ -560,6 +564,7 @@ export function createApp(options: AppOptions) {
         ...(session.modelId ? { modelId: session.modelId } : {}),
         updatedAt: session.updatedAt,
       },
+      ...(session.settlement ? { settlement: session.settlement } : {}),
       project: { id: project.id, name: project.name, branch: project.branch },
       ...(session.worktree ? { worktree: session.worktree } : {}),
       ...(session.worktreeHistory?.length ? { worktreeHistory: session.worktreeHistory } : {}),
@@ -1511,7 +1516,23 @@ export function createApp(options: AppOptions) {
             visualResult = { passed: false, diffAvailable: false, failure: error instanceof Error ? error.message : "Visual comparison failed." };
           }
         }
-        const completed = await verifications.recordBrowser(run.id, action.id, consoleErrors, networkErrors, assertionResults, visualResult);
+        const completed = await verifications.recordBrowser(
+          run.id,
+          action.id,
+          consoleErrors,
+          networkErrors,
+          assertionResults,
+          visualResult,
+          {
+            url: browserState.url,
+            title: browserState.title,
+            capturedAt: action.timestamp,
+            screenshotVersion: browserState.screenshotVersion,
+            consoleErrors,
+            networkErrors,
+            actionCount: browserState.actions.length,
+          },
+        );
         await stopVerificationServices(run.id);
         await sessions.verification(
           run.sessionId,
@@ -1611,7 +1632,9 @@ export function createApp(options: AppOptions) {
       if (request.method === "POST" && url.pathname === "/api/browser/actions") {
         const input = parseBrowserActionRequest(await body(request));
         const session = await sessions.get(input.sessionId);
-        if (["capture", "new-tab", "select-tab", "close-tab"].includes(input.action)) {
+        // Navigation chrome is an exact, authenticated user gesture. Page actuation
+        // (click/type) remains guarded because it may submit forms or cause side effects.
+        if (["capture", "navigate", "reload", "back", "forward", "new-tab", "select-tab", "close-tab"].includes(input.action)) {
           json(response, 200, { browser: await browser.perform(input, { actor: "user" }) });
           return;
         }
@@ -1626,6 +1649,8 @@ export function createApp(options: AppOptions) {
           scope: input.target ?? "active page",
           risk: input.action === "navigate" || input.action === "type" ? "high" : "medium",
           source: "browser",
+          actor: "user",
+          boundary: "controlled-browser",
         });
         await registerManualAction(approval, {
           approve: async () => {

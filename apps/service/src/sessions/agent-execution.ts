@@ -34,6 +34,13 @@ function toolActivity(toolName: string): { title: string; detail: string } {
   return { title: `Tool · ${readable}`, detail: "Using a host-provided task tool." };
 }
 
+export function elapsedLabel(durationMs: number): string {
+  if (!Number.isFinite(durationMs) || durationMs < 0) return "an unknown time";
+  if (durationMs < 1) return "less than 1 ms";
+  if (durationMs < 1_000) return `${Math.round(durationMs)} ms`;
+  return `${(durationMs / 1_000).toFixed(1)} seconds`;
+}
+
 const askOutput = defineOutput<AskResult>({
   name: "repository-answer",
   jsonSchema: {
@@ -169,7 +176,7 @@ export class AgentExecutionCoordinator {
           await this.sessions.activity(session.id, "tool", activity.title, activity.detail, "running");
         } else if (event.type === "tool.completed") {
           const activity = toolActivity(event.toolName);
-          const duration = event.durationMs === undefined ? "Completed with a retained task receipt." : `Completed in ${(event.durationMs / 1000).toFixed(1)} seconds with a retained task receipt.`;
+          const duration = event.durationMs === undefined ? "Completed with a retained task receipt." : `Completed in ${elapsedLabel(event.durationMs)} with a retained task receipt.`;
           await this.sessions.activity(session.id, "tool", activity.title, duration, "complete");
         } else if (event.type === "tool.failed") {
           const activity = toolActivity(event.toolName);
@@ -265,7 +272,7 @@ export class AgentExecutionCoordinator {
       }
       const evidenceDetail = result.output.evidence.length
         ? `Evidence: ${result.output.evidence.join(", ")}`
-        : `Completed in ${(result.durationMs / 1000).toFixed(1)} seconds.`;
+        : `Completed in ${elapsedLabel(result.durationMs)}.`;
       await this.sessions.complete(session.id, result.output.answer, evidenceDetail);
     } catch (error) {
       if (controller.signal.aborted) return;

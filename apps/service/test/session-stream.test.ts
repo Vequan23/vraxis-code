@@ -31,6 +31,12 @@ test("session subscriptions publish ordered deltas after persistence", async () 
 
   assert.deepEqual(updates.map((update) => update.cursor), [2, 3, 4, 4]);
   assert.equal(updates[0]?.session.status, "running");
+  assert.deepEqual(updates[0]?.session.settlement, {
+    state: "running",
+    attempt: 1,
+    startedAt: updates[0]?.session.updatedAt,
+    resumable: false,
+  });
   assert.deepEqual(updates[1]?.events.map((event) => [event.sequence, event.state]), [[3, "running"]]);
   assert.deepEqual(updates[2]?.events.map((event) => [event.sequence, event.state]), [
     [3, "complete"],
@@ -51,4 +57,25 @@ test("session subscriptions publish ordered deltas after persistence", async () 
   unsubscribe();
   await sessions.complete(session.id, "Done", "The answer is ready.");
   assert.equal(updates.length, 4);
+});
+
+test("settles every open event and exposes a resumable recovery receipt after restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "vraxis-session-recovery-"));
+  const sessions = new SessionRegistry(root);
+  const session = await sessions.create({ projectId: "project-1", mode: "build", runtimeId: "codex", prompt: "Finish the task" });
+  await sessions.begin(session.id);
+  await sessions.progress(session.id, "Working", "Changing files.", "running");
+  await sessions.activity(session.id, "tool", "Terminal · run command", "Waiting for output.", "running");
+
+  await sessions.recoverInactive(new Set());
+
+  const recovered = await sessions.get(session.id);
+  assert.equal(recovered.status, "interrupted");
+  assert.equal(recovered.settlement?.state, "recovery-needed");
+  assert.equal(recovered.settlement?.attempt, 1);
+  assert.equal(recovered.settlement?.resumable, true);
+  assert.equal((await sessions.events(session.id)).events.some((event) => event.state === "running" || event.state === "pending"), false);
+
+  await sessions.begin(session.id);
+  assert.equal((await sessions.get(session.id)).settlement?.attempt, 2);
 });
