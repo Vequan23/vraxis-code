@@ -59,6 +59,14 @@ import TerminalWorkbench from "./terminal/TerminalWorkbench.vue";
 import type { FirstRunActionId } from "./onboarding/first-run-readiness.js";
 import { highlightCode } from "./workspace/syntax-highlight.js";
 import { normalizeMode, selectedProject, selectedSession } from "./workspace/workspace-state.js";
+import {
+  captureWorkspaceState,
+  cloneWorkspaceValue,
+  resetWorkspaceState,
+  restoreWorkspaceState,
+  workspaceStateKey,
+  type WorkspaceStateSnapshot,
+} from "./workspace/workspace-cache.js";
 import WorkspaceFileTree from "./workspace/WorkspaceFileTree.vue";
 
 const previewVariant = new URLSearchParams(window.location.search).get("preview");
@@ -147,6 +155,34 @@ let lastBrowserLayoutSessionId = "";
 let protocolOpenQueue: Promise<void> = Promise.resolve();
 const terminalInputWrites = new Map<string, Promise<void>>();
 const desktopBrowserAvailable = Boolean(window.vraxisDesktop?.browserView);
+const workspaceRefreshing = ref(false);
+const workspaceStateCache = new Map<string, WorkspaceStateSnapshot>();
+const latestWorkspaceKeyByProject = new Map<string, string>();
+interface WorkspaceViewSnapshot {
+  inspector: InspectorView;
+  selectedFile: string;
+  filePreview?: WorkspaceFileContent;
+  selectedChange: string;
+  changeDiff?: WorkspaceDiff;
+  selectedHunkIds: string[];
+  composer: string;
+  composerAttachments: OsxAgentComposerAttachment[];
+  composerContextItems: OsxAgentComposerContextItem[];
+  attachmentReferences: Array<[string, PromptAttachment]>;
+  firstRunJourneyClosed: boolean;
+}
+const workspaceViewCache = new Map<string, WorkspaceViewSnapshot>();
+const filePreviewCache = new Map<string, WorkspaceFileContent>();
+const changeDiffCache = new Map<string, WorkspaceDiff>();
+let selectionQueue: Promise<void> = Promise.resolve();
+let selectionVersion = 0;
+let bootstrapRequestVersion = 0;
+let bootstrapAbortController: AbortController | undefined;
+let hydrated = previewMode;
+let backgroundRefreshes = 0;
+let workspaceRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+let fileRequestVersion = 0;
+let changeRequestVersion = 0;
 
 const project = computed(() => selectedProject(state));
 const session = computed(() => selectedSession(state));
@@ -451,14 +487,120 @@ function visibleSessionMode(item: SessionSummary): SessionMode {
   return item.id === state.selectedSessionId ? mode.value : item.mode;
 }
 
-async function loadState(): Promise<void> {
+function cacheCurrentWorkspace(): string | undefined {
+  const snapshot = captureWorkspaceState(state);
+  if (!snapshot) return undefined;
+  const key = workspaceStateKey(snapshot.projectId, snapshot.sessionId);
+  workspaceStateCache.set(key, snapshot);
+  latestWorkspaceKeyByProject.set(snapshot.projectId, key);
+  workspaceViewCache.set(key, cloneWorkspaceValue({
+    inspector: inspector.value,
+    selectedFile: selectedFile.value,
+    ...(filePreview.value ? { filePreview: filePreview.value } : {}),
+    selectedChange: selectedChange.value,
+    ...(changeDiff.value ? { changeDiff: changeDiff.value } : {}),
+    selectedHunkIds: selectedHunkIds.value,
+    composer: composer.value,
+    composerAttachments: composerAttachments.value,
+    composerContextItems: composerContextItems.value,
+    attachmentReferences: [...attachmentReferences.entries()],
+    firstRunJourneyClosed: firstRunJourneyClosed.value,
+  }));
+  return key;
+}
+
+function restoreWorkspaceView(key: string): void {
+  const view = workspaceViewCache.get(key);
+  if (!view) {
+    inspector.value = "files";
+    closeFilePreview();
+    closeChangeDiff();
+    composer.value = "";
+    composerAttachments.value = [];
+    composerContextItems.value = [];
+    attachmentReferences.clear();
+    firstRunJourneyClosed.value = false;
+    return;
+  }
+  inspector.value = view.inspector;
+  selectedFile.value = view.selectedFile;
+  filePreview.value = view.filePreview ? cloneWorkspaceValue(view.filePreview) : undefined;
+  selectedChange.value = view.selectedChange;
+  changeDiff.value = view.changeDiff ? cloneWorkspaceValue(view.changeDiff) : undefined;
+  selectedHunkIds.value = [...view.selectedHunkIds];
+  composer.value = view.composer;
+  composerAttachments.value = cloneWorkspaceValue(view.composerAttachments);
+  composerContextItems.value = cloneWorkspaceValue(view.composerContextItems);
+  attachmentReferences.clear();
+  for (const [id, attachment] of view.attachmentReferences) attachmentReferences.set(id, cloneWorkspaceValue(attachment));
+  firstRunJourneyClosed.value = view.firstRunJourneyClosed;
+  fileLoading.value = false;
+  fileError.value = "";
+  changeLoading.value = false;
+  changeError.value = "";
+}
+
+function restoreCachedWorkspace(projectId: string, sessionId?: string): boolean {
+  const preferredKey = sessionId
+    ? workspaceStateKey(projectId, sessionId)
+    : latestWorkspaceKeyByProject.get(projectId);
+  const snapshot = preferredKey ? workspaceStateCache.get(preferredKey) : undefined;
+  if (!snapshot) {
+    const fallbackSession = sessionId ?? state.sessions.find((item) => item.projectId === projectId)?.id;
+    resetWorkspaceState(state, projectId, fallbackSession);
+    restoreWorkspaceView(workspaceStateKey(projectId, fallbackSession));
+    mode.value = modeForSession(state.sessions.find((item) => item.id === fallbackSession), state.settings.defaultMode);
+    syncTaskSelection();
+    return false;
+  }
+  restoreWorkspaceState(state, snapshot);
+  restoreWorkspaceView(workspaceStateKey(snapshot.projectId, snapshot.sessionId));
+  mode.value = modeForSession(state.sessions.find((item) => item.id === snapshot.sessionId), state.settings.defaultMode);
+  syncTaskSelection();
+  if (state.browser?.url) browserUrl.value = state.browser.url;
+  scheduleRunPoll();
+  return true;
+}
+
+function queueSelection(path: string): Promise<void> {
+  const request = selectionQueue.then(async () => { await post(path, {}); });
+  selectionQueue = request.catch(() => undefined);
+  return request;
+}
+
+function beginBackgroundRefresh(): void {
+  backgroundRefreshes += 1;
+  if (workspaceRefreshTimer || workspaceRefreshing.value) return;
+  workspaceRefreshTimer = setTimeout(() => {
+    workspaceRefreshTimer = undefined;
+    if (backgroundRefreshes > 0) workspaceRefreshing.value = true;
+  }, 140);
+}
+
+function finishBackgroundRefresh(): void {
+  backgroundRefreshes = Math.max(0, backgroundRefreshes - 1);
+  if (backgroundRefreshes) return;
+  if (workspaceRefreshTimer) clearTimeout(workspaceRefreshTimer);
+  workspaceRefreshTimer = undefined;
+  workspaceRefreshing.value = false;
+}
+
+async function loadState(options: { blocking?: boolean } = {}): Promise<void> {
   if (previewMode) return;
-  loading.value = true;
-  loadError.value = "";
+  const blocking = options.blocking ?? !hydrated;
+  const requestVersion = ++bootstrapRequestVersion;
+  bootstrapAbortController?.abort();
+  const controller = new AbortController();
+  bootstrapAbortController = controller;
+  if (blocking) {
+    loading.value = true;
+    loadError.value = "";
+  } else beginBackgroundRefresh();
   try {
-    const response = await fetch("/api/bootstrap");
+    const response = await fetch("/api/bootstrap", { signal: controller.signal });
     if (!response.ok) throw new Error("The local service did not respond.");
     const next = await response.json() as BootstrapState;
+    if (requestVersion !== bootstrapRequestVersion) return;
     next.approvals ??= [];
     next.approvalRules ??= [];
     next.terminalRuns ??= [];
@@ -475,12 +617,17 @@ async function loadState(): Promise<void> {
     if (projectChanged) firstRunJourneyClosed.value = false;
     if (projectChanged || (selectedFile.value && !next.files.some((file) => file.path === selectedFile.value))) closeFilePreview();
     if (projectChanged || (selectedChange.value && !next.changes.some((file) => file.path === selectedChange.value))) closeChangeDiff();
+    hydrated = true;
+    cacheCurrentWorkspace();
     scheduleRunPoll();
   } catch (error) {
+    if (controller.signal.aborted) return;
     serviceOnline.value = false;
-    loadError.value = error instanceof Error ? error.message : "The local service did not respond.";
+    if (blocking) loadError.value = error instanceof Error ? error.message : "The local service did not respond.";
   } finally {
-    loading.value = false;
+    if (requestVersion === bootstrapRequestVersion) bootstrapAbortController = undefined;
+    if (blocking) loading.value = false;
+    else finishBackgroundRefresh();
   }
 }
 
@@ -737,10 +884,26 @@ async function chooseProject(event: Event): Promise<void> {
   const next = state.projects.find((item) => item.name === name);
   activeView.value = "workspace";
   if (!next || next.id === state.selectedProjectId) return;
+  const previousKey = cacheCurrentWorkspace();
+  const requestVersion = ++selectionVersion;
   focusedEvidence.value = undefined;
-  await post(`/api/projects/${next.id}/select`, {});
-  state.selectedSessionId = undefined;
-  await loadState();
+  restoreCachedWorkspace(next.id);
+  loadError.value = "";
+  try {
+    await queueSelection(`/api/projects/${next.id}/select`);
+    if (requestVersion !== selectionVersion) return;
+    await loadState({ blocking: false });
+  } catch (error) {
+    if (requestVersion !== selectionVersion) return;
+    const previous = previousKey ? workspaceStateCache.get(previousKey) : undefined;
+    if (previous) {
+      restoreWorkspaceState(state, previous);
+      restoreWorkspaceView(previousKey!);
+      mode.value = modeForSession(state.sessions.find((item) => item.id === previous.sessionId), state.settings.defaultMode);
+      syncTaskSelection();
+    }
+    taskError.value = error instanceof Error ? error.message : "The project could not be opened.";
+  }
 }
 
 async function chooseSession(item: SessionSummary): Promise<void> {
@@ -749,12 +912,27 @@ async function chooseSession(item: SessionSummary): Promise<void> {
     if (item.mode === "review" || mode.value === "review" || pendingApprovals.value.length) await scrollTaskToBottom();
     return;
   }
+  const previousKey = cacheCurrentWorkspace();
+  const requestVersion = ++selectionVersion;
   focusedEvidence.value = undefined;
-  await post(`/api/sessions/${item.id}/select`, {});
-  state.selectedSessionId = item.id;
+  restoreCachedWorkspace(item.projectId, item.id);
   mode.value = item.mode;
-  await loadState();
-  if (item.mode === "review" || pendingApprovals.value.length) await scrollTaskToBottom();
+  try {
+    await queueSelection(`/api/sessions/${item.id}/select`);
+    if (requestVersion !== selectionVersion) return;
+    await loadState({ blocking: false });
+    if (item.mode === "review" || pendingApprovals.value.length) await scrollTaskToBottom();
+  } catch (error) {
+    if (requestVersion !== selectionVersion) return;
+    const previous = previousKey ? workspaceStateCache.get(previousKey) : undefined;
+    if (previous) {
+      restoreWorkspaceState(state, previous);
+      restoreWorkspaceView(previousKey!);
+      mode.value = modeForSession(state.sessions.find((candidate) => candidate.id === previous.sessionId), state.settings.defaultMode);
+      syncTaskSelection();
+    }
+    taskError.value = error instanceof Error ? error.message : "The task could not be opened.";
+  }
 }
 
 async function startNewTask(): Promise<void> {
@@ -771,7 +949,10 @@ async function startNewTask(): Promise<void> {
     selectedTerminalRunId.value = "";
     selectedBrowserActionId.value = "";
     activeView.value = "workspace";
-    await loadState();
+    cacheCurrentWorkspace();
+    resetWorkspaceState(state, projectId);
+    restoreWorkspaceView(workspaceStateKey(projectId));
+    await loadState({ blocking: false });
     mode.value = retainedMode;
     if (state.runtimes.some((item) => item.id === retainedRuntimeId)) {
       selectedRuntimeId.value = retainedRuntimeId;
@@ -818,7 +999,16 @@ async function loadChangeDiff(): Promise<void> {
     changeDiff.value = undefined;
     return;
   }
-  changeLoading.value = true;
+  const sessionId = session.value.id;
+  const path = selectedChange.value;
+  const cacheKey = `${sessionId}:${path}`;
+  const cached = changeDiffCache.get(cacheKey);
+  const requestVersion = ++changeRequestVersion;
+  if (cached) {
+    changeDiff.value = cloneWorkspaceValue(cached);
+    selectedHunkIds.value = selectedHunkIds.value.filter((id) => cached.hunks.some((hunk) => hunk.id === id));
+  }
+  changeLoading.value = !cached;
   changeError.value = "";
   try {
     if (previewMode) {
@@ -834,16 +1024,19 @@ async function loadChangeDiff(): Promise<void> {
       };
       return;
     }
-    const response = await fetch(`/api/sessions/${session.value.id}/diff?path=${encodeURIComponent(selectedChange.value)}`);
+    const response = await fetch(`/api/sessions/${sessionId}/diff?path=${encodeURIComponent(path)}`);
     const result = await response.json() as WorkspaceDiff & { error?: string };
     if (!response.ok) throw new Error(result.error ?? "The diff could not be loaded.");
+    changeDiffCache.set(cacheKey, cloneWorkspaceValue(result));
+    if (requestVersion !== changeRequestVersion || session.value?.id !== sessionId || selectedChange.value !== path) return;
     changeDiff.value = result;
     selectedHunkIds.value = selectedHunkIds.value.filter((id) => result.hunks.some((hunk) => hunk.id === id));
   } catch (error) {
-    changeDiff.value = undefined;
-    changeError.value = error instanceof Error ? error.message : "The diff could not be loaded.";
+    if (requestVersion !== changeRequestVersion) return;
+    if (!cached) changeDiff.value = undefined;
+    changeError.value = error instanceof Error ? error.message : "The diff could not be refreshed.";
   } finally {
-    changeLoading.value = false;
+    if (requestVersion === changeRequestVersion) changeLoading.value = false;
   }
 }
 
@@ -852,7 +1045,14 @@ async function loadSelectedFile(): Promise<void> {
     filePreview.value = undefined;
     return;
   }
-  fileLoading.value = true;
+  const projectId = project.value.id;
+  const sessionId = session.value?.id;
+  const path = selectedFile.value;
+  const cacheKey = `${projectId}:${sessionId ?? "project"}:${path}`;
+  const cached = filePreviewCache.get(cacheKey);
+  const requestVersion = ++fileRequestVersion;
+  if (cached) filePreview.value = cloneWorkspaceValue(cached);
+  fileLoading.value = !cached;
   fileError.value = "";
   try {
     if (previewMode) {
@@ -868,18 +1068,21 @@ async function loadSelectedFile(): Promise<void> {
       };
       return;
     }
-    const fileRoute = session.value
-      ? `/api/sessions/${session.value.id}/file?path=${encodeURIComponent(selectedFile.value)}`
-      : `/api/projects/${project.value.id}/file?path=${encodeURIComponent(selectedFile.value)}`;
+    const fileRoute = sessionId
+      ? `/api/sessions/${sessionId}/file?path=${encodeURIComponent(path)}`
+      : `/api/projects/${projectId}/file?path=${encodeURIComponent(path)}`;
     const response = await fetch(fileRoute);
     const result = await response.json() as WorkspaceFileContent & { error?: string };
     if (!response.ok) throw new Error(result.error ?? "The file could not be previewed.");
+    filePreviewCache.set(cacheKey, cloneWorkspaceValue(result));
+    if (requestVersion !== fileRequestVersion || project.value?.id !== projectId || session.value?.id !== sessionId || selectedFile.value !== path) return;
     filePreview.value = result;
   } catch (error) {
-    filePreview.value = undefined;
-    fileError.value = error instanceof Error ? error.message : "The file could not be previewed.";
+    if (requestVersion !== fileRequestVersion) return;
+    if (!cached) filePreview.value = undefined;
+    fileError.value = error instanceof Error ? error.message : "The file could not be refreshed.";
   } finally {
-    fileLoading.value = false;
+    if (requestVersion === fileRequestVersion) fileLoading.value = false;
   }
 }
 
@@ -1201,12 +1404,20 @@ async function decideApproval(
   duration: ApprovalDuration = "once",
 ): Promise<void> {
   if (approvalActionId.value) return;
+  const index = state.approvals.findIndex((item) => item.id === approval.id);
+  const previous = index >= 0 ? cloneWorkspaceValue(state.approvals[index]!) : undefined;
   approvalActionId.value = approval.id;
+  if (index >= 0) state.approvals[index] = {
+    ...state.approvals[index]!,
+    state: decision === "approve" ? "approved" : "denied",
+  };
   try {
-    await post(`/api/approvals/${approval.id}/decision`, { decision, duration });
-    await refreshLiveEvidence(approval.sessionId);
+    const result = await post(`/api/approvals/${approval.id}/decision`, { decision, duration }) as { approval?: ApprovalSummary };
+    if (result.approval && index >= 0) state.approvals[index] = result.approval;
+    void refreshLiveEvidence(approval.sessionId).catch(() => undefined);
     scheduleRunPoll(true);
   } catch (error) {
+    if (previous && index >= 0) state.approvals[index] = previous;
     taskError.value = error instanceof Error ? error.message : "The approval decision could not be saved.";
   } finally {
     approvalActionId.value = "";
@@ -1469,10 +1680,14 @@ async function requestBrowserAction(
 }
 
 async function interruptTerminal(run: TerminalRunSummary): Promise<void> {
+  const index = state.terminalRuns.findIndex((item) => item.id === run.id);
+  const previous = index >= 0 ? cloneWorkspaceValue(state.terminalRuns[index]!) : undefined;
+  if (index >= 0) state.terminalRuns[index] = { ...state.terminalRuns[index]!, status: "interrupted" };
   try {
     await post(`/api/terminal/${run.id}/interrupt`, {});
-    await refreshLiveEvidence(run.sessionId);
+    void refreshLiveEvidence(run.sessionId).catch(() => undefined);
   } catch (error) {
+    if (previous && index >= 0) state.terminalRuns[index] = previous;
     terminalError.value = error instanceof Error ? error.message : "The command could not be stopped.";
   }
 }
@@ -1554,23 +1769,34 @@ async function exportBrowserReplay(): Promise<void> {
 
 async function interruptRun(): Promise<void> {
   if (!session.value || !sessionIsRunning.value) return;
+  const sessionId = session.value.id;
+  const index = state.sessions.findIndex((item) => item.id === sessionId);
+  const previous = index >= 0 ? cloneWorkspaceValue(state.sessions[index]!) : undefined;
   taskError.value = "";
+  if (index >= 0) state.sessions[index] = { ...state.sessions[index]!, status: "interrupted", updatedAt: new Date().toISOString() };
   try {
-    await post(`/api/sessions/${session.value.id}/interrupt`, {});
-    await loadState();
+    await post(`/api/sessions/${sessionId}/interrupt`, {});
+    void loadState({ blocking: false });
   } catch (error) {
+    if (previous && index >= 0) state.sessions[index] = previous;
     taskError.value = error instanceof Error ? error.message : "The task could not be stopped.";
   }
 }
 
 async function resumeRun(): Promise<void> {
   if (!session.value || sessionIsRunning.value) return;
+  const sessionId = session.value.id;
+  const index = state.sessions.findIndex((item) => item.id === sessionId);
+  const previous = index >= 0 ? cloneWorkspaceValue(state.sessions[index]!) : undefined;
   submitting.value = true;
   taskError.value = "";
+  if (index >= 0) state.sessions[index] = { ...state.sessions[index]!, status: "running", updatedAt: new Date().toISOString() };
   try {
-    await post(`/api/sessions/${session.value.id}/resume`, {});
-    await loadState();
+    await post(`/api/sessions/${sessionId}/resume`, {});
+    scheduleRunPoll(true);
+    void loadState({ blocking: false });
   } catch (error) {
+    if (previous && index >= 0) state.sessions[index] = previous;
     taskError.value = error instanceof Error ? error.message : "The task could not be resumed.";
   } finally {
     submitting.value = false;
@@ -2024,6 +2250,8 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   clearRunPoll();
+  bootstrapAbortController?.abort();
+  if (workspaceRefreshTimer) clearTimeout(workspaceRefreshTimer);
   stopProtocolListener?.();
   stopBrowserStateListener?.();
   browserResizeObserver?.disconnect();
@@ -2068,6 +2296,10 @@ watch([browserLiveSurface, desktopBrowserVisible, () => session.value?.id, brows
           :label="session.worktree.status === 'applied' ? 'Applied' : session.worktree.status === 'applying' ? 'Applying' : session.worktree.status === 'stale' ? 'Needs review' : 'Worktree'"
           :tone="session.worktree.status === 'applied' ? 'success' : session.worktree.status === 'stale' ? 'warning' : 'info'"
         />
+        <span v-if="workspaceRefreshing" class="workspace-sync-status" role="status">
+          <osx-spinner size="small" label="Refreshing workspace" />
+          Refreshing
+        </span>
       </div>
 
       <nav slot="sidebar" class="sidebar" aria-label="Projects and tasks">

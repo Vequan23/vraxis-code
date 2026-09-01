@@ -189,7 +189,7 @@ export function createApp(options: AppOptions) {
       }
     }
   }
-  const recovery = (async () => {
+  const storageRecovery = (async () => {
     await Promise.all([approvals.reconcile(), terminal.reconcile(), verifications.reconcile()]);
     await reconcileWorktreeApplications();
   })();
@@ -215,6 +215,7 @@ export function createApp(options: AppOptions) {
     importedAttachments,
     browser,
   );
+  const recovery = storageRecovery.then(() => execution.reconcile());
   const discover = options.discover ?? discoverRuntimes;
   const runtimeConformance = new RuntimeConformanceRegistry(
     options.dataDirectory,
@@ -650,15 +651,14 @@ export function createApp(options: AppOptions) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/bootstrap") {
-        await execution.reconcile();
-        const data = await registry.read();
-        const sessionData = await sessions.read();
+        const [data, sessionData] = await Promise.all([registry.read(), sessions.read()]);
         const selected = data.projects.find((project) => project.id === data.selectedProjectId);
         const selectedSession = sessionData.draftProjectId === selected?.id
           ? undefined
           : sessionData.sessions.find((session) => session.id === sessionData.selectedSessionId && session.projectId === selected?.id)
             ?? sessionData.sessions.find((session) => session.projectId === selected?.id);
-        let files = selected ? await indexProjectFiles(selected.path) : [];
+        const projectDoctorPromise = selected ? safeProjectDoctor(selected.id, selected.path) : Promise.resolve(undefined);
+        let files: BootstrapState["files"] = [];
         let changes: BootstrapState["changes"] = [];
         if (selectedSession?.worktree) {
           try {
@@ -669,30 +669,55 @@ export function createApp(options: AppOptions) {
             selectedSession.worktree.status = "missing";
             files = [];
           }
-        }
-        const browserState = selectedSession ? await browser.state(selectedSession.id) : undefined;
-        const projectDoctor = selected ? await safeProjectDoctor(selected.id, selected.path) : undefined;
+        } else if (selected) files = await indexProjectFiles(selected.path);
+        const [
+          localRuntimes,
+          providerRuntimes,
+          providerSummaries,
+          projectSkills,
+          browserState,
+          projectDoctor,
+          sessionApprovals,
+          projectApprovalRules,
+          sessionTerminalRuns,
+          sessionVerificationRuns,
+          sessionVerificationHandoffs,
+          userSettings,
+        ] = await Promise.all([
+          discoverLocalRuntimes(),
+          modelProviders.runtimes(),
+          modelProviders.summaries(),
+          selected ? skills.summaries(selected.path) : Promise.resolve([]),
+          selectedSession ? browser.state(selectedSession.id) : Promise.resolve(undefined),
+          projectDoctorPromise,
+          selectedSession ? approvals.list(selectedSession.id) : Promise.resolve([]),
+          selected ? approvals.listRules(selected.id, selectedSession?.id) : Promise.resolve([]),
+          selectedSession ? terminal.list(selectedSession.id) : Promise.resolve([]),
+          selectedSession ? verifications.list(selectedSession.id) : Promise.resolve([]),
+          selectedSession ? verifications.listHandoffs(selectedSession.id) : Promise.resolve([]),
+          settings.read(),
+        ]);
         const state: BootstrapState = {
           contractVersion,
           projects: data.projects,
           sessions: sessionData.sessions,
-          runtimes: withProductCapabilityMatrix([...await discoverLocalRuntimes(), ...await modelProviders.runtimes()]),
-          modelProviders: await modelProviders.summaries(),
-          skills: selected ? await skills.summaries(selected.path) : [],
+          runtimes: withProductCapabilityMatrix([...localRuntimes, ...providerRuntimes]),
+          modelProviders: providerSummaries,
+          skills: projectSkills,
           ...(selected ? { selectedProjectId: selected.id } : {}),
           ...(selectedSession ? { selectedSessionId: selectedSession.id } : {}),
           files,
           changes,
           events: selectedSession ? sessionData.events.filter((event) => event.sessionId === selectedSession.id) : [],
-          approvals: selectedSession ? await approvals.list(selectedSession.id) : [],
-          approvalRules: selected ? await approvals.listRules(selected.id, selectedSession?.id) : [],
-          terminalRuns: selectedSession ? await terminal.list(selectedSession.id) : [],
+          approvals: sessionApprovals,
+          approvalRules: projectApprovalRules,
+          terminalRuns: sessionTerminalRuns,
           ...(projectDoctor ? { projectDoctor } : {}),
-          verificationRuns: selectedSession ? await verifications.list(selectedSession.id) : [],
-          verificationHandoffs: selectedSession ? await verifications.listHandoffs(selectedSession.id) : [],
+          verificationRuns: sessionVerificationRuns,
+          verificationHandoffs: sessionVerificationHandoffs,
           ...(browserState ? { browser: browserState } : {}),
           ...(options.startupRecovery ? { startupRecovery: options.startupRecovery } : {}),
-          settings: await settings.read(),
+          settings: userSettings,
         };
         json(response, 200, state);
         return;

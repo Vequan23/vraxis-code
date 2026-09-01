@@ -189,6 +189,75 @@ test("discloses recovery after an unexpected service exit", async ({ page }) => 
   expect(browserErrors).toEqual([]);
 });
 
+test("switches projects immediately from cache while workspace data revalidates", async ({ page }) => {
+  const browserErrors = collectBrowserErrors(page);
+  const projects = [
+    { id: "project-alpha", name: "Alpha", path: "/Users/engineer/alpha", branch: "main", status: "ready" },
+    { id: "project-beta", name: "Beta", path: "/Users/engineer/beta", branch: "main", status: "ready" },
+  ];
+  const sessions = [
+    { id: "session-alpha", projectId: "project-alpha", title: "Alpha task", mode: "ask", runtimeId: "codex", updatedAt: new Date().toISOString(), status: "idle" },
+    { id: "session-beta", projectId: "project-beta", title: "Beta task", mode: "ask", runtimeId: "codex", updatedAt: new Date().toISOString(), status: "idle" },
+  ];
+  let selectedProjectId = "project-alpha";
+  const pendingSelections: Array<() => void> = [];
+  const bootstrap = (projectId: string) => {
+    const selectedSession = sessions.find((item) => item.projectId === projectId)!;
+    const label = projectId === "project-alpha" ? "Alpha retained context" : "Beta retained context";
+    return {
+      contractVersion: 26,
+      projects,
+      sessions,
+      runtimes: [{ id: "codex", name: "Codex CLI", availability: "installed", detail: "Ready", acceptsCustomModel: true, models: [], capabilities: ["read-only-workspace"] }],
+      modelProviders: [],
+      skills: [],
+      selectedProjectId: projectId,
+      selectedSessionId: selectedSession.id,
+      files: [{ path: `src/${projectId}.ts` }],
+      changes: [],
+      events: [{ id: `message-${projectId}`, sessionId: selectedSession.id, sequence: 1, kind: "message", title: label, detail: label, state: "complete", actor: "agent", timestamp: new Date().toISOString() }],
+      approvals: [], approvalRules: [], terminalRuns: [], verificationRuns: [], verificationHandoffs: [],
+      settings: { theme: "graphite-dark", defaultMode: "ask", defaultRuntimeId: "codex" },
+    };
+  };
+  await page.route("**/api/bootstrap", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(bootstrap(selectedProjectId)),
+  }));
+  await page.route("**/api/projects/*/select", async (route) => {
+    const projectId = route.request().url().split("/").at(-2)!;
+    await new Promise<void>((resolve) => pendingSelections.push(resolve));
+    selectedProjectId = projectId;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "selected" }) });
+  });
+
+  const selectProject = async (name: string) => {
+    await page.locator("osx-source-list").evaluate((element, value) => {
+      element.dispatchEvent(new CustomEvent("change", { detail: [value], bubbles: true, composed: true }));
+    }, name);
+    await expect.poll(() => pendingSelections.length).toBeGreaterThan(0);
+  };
+
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Alpha task" })).toBeVisible();
+  await expect(page.getByText("Alpha retained context", { exact: true })).toBeVisible();
+
+  await selectProject("Beta");
+  await expect(page.getByRole("heading", { name: "Beta task" })).toBeVisible();
+  await expect(page.getByText("Loading workspace", { exact: true })).toHaveCount(0);
+  pendingSelections.shift()!();
+  await expect(page.getByText("Beta retained context", { exact: true })).toBeVisible();
+
+  await selectProject("Alpha");
+  await expect(page.getByRole("heading", { name: "Alpha task" })).toBeVisible();
+  await expect(page.getByText("Alpha retained context", { exact: true })).toBeVisible();
+  await expect(page.getByText("Loading workspace", { exact: true })).toHaveCount(0);
+  pendingSelections.shift()!();
+  await expectBasicAccessibility(page);
+  expect(browserErrors).toEqual([]);
+});
+
 test("keeps project evidence compact and keyboard navigable", async ({ page }, testInfo) => {
   const browserErrors = collectBrowserErrors(page);
   await page.setViewportSize({ width: 1200, height: 560 });

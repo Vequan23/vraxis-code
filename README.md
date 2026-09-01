@@ -1,39 +1,77 @@
 # Vraxis Code
 
-Vraxis Code is a local workspace for giving coding agents a job, watching what they do, and reviewing every change before it reaches your project.
+## Give an agent a real workspace
 
-The current vertical slice includes the three-pane workspace, persisted project registration and settings, safe text-file previews, and project-scoped file indexing. Ask, Plan, and Review tasks execute through agent-v with durable ordered events, read-only workspace access, stop, recovery, and resume. Build tasks use a dedicated Git worktree, writable runtime capability checks, a visible branch, a changed-file list, and exact Git patches. Product-owned approvals guard agent tools, terminal commands, browser actuation, verification, and recovery actions. Signed [team policy packs](docs/product/team-policy.md) let trusted installations share ask-or-deny guardrails without granting access remotely. Live PTY output, browser action frames, visible page text, console and credential-redacted network evidence, and retained verification receipts stay attached to the task in one evidence ledger. The desktop app hosts the task browser as a real sandboxed `WebContentsView` in an isolated in-memory partition; the web development build retains the Playwright fallback. Browser evidence can be exported as a self-contained, network-inert replay with actor and approval provenance. A signed Understand artifact turns the ledger into a changed-path coverage map, evidence-backed verdict, residual-risk list, rollback point, and teach-back prompts without exporting prompts, command output, browser text, URLs, or hidden model reasoning.
+Vraxis Code is a local coding app for running agents, watching their work, and reviewing every change. Your project stays on your machine. Builds happen in isolated Git worktrees. Terminal commands, browser actions, credentials, and project writes stay behind explicit approval.
 
-## Start the project
+The workspace puts the conversation, code, terminal, browser, changes, approvals, and verification history in one place.
 
-Requires Node.js 22.12 or newer.
+### What works today
+
+- Run Ask, Plan, Build, and Review tasks through [`@vraxis/agent-v`](https://www.npmjs.com/package/@vraxis/agent-v).
+- Discover local Codex, Claude Code, OpenCode, Cursor, and other compatible runtimes.
+- Keep each Build in its own Git worktree by default.
+- Inspect exact patches before applying them to your project.
+- Run a live PTY terminal with approval, interruption, resize, search, and retained output.
+- Control a sandboxed Chromium browser from the app or an agent.
+- Capture screenshots, visible text, console logs, network evidence, and action receipts.
+- Discover project checks without running project code.
+- Save verification results and recovery state across restarts.
+- Export signed task proof and an offline browser replay.
+
+## Start locally
+
+Vraxis Code requires Node.js 22.12 or newer.
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open `http://127.0.0.1:4318`. The web app proxies API calls to the local service at `http://127.0.0.1:4317`.
+Open `http://127.0.0.1:4318`. The web app connects to the local service at `http://127.0.0.1:4317`.
 
-Run the full project gate:
+Run the full project gate before submitting a change:
 
 ```bash
 npm run check
 ```
 
-The [coding harness conformance record](docs/product/coding-harness-conformance.md) maps the product and agent-v guarantees to the proficiency checklist, including strict edits, context budgets, automatic verification, command lifecycle, permissions, recovery, and the remaining competitive work.
+## How a Build works
 
-Public macOS releases use a tag-gated, fail-closed signing and notarization workflow. See the [release procedure](docs/product/releasing.md) for required secrets, artifact verification, and the current update-delivery boundary.
+1. Choose a project and runtime.
+2. Describe the change in the composer.
+3. Vraxis creates an isolated worktree and starts the agent.
+4. The agent requests approval before guarded actions.
+5. Review the patch and verification evidence.
+6. Apply, revert, archive, or restore the worktree.
 
-Core product states run through automated WCAG 2.0/2.1 A and AA checks in Playwright. The [accessibility quality contract](docs/product/accessibility.md) records automated coverage and the manual assistive-technology checks still required for a stable release.
+The agent never receives unrestricted filesystem, Electron, or provider-key access from the renderer. The local service validates project paths and owns every privileged action.
 
-Unexpected exits can be handed off through [privacy-bounded recovery diagnostics](docs/product/recovery-diagnostics.md): copy a safe incident summary, export a versioned local support bundle, or open the public bug form. No report or local artifact is uploaded automatically.
+## Browser and terminal
+
+The desktop browser runs as a sandboxed Electron `WebContentsView` with a task-scoped in-memory partition. Agents act through mapped page controls instead of arbitrary selectors. Vraxis blocks downloads. It also removes URL query values and common credentials from exported evidence.
+
+The web development build uses an isolated Playwright browser. Both browser paths retain action frames, page text, console output, network evidence, and approval provenance with the task.
+
+The terminal uses a real PTY. Agent commands and user commands share the same visible session. Command execution, interruption, and retained output follow the product approval policy.
+
+## Runtime support
+
+Vraxis Code uses `@vraxis/agent-v` for runtime discovery and execution. Each runtime reports support for repository reads, isolated writes, terminal access, browser control, skills, model selection, and retained task evidence before a task starts.
+
+Hosted runtimes receive guarded project tools. Compatible local coding CLIs receive the same tools through a private MCP bridge. Each bridge belongs to one task. It exposes redacted evidence state without leaking command output, page content, URLs, credentials, or approval details.
+
+## Verification and proof
+
+Project Doctor reads manifests and finds the checks a project already defines. Projects can add a bounded [`.vraxis/verify.json`](docs/product/verification-recipes.md) file for service startup, loopback health checks, route assertions, visible-page assertions, and image baselines.
+
+Verification results stay attached to the task. A completed task can export signed JSON proof, printable offline HTML, or a secret-minimized [Understand artifact](docs/product/understand-artifacts.md). Nothing uploads automatically.
 
 ## Repository map
 
 ```text
 apps/
-  desktop/      Vraxis Desktop manifest and native integration
+  desktop/      Electron lifecycle and native integration
   service/      local Node service and project access boundary
   web/          Vue renderer and workspace interface
 packages/
@@ -45,14 +83,27 @@ docs/
   security/     threat model and permission policy
 ```
 
-The renderer never receives Node.js, Electron, provider credentials, or unrestricted filesystem access. The local service validates every project path and keeps terminal and browser control behind inspectable capability requests.
+## Product contracts
 
-## Current cut line
+- [Workspace and task behavior](docs/product/workspace.md)
+- [Security model](docs/security/threat-model.md)
+- [Terminal and browser capabilities](docs/decisions/0002-terminal-and-browser-capabilities.md)
+- [Isolated Build worktrees](docs/decisions/0003-isolate-build-worktrees.md)
+- [Embedded live browser view](docs/decisions/0011-embed-live-browser-view.md)
+- [Verification recipes](docs/product/verification-recipes.md)
+- [Team approval policy](docs/product/team-policy.md)
+- [Recovery diagnostics](docs/product/recovery-diagnostics.md)
+- [Accessibility contract](docs/product/accessibility.md)
+- [Release procedure](docs/product/releasing.md)
 
-Every live browser session is isolated from the user's personal browser. Desktop uses a task-scoped in-memory Chromium partition and intentionally drops live authentication authority when the app exits. The web fallback seals cookies, local storage, and IndexedDB as an AES-256-GCM envelope bound to the session identity, while the encryption key remains in the operating-system credential store. Exact browser evidence is retained separately and remains sensitive even though it does not grant a live authenticated session.
+## Current boundaries
 
-Build mode creates an isolated baseline from the approved repository's current tracked and non-ignored files, including repositories without a first commit. A runtime must advertise `workspace-write`; hosted agent-v runtimes receive guarded workspace tools, while compatible local harnesses receive the same product tools through agent-v's private per-run MCP bridge and run natively read-only. The bridge exposes a task-scoped `evidence-status` tool so Codex, Claude Code, OpenCode, Cursor, and hosted runtimes can reason about retained approval, terminal, browser, verification, and handoff state without receiving raw commands, output, approval scope, URLs, page content, notes, or credentials. Its `request-verification` tool records a durable handoff only: the user still reviews the exact project-owned recipe and explicitly starts or dismisses it, and every command keeps the normal approval lifecycle. Reviewed changes can be checkpointed, applied, reverted, archived, cleaned up, and restored through the product approval lifecycle without committing the project or changing its index. Scoped approval rules can be remembered for a task or project, while sensitive actions always require a fresh decision. Settings includes a device-level Permission Center for inspecting and revoking durable authority and exporting a redacted active-and-revoked policy audit. Trusted signed team policies layer portable ask-or-deny rules over that local authority, include policy provenance on governed approvals and audits, and require explicit local confirmation before removal. The PTY terminal streams input and output, supports resize and interruption, and preserves a bounded searchable receipt. The desktop browser is a real interactive `WebContentsView`; the web build uses the isolated Playwright fallback. Both paths let agents request a first origin through approval, expose mapped controls instead of arbitrary selectors, block downloads, redact network query values, serialize concurrent actions, and record before/after frames for action replay. Browser state, screenshots, visible text, control maps, console/network evidence, origin grants, and action receipts are atomically retained per task; after restart the UI presents them as saved, non-actuatable evidence until an approved restore refreshes the live control map. Retained action frames can be exported as one offline HTML replay with playback controls, action phase, actor, status, target, and approval identifiers. The export embeds pixels locally, strips secret-bearing metadata, and has no external network, form, object, or framing authority; screenshots can still contain private page content and must be reviewed before sharing.
+- Browser sessions never reuse the user's personal browser profile.
+- Live browser authentication expires when the desktop app exits.
+- Browser evidence can still contain private page content. Review it before sharing.
+- Build writes stay inside an isolated worktree unless the user approves an apply action.
+- Sensitive actions always require a fresh decision.
+- Runtime maintenance runs as an approval-gated task with visible terminal output.
+- Public macOS releases fail closed when signing or notarization is unavailable.
 
-Project Doctor inspects manifests without executing code, discovers the project's own checks and local browser target, and turns those recipes into approval-gated terminal runs. Repositories that need an exact contract can add a bounded [`.vraxis/verify.json` recipe](docs/product/verification-recipes.md) with governed service startup and loopback health, explicit checks, exact-route and visible-page assertions, and tolerance-based PNG baselines. Verification state and agent handoffs survive restarts, services tear down on every terminal outcome, and a Build is never labeled verified while required proof is missing or captured from the wrong page. Each run carries a stable SHA-256 recipe identity; completed, failed, or interrupted proof can rerun the retained recipe through fresh approvals while preserving lineage and current changed-file scope. Every runtime publishes a product-level preflight matrix for repository reads, isolated Build, governed terminal, controlled browser, skills, model selection, task evidence, and retained verification, so unavailable features are explained before a task starts. Settings separates the registered adapter and host-tool isolation contract from an explicit live conformance probe; the probe makes one bounded provider request, persists its result only for that runtime version, and becomes stale after an update. Runtime install, authentication, and update commands are re-derived by the service and become dedicated approval-gated maintenance tasks with fresh-only authority and retained PTY output instead of untracked shell instructions. Quick Start derives its four steps from those persisted runtime, Project Doctor, task, and verification state, guiding a clean installation toward portable signed proof without a parallel wizard state; an automated end-to-end readiness budget covers the same journey. A task can export a self-verifying Ed25519 JSON proof or printable offline HTML projection with a strict CSP, escaped untrusted content, common credential redaction, and signed `vraxis-code://` links that reopen exact evidence. Secret-bearing URL, authorization, token, environment-assignment, and command-flag values are removed from the canonical receipt before signing, so both JSON and HTML share the same safe export boundary while retained local evidence remains exact. It can also create [`vraxis.understand-artifact@1`](docs/product/understand-artifacts.md), signed by the same installation identity and linked to its source proof, for a smaller deliberately secret-minimized explanation surface. The Proof identity & trust center exports only the installation's public identity, enrolls and revokes external signers, reports signature validity separately from trust, and rotates the local key through an explicit two-step flow that downloads a dual-signed attestation while preserving old-proof verification. Unexpected exits are detected on the next launch and reconciled evidence is disclosed before work resumes. See [the competitive harness plan](docs/product/competitive-harness-plan.md).
-
-See [the foundation decision](docs/decisions/0001-process-boundary.md) and [the product contract](docs/product/workspace.md) for the reasoning behind the first slice.
+See the [process boundary decision](docs/decisions/0001-process-boundary.md) for the core architecture.

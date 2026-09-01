@@ -9,6 +9,11 @@ interface TreeNode {
   children: TreeNode[];
 }
 
+interface MutableTreeNode extends TreeNode {
+  childIndex: Map<string, MutableTreeNode>;
+  children: MutableTreeNode[];
+}
+
 interface TreeRow extends TreeNode {
   depth: number;
 }
@@ -26,15 +31,17 @@ const query = ref("");
 const collapsed = ref(new Set<string>());
 
 const roots = computed(() => {
-  const root: TreeNode = { name: "", path: "", directory: true, children: [] };
+  const root: MutableTreeNode = { name: "", path: "", directory: true, children: [], childIndex: new Map() };
   for (const file of props.files) {
     const parts = file.path.split("/").filter(Boolean);
     let parent = root;
+    let path = "";
     parts.forEach((name, index) => {
-      const path = parts.slice(0, index + 1).join("/");
-      let node = parent.children.find((item) => item.name === name);
+      path = path ? `${path}/${name}` : name;
+      let node = parent.childIndex.get(name);
       if (!node) {
-        node = { name, path, directory: index < parts.length - 1, children: [] };
+        node = { name, path, directory: index < parts.length - 1, children: [], childIndex: new Map() };
+        parent.childIndex.set(name, node);
         parent.children.push(node);
       }
       parent = node;
@@ -51,11 +58,17 @@ const roots = computed(() => {
 const rows = computed(() => {
   const result: TreeRow[] = [];
   const needle = query.value.trim().toLowerCase();
-  const matches = (node: TreeNode): boolean =>
-    !needle || node.path.toLowerCase().includes(needle) || node.children.some(matches);
+  const matchingPaths = new Set<string>();
+  const collectMatches = (node: TreeNode): boolean => {
+    const childMatches = node.children.some(collectMatches);
+    const matches = node.path.toLowerCase().includes(needle) || childMatches;
+    if (matches) matchingPaths.add(node.path);
+    return matches;
+  };
+  if (needle) roots.value.forEach(collectMatches);
   const walk = (nodes: TreeNode[], depth: number): void => {
     for (const node of nodes) {
-      if (!matches(node)) continue;
+      if (needle && !matchingPaths.has(node.path)) continue;
       result.push({ ...node, depth });
       if (node.directory && (needle || !collapsed.value.has(node.path))) walk(node.children, depth + 1);
     }
