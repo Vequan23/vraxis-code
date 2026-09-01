@@ -12,6 +12,7 @@ import type {
   WorktreeSummary,
   SessionEventsResponse,
   SessionSummary,
+  SteeringDelivery,
 } from "@vraxis/code-contracts";
 
 interface SessionData {
@@ -24,6 +25,14 @@ interface SessionData {
 
 export interface SessionStreamUpdate extends SessionEventsResponse {
   cursor: number;
+}
+
+export interface PendingSteeringInput {
+  eventId: string;
+  prompt: string;
+  attachments: PromptAttachment[];
+  skillIds: string[];
+  delivery: SteeringDelivery;
 }
 
 const emptyData: SessionData = { schemaVersion: 1, sessions: [], events: [] };
@@ -106,6 +115,36 @@ export class SessionRegistry {
       data.events.push(event);
       session.updatedAt = timestamp;
       session.status = "idle";
+      data.selectedSessionId = session.id;
+      delete data.draftProjectId;
+      return event;
+    });
+  }
+
+  async steer(
+    sessionId: string,
+    input: AppendMessageRequest,
+    skills: SkillReference[] = [],
+    delivery: SteeringDelivery = "queue",
+  ): Promise<ActivityEvent> {
+    return this.mutate((data) => {
+      const session = this.session(data, sessionId);
+      if (session.status !== "running") throw new TypeError("This task is not currently running.");
+      if (input.mode && input.mode !== session.mode) throw new TypeError("Wait for the current turn before changing task mode.");
+      if (input.runtimeId && input.runtimeId !== session.runtimeId) throw new TypeError("Wait for the current turn before changing runtime.");
+      const requestedModel = input.modelId === null ? undefined : input.modelId;
+      if (input.modelId !== undefined && requestedModel !== session.modelId) throw new TypeError("Wait for the current turn before changing model.");
+      if (delivery === "redirect") {
+        for (const queued of data.events) {
+          if (queued.sessionId === sessionId && queued.steering?.state === "queued") queued.steering.state = "superseded";
+        }
+      }
+      const timestamp = new Date().toISOString();
+      const event = this.userEvent(session, input.prompt, this.nextSequence(data, sessionId), timestamp, input.attachments, skills);
+      event.steering = { delivery, state: "queued" };
+      data.events.push(event);
+      session.updatedAt = timestamp;
+      this.refreshSteering(data, session);
       data.selectedSessionId = session.id;
       delete data.draftProjectId;
       return event;
@@ -498,15 +537,15 @@ export class SessionRegistry {
     });
   }
 
-  async interrupt(sessionId: string): Promise<void> {
+  async interrupt(sessionId: string, reason = "Stopped by the user.", title = "Task stopped"): Promise<void> {
     await this.mutate((data) => {
       const session = this.session(data, sessionId);
       if (session.status !== "running") return;
       this.settleOpenEvents(data, session.id, "interrupted");
       this.pushEvent(data, session, {
         kind: "lifecycle",
-        title: "Task stopped",
-        detail: "The agent was stopped. Your conversation remains available.",
+        title,
+        detail: reason,
         state: "interrupted",
         actor: "system",
       });
@@ -517,7 +556,7 @@ export class SessionRegistry {
         attempt: session.settlement?.attempt ?? 1,
         startedAt: session.settlement?.startedAt ?? session.updatedAt,
         settledAt: session.updatedAt,
-        reason: "Stopped by the user.",
+        reason,
         resumable: true,
       };
     });
@@ -575,13 +614,52 @@ export class SessionRegistry {
     return { prompt: event.title, attachments: event.attachments ?? [], skillIds: event.skills?.map((skill) => skill.id) ?? [] };
   }
 
-  async conversationBeforeLatestUser(sessionId: string): Promise<Array<{ actor: "user" | "agent"; text: string }>> {
+  async nextSteeringInput(sessionId: string): Promise<PendingSteeringInput | undefined> {
     const data = await this.read();
     this.session(data, sessionId);
+    const event = data.events
+      .filter((item) => item.sessionId === sessionId && item.kind === "message" && item.actor === "user" && item.steering?.state === "queued")
+      .sort((left, right) => left.sequence - right.sequence)[0];
+    if (!event?.steering) return undefined;
+    return {
+      eventId: event.id,
+      prompt: event.title,
+      attachments: event.attachments ?? [],
+      skillIds: event.skills?.map((skill) => skill.id) ?? [],
+      delivery: event.steering.delivery,
+    };
+  }
+
+  async markSteeringRunning(sessionId: string, eventId: string): Promise<void> {
+    await this.updateSteeringEvent(sessionId, eventId, "running");
+  }
+
+  async markSteeringHandled(sessionId: string, eventId: string): Promise<void> {
+    await this.updateSteeringEvent(sessionId, eventId, "handled");
+  }
+
+  async markSteeringSuperseded(sessionId: string, eventId: string): Promise<void> {
+    await this.updateSteeringEvent(sessionId, eventId, "superseded");
+  }
+
+  async conversationBeforeLatestUser(
+    sessionId: string,
+    userEventId?: string,
+  ): Promise<Array<{ actor: "user" | "agent"; text: string }>> {
+    const data = await this.read();
+    this.session(data, sessionId);
+    const targetSequence = userEventId
+      ? data.events.find((event) => event.id === userEventId && event.sessionId === sessionId)?.sequence
+      : undefined;
+    if (userEventId && targetSequence === undefined) throw new TypeError("Steering instruction was not found.");
     const messages = data.events
-      .filter((event) => event.sessionId === sessionId && event.kind === "message" && (event.actor === "user" || event.actor === "agent"))
+      .filter((event) => event.sessionId === sessionId
+        && event.kind === "message"
+        && (event.actor === "user" || event.actor === "agent")
+        && (targetSequence === undefined || event.sequence < targetSequence)
+        && event.steering?.state !== "queued")
       .map((event) => ({ actor: event.actor as "user" | "agent", text: event.title }));
-    if (messages[messages.length - 1]?.actor === "user") messages.pop();
+    if (targetSequence === undefined && messages[messages.length - 1]?.actor === "user") messages.pop();
     return messages;
   }
 
@@ -626,6 +704,34 @@ export class SessionRegistry {
       event.state = state;
       event.timestamp = new Date().toISOString();
     }
+  }
+
+  private async updateSteeringEvent(
+    sessionId: string,
+    eventId: string,
+    state: "running" | "handled" | "superseded",
+  ): Promise<void> {
+    await this.mutate((data) => {
+      const session = this.session(data, sessionId);
+      const event = data.events.find((item) => item.id === eventId && item.sessionId === sessionId);
+      if (!event?.steering) throw new TypeError("Steering instruction was not found.");
+      event.steering.state = state;
+      session.updatedAt = new Date().toISOString();
+      this.refreshSteering(data, session);
+    });
+  }
+
+  private refreshSteering(data: SessionData, session: SessionSummary): void {
+    const queued = data.events.filter((event) => event.sessionId === session.id && event.steering?.state === "queued");
+    if (!queued.length) {
+      delete session.steering;
+      return;
+    }
+    session.steering = {
+      state: queued.some((event) => event.steering?.delivery === "redirect") ? "redirecting" : "queued",
+      pendingCount: queued.length,
+      updatedAt: new Date().toISOString(),
+    };
   }
 
   private pushEvent(

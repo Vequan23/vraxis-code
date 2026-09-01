@@ -137,6 +137,15 @@ export interface TaskSettlementSummary {
   resumable: boolean;
 }
 
+export const steeringDeliveries = ["queue", "redirect"] as const;
+export type SteeringDelivery = (typeof steeringDeliveries)[number];
+
+export interface SessionSteeringSummary {
+  state: "queued" | "redirecting";
+  pendingCount: number;
+  updatedAt: string;
+}
+
 export interface ProjectSummary {
   id: string;
   name: string;
@@ -155,6 +164,7 @@ export interface SessionSummary {
   updatedAt: string;
   status: "idle" | "running" | "interrupted" | "failed";
   settlement?: TaskSettlementSummary;
+  steering?: SessionSteeringSummary;
   worktree?: WorktreeSummary;
   worktreeHistory?: WorktreeSummary[];
 }
@@ -246,6 +256,7 @@ export type RuntimeProductCapabilityId =
   | "isolated-build"
   | "governed-terminal"
   | "controlled-browser"
+  | "steerable-task"
   | "task-evidence"
   | "skills"
   | "model-catalog"
@@ -381,6 +392,10 @@ export interface ActivityEvent {
   actor?: "user" | "agent" | "system";
   attachments?: PromptAttachment[];
   skills?: SkillReference[];
+  steering?: {
+    delivery: SteeringDelivery;
+    state: "queued" | "running" | "handled" | "superseded";
+  };
 }
 
 export type ApprovalCapability = "write" | "command" | "network" | "browser" | "credentials" | "destructive" | "other";
@@ -1051,6 +1066,7 @@ export interface CreateSessionRequest {
 
 export interface AppendMessageRequest {
   prompt: string;
+  delivery?: SteeringDelivery;
   mode?: SessionMode;
   runtimeId?: string;
   modelId?: string | null;
@@ -1310,6 +1326,11 @@ export function parseCreateSessionRequest(value: unknown): CreateSessionRequest 
 export function parseAppendMessageRequest(value: unknown): AppendMessageRequest {
   const input = record(value, "Message request");
   const result: AppendMessageRequest = { prompt: requiredString(input.prompt, "Task") };
+  if (input.delivery !== undefined) {
+    const delivery = requiredString(input.delivery, "Message delivery");
+    if (!steeringDeliveries.includes(delivery as SteeringDelivery)) throw new TypeError("Message delivery must be queue or redirect.");
+    result.delivery = delivery as SteeringDelivery;
+  }
   if (input.mode !== undefined) result.mode = sessionMode(input.mode);
   if (input.runtimeId !== undefined) result.runtimeId = requiredString(input.runtimeId, "Runtime ID");
   if (input.modelId === null) result.modelId = null;

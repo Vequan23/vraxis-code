@@ -66,6 +66,40 @@ async function fixture(
   };
 }
 
+class ControlledFirstRunEngine extends DeterministicCodingRuntimeEngine {
+  readonly prompts: string[] = [];
+  readonly firstStarted: Promise<void>;
+  private releaseFirstRun?: () => void;
+  private resolveFirstStarted!: () => void;
+  private runCount = 0;
+
+  constructor() {
+    super();
+    this.firstStarted = new Promise<void>((resolve) => { this.resolveFirstStarted = resolve; });
+  }
+
+  releaseFirst(): void {
+    this.releaseFirstRun?.();
+  }
+
+  override async run<T>(request: CodingRuntimeRequest<T>, sink?: EventSink): Promise<CodingRuntimeResult<T>> {
+    const index = this.runCount++;
+    this.prompts.push(request.input.prompt);
+    if (index === 0) {
+      this.resolveFirstStarted();
+      await new Promise<void>((resolve, reject) => {
+        this.releaseFirstRun = resolve;
+        if (request.abortSignal?.aborted) {
+          reject(new DOMException("The task was stopped.", "AbortError"));
+          return;
+        }
+        request.abortSignal?.addEventListener("abort", () => reject(new DOMException("The task was stopped.", "AbortError")), { once: true });
+      });
+    }
+    return super.run(request, sink);
+  }
+}
+
 const execFileAsync = promisify(execFile);
 
 test("exposes graceful resource shutdown for the service host", async () => {
@@ -672,7 +706,7 @@ test("connects a direct model provider without exposing its credential", async (
   const providerRuntime = state.runtimes.find((item) => item.id === connected.id);
   assert.equal(providerRuntime?.productCapabilities?.find((item) => item.id === "controlled-browser")?.state, "available");
   const { productCapabilities: _productCapabilities, ...runtimeWithoutProductCapabilities } = providerRuntime!;
-  assert.equal(_productCapabilities?.length, 8);
+  assert.equal(_productCapabilities?.length, 9);
   assert.deepEqual(runtimeWithoutProductCapabilities, {
     id: connected.id,
     name: "My models",
@@ -1553,6 +1587,98 @@ test("stops and resumes a running task without losing its history", async (conte
   assert.equal(state.sessions[0]?.status, "running");
   assert.equal(state.events.filter((event) => event.title === "Inspect the project").length, 1);
   await fetch(`${app.baseUrl}/api/sessions/${session.id}/interrupt`, { method: "POST" });
+});
+
+test("queues a follow-up without interrupting the active turn", async (context) => {
+  const engine = new ControlledFirstRunEngine();
+  const app = await fixture(undefined, engine);
+  context.after(() => app.close());
+  const project = await (await fetch(`${app.baseUrl}/api/projects`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path: app.project }),
+  })).json() as { id: string };
+  const created = await fetch(`${app.baseUrl}/api/sessions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ projectId: project.id, mode: "ask", runtimeId: "codex", prompt: "Inspect the project" }),
+  });
+  const session = await created.json() as { id: string };
+  await engine.firstStarted;
+
+  const steered = await fetch(`${app.baseUrl}/api/sessions/${session.id}/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Then inspect the tests", delivery: "queue" }),
+  });
+  assert.equal(steered.status, 202);
+  const accepted = await steered.json() as { status: string; steering?: { state: string; pendingCount: number } };
+  assert.equal(accepted.status, "running");
+  assert.deepEqual(accepted.steering && { state: accepted.steering.state, pendingCount: accepted.steering.pendingCount }, { state: "queued", pendingCount: 1 });
+  assert.deepEqual(engine.prompts, ["Inspect the project"]);
+
+  engine.releaseFirst();
+  const state = await waitForIdle(app.baseUrl);
+  assert.deepEqual(engine.prompts, ["Inspect the project", "Then inspect the tests"]);
+  const steeredEvent = state.events.find((event) => event.title === "Then inspect the tests") as typeof state.events[number] & { steering?: { state: string } };
+  assert.equal(steeredEvent.steering?.state, "handled");
+});
+
+test("interrupts the active turn and immediately applies a redirected instruction", async (context) => {
+  const engine = new ControlledFirstRunEngine();
+  const app = await fixture(undefined, engine);
+  context.after(() => app.close());
+  const project = await (await fetch(`${app.baseUrl}/api/projects`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path: app.project }),
+  })).json() as { id: string };
+  const session = await (await fetch(`${app.baseUrl}/api/sessions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ projectId: project.id, mode: "ask", runtimeId: "codex", prompt: "Inspect the project" }),
+  })).json() as { id: string };
+  await engine.firstStarted;
+
+  const redirected = await fetch(`${app.baseUrl}/api/sessions/${session.id}/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Stop and inspect the parser first", delivery: "redirect" }),
+  });
+  assert.equal(redirected.status, 202);
+  const state = await waitForIdle(app.baseUrl);
+  assert.deepEqual(engine.prompts, ["Inspect the project", "Stop and inspect the parser first"]);
+  assert.ok(state.events.some((event) => event.title === "Direction updated"));
+  const steeredEvent = state.events.find((event) => event.title === "Stop and inspect the parser first") as typeof state.events[number] & { steering?: { delivery: string; state: string } };
+  assert.deepEqual(steeredEvent.steering, { delivery: "redirect", state: "handled" });
+});
+
+test("resumes the oldest queued instruction once after a manual stop", async (context) => {
+  const engine = new ControlledFirstRunEngine();
+  const app = await fixture(undefined, engine);
+  context.after(() => app.close());
+  const project = await (await fetch(`${app.baseUrl}/api/projects`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path: app.project }),
+  })).json() as { id: string };
+  const session = await (await fetch(`${app.baseUrl}/api/sessions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ projectId: project.id, mode: "ask", runtimeId: "codex", prompt: "Inspect the project" }),
+  })).json() as { id: string };
+  await engine.firstStarted;
+  await fetch(`${app.baseUrl}/api/sessions/${session.id}/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Inspect the tests next", delivery: "queue" }),
+  });
+  await fetch(`${app.baseUrl}/api/sessions/${session.id}/interrupt`, { method: "POST" });
+
+  const resumed = await fetch(`${app.baseUrl}/api/sessions/${session.id}/resume`, { method: "POST" });
+  assert.equal(resumed.status, 202);
+  await waitForIdle(app.baseUrl);
+  assert.deepEqual(engine.prompts, ["Inspect the project", "Inspect the tests next"]);
 });
 
 test("requires a product approval before running a terminal command", async (context) => {

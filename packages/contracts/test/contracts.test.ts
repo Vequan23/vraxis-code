@@ -165,6 +165,18 @@ test("parses a task with one of the four product modes", () => {
   });
 });
 
+test("parses explicit task steering delivery", () => {
+  assert.deepEqual(parseAppendMessageRequest({ prompt: "Check the failing test next", delivery: "queue" }), {
+    prompt: "Check the failing test next",
+    delivery: "queue",
+  });
+  assert.deepEqual(parseAppendMessageRequest({ prompt: "Stop and use the existing helper", delivery: "redirect" }), {
+    prompt: "Stop and use the existing helper",
+    delivery: "redirect",
+  });
+  assert.throws(() => parseAppendMessageRequest({ prompt: "Do this", delivery: "immediate" }), /queue or redirect/);
+});
+
 test("parses a follow-up runtime selection and rejects an empty follow-up", () => {
   assert.deepEqual(parseAppendMessageRequest({
     prompt: " Continue the review ",

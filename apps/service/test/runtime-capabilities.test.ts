@@ -20,7 +20,7 @@ function runtime(overrides: Partial<RuntimeSummary> = {}): RuntimeSummary {
 
 test("publishes the enforced product surface for a governed local harness", () => {
   const result = withProductCapabilities(runtime());
-  assert.equal(result.productCapabilities?.length, 8);
+  assert.equal(result.productCapabilities?.length, 9);
   assert.ok(result.productCapabilities?.every((item) => item.state === "available"));
 });
 

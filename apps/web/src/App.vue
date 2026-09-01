@@ -33,6 +33,7 @@ import {
   type SessionLiveEvidenceResponse,
   type SessionStreamPayload,
   type SessionSummary,
+  type SteeringDelivery,
   type TerminalRunSummary,
   type TeamPolicyBundleV1,
   type TeamPolicyCreateRequest,
@@ -93,8 +94,10 @@ interface PreparedPrompt {
   mode: SessionMode;
   runtimeId: string;
   modelId: string;
+  delivery?: SteeringDelivery;
 }
 const pendingAttachmentHandoff = ref<PreparedPrompt>();
+const steeringDelivery = ref<SteeringDelivery>("queue");
 const initialRuntimeId = state.settings.defaultRuntimeId
   ?? state.runtimes.find((item) => item.availability === "installed")?.id
   ?? state.runtimes[0]?.id
@@ -224,7 +227,14 @@ const runtimeCapabilitySummary = computed(() => {
 });
 const modelSuggestions = computed(() => runtime.value?.models.filter((item) => item.availability !== "missing") ?? []);
 const composerModelOptions = computed<OsxAgentComposerOption[]>(() => {
-  const options: OsxAgentComposerOption[] = [{ id: "", label: "Runtime default", icon: "bot" }];
+  const locked = session.value?.status === "running";
+  const options: OsxAgentComposerOption[] = [{
+    id: "",
+    label: "Runtime default",
+    icon: "bot",
+    disabled: locked,
+    ...(locked ? { disabledReason: "Model changes apply after the current turn." } : {}),
+  }];
   for (const item of modelSuggestions.value) {
     options.push({
       id: item.id,
@@ -232,11 +242,20 @@ const composerModelOptions = computed<OsxAgentComposerOption[]>(() => {
       description: item.description,
       badge: item.isDefault ? "Default" : undefined,
       icon: "bot",
+      disabled: locked,
+      ...(locked ? { disabledReason: "Model changes apply after the current turn." } : {}),
     });
   }
   const selected = selectedModelId.value.trim();
   if (selected && !options.some((item) => item.id === selected)) {
-    options.push({ id: selected, label: selected, description: "Configured for this runtime", icon: "bot" });
+    options.push({
+      id: selected,
+      label: selected,
+      description: "Configured for this runtime",
+      icon: "bot",
+      disabled: locked,
+      ...(locked ? { disabledReason: "Model changes apply after the current turn." } : {}),
+    });
   }
   return options;
 });
@@ -451,7 +470,22 @@ const sourceItems = computed(() => state.projects.map((item) => item.name).join(
 const sourceIcons = computed(() => JSON.stringify(Object.fromEntries(state.projects.map((item) => [item.name, "folder"]))));
 const modeLabel = computed(() => mode.value.charAt(0).toUpperCase() + mode.value.slice(1));
 const sessionIsRunning = computed(() => session.value?.status === "running");
-const composerState = computed(() => sessionIsRunning.value ? "streaming" : submitting.value ? "submitting" : taskError.value ? "error" : "idle");
+const composerModeOptions = computed<OsxAgentComposerOption[]>(() => {
+  const locked = sessionIsRunning.value;
+  const disabledReason = locked ? "Mode changes apply after the current turn." : undefined;
+  const options: OsxAgentComposerOption[] = [
+    { id: "ask", label: "Ask", description: "Read the project and answer without editing.", icon: "search" },
+    { id: "plan", label: "Plan", description: "Investigate and prepare an implementation plan.", icon: "list-checks" },
+    { id: "build", label: "Build", description: "Make changes inside an isolated worktree.", icon: "code" },
+    { id: "review", label: "Review", description: "Inspect changes without editing them.", icon: "eye" },
+  ];
+  return options.map((item) => ({ ...item, disabled: locked, ...(disabledReason ? { disabledReason } : {}) }));
+});
+const composerState = computed(() => submitting.value
+  ? "submitting"
+  : taskError.value ? "error"
+  : sessionIsRunning.value ? "streaming"
+  : "idle");
 const firstRunBusy = computed(() => registering.value
   || runtimeRefreshing.value
   || Boolean(runtimeProbingId.value)
@@ -464,7 +498,13 @@ const composerError = computed(() => taskError.value
 const authorityModeLabel = computed(() => state.settings.authorityMode === "full-access"
   ? "Project-scoped approvals"
   : state.settings.authorityMode === "trusted-worktree" ? "Task-scoped approvals" : "Approve each action");
-const composerStatus = computed(() => `${modeLabel.value} · ${runtime.value?.name ?? "Choose runtime"} · ${mode.value === "build"
+const composerStatus = computed(() => sessionIsRunning.value
+  ? session.value?.steering?.state === "redirecting"
+    ? `Redirecting agent · ${session.value.steering.pendingCount} pending`
+    : session.value?.steering?.pendingCount
+      ? `Agent working · ${session.value.steering.pendingCount} ${session.value.steering.pendingCount === 1 ? "message" : "messages"} queued`
+      : "Agent working · Send another message without stopping the task"
+  : `${modeLabel.value} · ${runtime.value?.name ?? "Choose runtime"} · ${mode.value === "build"
   ? session.value?.worktree && ["applied", "reverted", "archived", "cleaned"].includes(session.value.worktree.status)
     ? "New isolated worktree on send"
     : "Isolated worktree"
@@ -810,9 +850,12 @@ function taskPaneIsNearBottom(): boolean {
 
 async function scrollTaskToBottom(): Promise<void> {
   await nextTick();
-  const pane = sessionPane.value;
-  if (!pane) return;
-  pane.scrollTop = pane.scrollHeight;
+  for (let frame = 0; frame < 2; frame += 1) {
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    const pane = sessionPane.value;
+    if (!pane) return;
+    pane.scrollTop = pane.scrollHeight;
+  }
 }
 
 watch(
@@ -826,6 +869,7 @@ watch(
 );
 
 function chooseMode(event: Event): void {
+  if (sessionIsRunning.value) return;
   const nextMode = normalizeMode(eventValue(event));
   mode.value = nextMode;
   taskError.value = "";
@@ -1177,6 +1221,7 @@ function submitPrompt(event: Event): void {
     mode: mode.value,
     runtimeId: runtime.value.id,
     modelId: submittedModelId,
+    ...(sessionIsRunning.value ? { delivery: steeringDelivery.value } : {}),
   };
   if (attachments.some((item) => item.source === "imported")) {
     pendingAttachmentHandoff.value = prepared;
@@ -1214,6 +1259,7 @@ async function sendPreparedPrompt(prepared: PreparedPrompt): Promise<void> {
         mode: prepared.mode,
         runtimeId: prepared.runtimeId,
         modelId: prepared.modelId || null,
+        ...(prepared.delivery ? { delivery: prepared.delivery } : {}),
         ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}),
         ...(prepared.skillIds.length ? { skillIds: prepared.skillIds } : {}),
         ...(attachmentConsent ? { attachmentConsent } : {}),
@@ -1231,11 +1277,11 @@ async function sendPreparedPrompt(prepared: PreparedPrompt): Promise<void> {
       }) as SessionMutationResponse;
     }
     applySessionMutation(update);
-    await scrollTaskToBottom();
     composer.value = "";
     composerAttachments.value = [];
     composerContextItems.value = [];
     attachmentReferences.clear();
+    await scrollTaskToBottom();
   } catch (error) {
     taskError.value = error instanceof Error ? error.message : "The task could not be saved.";
   } finally {
@@ -1959,7 +2005,8 @@ function scheduleRunPoll(force = false): void {
 async function pollRun(): Promise<void> {
   if (!session.value) return;
   const sessionId = session.value.id;
-  const lastSequence = sessionEvents.value[sessionEvents.value.length - 1]?.sequence ?? 0;
+  const steeringCanChangeExistingEvents = sessionEvents.value.some((event) => event.steering?.state === "queued" || event.steering?.state === "running");
+  const lastSequence = steeringCanChangeExistingEvents ? 0 : sessionEvents.value[sessionEvents.value.length - 1]?.sequence ?? 0;
   try {
     const response = await fetch(`/api/sessions/${sessionId}/events?after=${lastSequence}`);
     if (!response.ok) throw new Error("Run updates are unavailable.");
@@ -1968,10 +2015,18 @@ async function pollRun(): Promise<void> {
     const sessionIndex = state.sessions.findIndex((item) => item.id === sessionId);
     const wasRunning = sessionIndex >= 0 && state.sessions[sessionIndex]?.status === "running";
     if (sessionIndex >= 0) state.sessions[sessionIndex] = update.session;
-    const known = new Set(state.events.map((event) => event.id));
-    const newEvents = update.events.filter((event) => !known.has(event.id));
-    state.events.push(...newEvents);
-    if (followNewestActivity && newEvents.length) await scrollTaskToBottom();
+    let activityChanged = false;
+    for (const event of update.events) {
+      const eventIndex = state.events.findIndex((item) => item.id === event.id);
+      if (eventIndex < 0) {
+        state.events.push(event);
+        activityChanged = true;
+      } else if (JSON.stringify(state.events[eventIndex]) !== JSON.stringify(event)) {
+        state.events[eventIndex] = event;
+        activityChanged = true;
+      }
+    }
+    if (followNewestActivity && activityChanged) await scrollTaskToBottom();
     await refreshLiveEvidence(sessionId);
     serviceOnline.value = true;
     if (wasRunning && update.session.status !== "running" && update.session.worktree) {
@@ -2652,13 +2707,6 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
             <div class="task-title">
               <h1>{{ session?.title ?? "New task" }}</h1>
             </div>
-            <osx-segmented-control
-              label="Task mode"
-              items="Ask,Plan,Build,Review"
-              :value="modeLabel"
-              :disabled="submitting || sessionIsRunning"
-              @change="chooseMode"
-            />
           </header>
 
           <osx-alert
@@ -2735,6 +2783,13 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                 <osx-markdown v-if="item.actor === 'agent'" :content="item.title" code-copy />
                 <template v-else>
                   <span>{{ item.title }}</span>
+                  <span v-if="item.steering" :class="['message-delivery', item.steering.state]">
+                    <osx-icon :name="item.steering.delivery === 'redirect' ? 'corner-down-left' : 'list-checks'" :size="13" />
+                    {{ item.steering.state === 'queued'
+                      ? item.steering.delivery === 'redirect' ? 'Interrupting current turn' : 'Queued for the next turn'
+                      : item.steering.state === 'running' ? 'Agent is handling this message'
+                        : item.steering.state === 'superseded' ? 'Not delivered' : 'Delivered' }}
+                  </span>
                   <div v-if="item.attachments?.length || item.skills?.length" class="message-attachments" aria-label="Attached context">
                     <span v-for="attachment in item.attachments" :key="attachment.id">
                       <osx-icon name="file-code" :size="14" />{{ attachment.path }}
@@ -2826,12 +2881,14 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
       <div v-if="activeView === 'workspace' && project" slot="composer" class="task-composer-shell">
         <osx-agent-composer
           :value="composer"
-          :placeholder="session ? 'Send a follow-up. @ adds files. $ adds skills.' : 'Describe the task. @ adds files. $ adds skills.'"
+          :placeholder="sessionIsRunning ? 'Steer the agent or queue the next instruction…' : session ? 'Send a follow-up. @ adds files. $ adds skills.' : 'Describe the task. @ adds files. $ adds skills.'"
           label="Message to agent"
           :model="composerModelLabel"
           :model-id="modelId ?? ''"
           :models="composerModelOptions"
-          :access-mode="mode === 'build' ? 'Isolated worktree' : 'Read only'"
+          :access-mode="modeLabel"
+          :access-mode-id="mode"
+          :access-modes="composerModeOptions"
           :suggestions="composerSuggestions"
           :context-items="visibleComposerContextItems"
           :attachments="composerAttachments"
@@ -2839,19 +2896,30 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
           :status-text="composerStatus"
           :error="composerError"
           :disabled="composerDisabled"
-          :allow-attachments="!sessionIsRunning"
+          :allow-submit-while-running="true"
+          :allow-attachments="true"
           attachment-accept="*/*"
           :rows="3"
           :max-rows="8"
           submit-shortcut="enter"
           @input="updateComposerValue"
           @model-change="chooseTaskModel"
+          @access-mode-change="chooseMode"
           @attachment-add="acceptNativeAttachments"
           @attachments-change="syncComposerAttachments"
           @context-change="syncComposerContext"
           @submit="submitPrompt"
           @stop="interruptRun"
         >
+          <label v-if="sessionIsRunning" slot="controls" class="composer-runtime-control steering-delivery-control">
+            <osx-icon :name="steeringDelivery === 'redirect' ? 'corner-down-left' : 'list-checks'" :size="14" />
+            <span class="visually-hidden">Message delivery</span>
+            <select v-model="steeringDelivery" aria-label="Message delivery" :disabled="submitting">
+              <option value="queue">Send after this turn</option>
+              <option value="redirect">Interrupt and send</option>
+            </select>
+            <osx-icon name="chevron-down" :size="12" />
+          </label>
           <label slot="controls" class="composer-runtime-control">
             <osx-icon name="terminal" :size="14" />
             <span class="visually-hidden">Runtime</span>

@@ -140,8 +140,9 @@ test("starts a task from a selected project and keeps evidence truthful", async 
   await page.getByRole("button", { name: "Draft the first task" }).focus();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("textbox", { name: "Message to agent" })).toHaveValue("Inspect this project and explain its architecture with file-backed evidence.");
-  await page.getByRole("radio", { name: "Plan", exact: true }).click();
-  await expect(page.getByRole("radio", { name: "Plan" })).toBeChecked();
+  await page.getByRole("button", { name: "Ask", exact: true }).click();
+  await page.getByRole("option", { name: /Plan/ }).click();
+  await expect(page.getByRole("button", { name: "Plan", exact: true })).toBeVisible();
 
   await page.getByRole("tab", { name: "Changes" }).click();
   await expect(page.getByText("No changes", { exact: true })).toBeVisible();
@@ -1276,7 +1277,9 @@ test("runs the selected mode and model without reloading the workspace", async (
   await page.goto("/");
   await page.addStyleTag({ content: ".session-pane::before { content: ''; display: block; flex: 0 0 1200px; }" });
   await expect(page.getByLabel("Runtime")).toHaveValue("codex");
-  await page.getByRole("radio", { name: "Plan", exact: true }).click();
+  await page.getByRole("button", { name: "Ask", exact: true }).click();
+  await page.getByRole("option", { name: /Plan/ }).click();
+  await expect(page.getByRole("button", { name: "Plan", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "GPT-5.6-Sol", exact: true }).click();
   await page.getByRole("option", { name: /GPT-5.6-Terra/ }).click();
   const fileChooser = page.waitForEvent("filechooser");
@@ -1327,7 +1330,104 @@ test("runs the selected mode and model without reloading the workspace", async (
   await page.getByLabel("Agent task").evaluate((pane) => { pane.scrollTop = 0; });
   await expect.poll(() => page.getByLabel("Agent task").evaluate((pane) =>
     pane.scrollHeight - pane.scrollTop - pane.clientHeight)).toBeGreaterThan(100);
-  await page.getByRole("radio", { name: "Review", exact: true }).click();
+  await page.getByRole("button", { name: "Plan", exact: true }).click();
+  await page.getByRole("option", { name: /Review/ }).click();
+  await expectTaskPaneAtBottom(page);
+  expect(browserErrors).toEqual([]);
+});
+
+test("queues and redirects follow-ups from an active task without disabling the composer", async ({ page }) => {
+  const browserErrors = collectBrowserErrors(page);
+  const project = { id: "project-steer", name: "steerable-project", path: "/Users/engineer/steerable-project", branch: "main", status: "ready" };
+  const session: Record<string, unknown> = {
+    id: "session-steer",
+    projectId: project.id,
+    title: "Implement the parser",
+    mode: "build",
+    runtimeId: "codex",
+    updatedAt: new Date().toISOString(),
+    status: "running",
+    worktree: { id: "worktree-steer", path: "/tmp/worktree-steer", branch: "vraxis/steer", baseBranch: "main", baseCommit: "abc123", status: "active" },
+  };
+  const events: Array<Record<string, unknown>> = [
+    { id: "event-initial", sessionId: session.id, sequence: 1, timestamp: new Date().toISOString(), runtimeId: "codex", kind: "message", title: "Implement the parser", detail: "", state: "complete", actor: "user" },
+    { id: "event-working", sessionId: session.id, sequence: 2, timestamp: new Date().toISOString(), runtimeId: "codex", kind: "progress", title: "Implementing the task", detail: "Editing the isolated worktree.", state: "running", actor: "system" },
+  ];
+  const deliveries: string[] = [];
+
+  await page.route("**/api/bootstrap", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      contractVersion: 1,
+      projects: [project],
+      sessions: [session],
+      runtimes: [{ id: "codex", name: "Codex CLI", availability: "installed", detail: "Ready", acceptsCustomModel: true, models: [], capabilities: ["structured-output", "local-workspace", "read-only-workspace", "workspace-write", "artifacts"] }],
+      modelProviders: [],
+      skills: [],
+      selectedProjectId: project.id,
+      selectedSessionId: session.id,
+      files: [],
+      changes: [],
+      events,
+      settings: { theme: "graphite-dark", defaultMode: "ask", defaultRuntimeId: "codex" },
+    }),
+  }));
+  await page.route("**/api/sessions/session-steer/events?after=*", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ session, events: [] }),
+  }));
+  await page.route("**/api/sessions/session-steer/messages", async (route) => {
+    const input = route.request().postDataJSON() as { prompt: string; delivery: "queue" | "redirect" };
+    deliveries.push(input.delivery);
+    const event = {
+      id: `event-steer-${deliveries.length}`,
+      sessionId: session.id,
+      sequence: events.length + 1,
+      timestamp: new Date().toISOString(),
+      runtimeId: "codex",
+      kind: "message",
+      title: input.prompt,
+      detail: "",
+      state: "complete",
+      actor: "user",
+      steering: { delivery: input.delivery, state: "queued" },
+    };
+    events.push(event);
+    session.steering = { state: input.delivery === "redirect" ? "redirecting" : "queued", pendingCount: input.delivery === "redirect" ? 1 : deliveries.length, updatedAt: new Date().toISOString() };
+    await route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ ...session, events: [event] }) });
+  });
+  await page.route("**/api/sessions/session-steer/workspace", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ worktree: session.worktree, files: [], changes: [] }),
+  }));
+  await page.route("**/api/sessions/session-steer/interrupt", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "interrupted" }) }));
+
+  await page.goto("/");
+  const composer = page.getByRole("textbox", { name: "Message to agent" });
+  await expect(composer).toBeEnabled();
+  await expect(page.getByLabel("Message delivery")).toHaveValue("queue");
+  await expect(page.getByRole("button", { name: "Stop agent" })).toBeVisible();
+
+  await composer.fill("Run the focused tests after this turn");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect.poll(() => deliveries).toEqual(["queue"]);
+  const queuedDelivery = page.getByText("Queued for the next turn", { exact: true });
+  await expect(queuedDelivery).toBeVisible();
+  await expect.poll(() => queuedDelivery.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { display: style.display, gap: style.gap, marginTop: style.marginTop };
+  })).toEqual({ display: "flex", gap: "7px", marginTop: "10px" });
+  await expect(page.getByText("Agent working · 1 message queued", { exact: true })).toBeVisible();
+
+  await page.getByLabel("Message delivery").selectOption("redirect");
+  await composer.fill("Stop and use the existing parser helper");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect.poll(() => deliveries).toEqual(["queue", "redirect"]);
+  await expect(page.getByText("Interrupting current turn", { exact: true })).toBeVisible();
+  await expect(page.getByText("Redirecting agent · 1 pending", { exact: true })).toBeVisible();
   await expectTaskPaneAtBottom(page);
   expect(browserErrors).toEqual([]);
 });
@@ -1523,7 +1623,8 @@ test("starts Build in an isolated worktree and opens a closable exact diff", asy
   });
 
   await page.goto("/");
-  await page.getByRole("radio", { name: "Build", exact: true }).click();
+  await page.getByRole("button", { name: "Ask", exact: true }).click();
+  await page.getByRole("option", { name: /Build/ }).click();
   await expect(page.getByText("Build uses an isolated worktree")).toBeVisible();
   await page.getByRole("textbox", { name: "Message to agent" }).fill("Add a health check");
   await page.getByRole("button", { name: "Send message" }).click();
@@ -1557,9 +1658,8 @@ test("starts Build in an isolated worktree and opens a closable exact diff", asy
   await page.getByRole("button", { name: "Allow once" }).click();
   await expect(page.getByText("Changes applied", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("Applied", { exact: true })).toBeVisible();
-  await expect(page.getByRole("radio", { name: "Build", exact: true })).toBeChecked();
+  await expect(page.getByRole("button", { name: "Build", exact: true })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Message to agent" })).toBeEnabled();
-  await expect(page.getByText("New isolated worktree on send", { exact: false })).toBeVisible();
   await page.getByRole("textbox", { name: "Message to agent" }).fill("Refine the health check");
   await page.getByRole("button", { name: "Send message" }).click();
   await expect.poll(() => followUpMode).toBe("build");
@@ -2029,7 +2129,7 @@ test("saves runtime and model defaults in a dedicated settings surface", async (
 
   await page.getByRole("button", { name: "Done" }).click();
   await expect(page.getByRole("heading", { name: "Your first trusted task" })).toBeVisible();
-  await expect(page.getByRole("radio", { name: "Ask", exact: true })).toBeChecked();
+  await expect(page.getByRole("button", { name: "Ask", exact: true })).toBeVisible();
   await page.getByRole("tab", { name: "Files" }).click();
   await page.locator('.tree-row[title="apps/service/src/http/app.ts"]').click();
   const keywordColor = await page.locator('[aria-label="File preview"] .hljs-keyword').first().evaluate(

@@ -14,11 +14,21 @@ import { modeAgentProfile, type PromptAttachment, type SessionSummary } from "@v
 import type { AttachmentStore } from "../attachments/attachment-store.js";
 import type { ResolvedSkill } from "../skills/skill-registry.js";
 import type { BrowserWorkspace } from "../browser/browser-workspace.js";
-import { SessionRegistry } from "./session-registry.js";
+import { SessionRegistry, type PendingSteeringInput } from "./session-registry.js";
 
 interface AskResult {
   answer: string;
   evidence: string[];
+}
+
+interface QueuedExecution {
+  sessionId: string;
+  projectPath: string;
+  prompt: string;
+  attachments: PromptAttachment[];
+  skills: ResolvedSkill[];
+  eventId: string;
+  delivery: "queue" | "redirect";
 }
 
 function contextUsageDetail(usage: ContextUsageBreakdown): string {
@@ -66,6 +76,9 @@ const askOutput = defineOutput<AskResult>({
 
 export class AgentExecutionCoordinator {
   private readonly controllers = new Map<string, AbortController>();
+  private readonly queues = new Map<string, QueuedExecution[]>();
+  private readonly redirects = new Set<string>();
+  private readonly redirectWaiters = new Map<string, { resolve: () => void; reject: (error: unknown) => void }>();
 
   constructor(
     private readonly sessions: SessionRegistry,
@@ -80,6 +93,7 @@ export class AgentExecutionCoordinator {
     prompt: string,
     attachments: PromptAttachment[] = [],
     skills: ResolvedSkill[] = [],
+    instructionEventId?: string,
   ): Promise<void> {
     if (session.mode === "build") {
       if (!session.worktree || session.worktree.status !== "active") {
@@ -98,20 +112,63 @@ export class AgentExecutionCoordinator {
     this.controllers.set(session.id, controller);
     try {
       await this.sessions.begin(session.id);
+      if (instructionEventId) await this.sessions.markSteeringRunning(session.id, instructionEventId);
     } catch (error) {
       this.controllers.delete(session.id);
       throw error;
     }
-    void this.execute(session, projectPath, prompt, attachments, skills, controller).catch(() => undefined);
+    void this.execute(session, projectPath, prompt, attachments, skills, controller, instructionEventId).catch(() => undefined);
   }
 
-  async resume(sessionId: string, projectPath: string, skills: ResolvedSkill[] = []): Promise<void> {
+  async resume(
+    sessionId: string,
+    projectPath: string,
+    skills: ResolvedSkill[] = [],
+    pending?: PendingSteeringInput,
+  ): Promise<void> {
     const session = await this.sessions.get(sessionId);
     if (session.status !== "failed" && session.status !== "interrupted") {
       throw new TypeError("Only a failed or stopped task can be resumed.");
     }
-    const input = await this.sessions.lastUserInput(sessionId);
-    await this.start(session, projectPath, input.prompt, input.attachments, skills);
+    const input = pending ?? await this.sessions.lastUserInput(sessionId);
+    if (pending) {
+      const queue = this.queues.get(sessionId);
+      if (queue) {
+        const retained = queue.filter((job) => job.eventId !== pending.eventId);
+        if (retained.length) this.queues.set(sessionId, retained);
+        else this.queues.delete(sessionId);
+      }
+    }
+    await this.start(session, projectPath, input.prompt, input.attachments, skills, pending?.eventId);
+  }
+
+  async steer(job: QueuedExecution): Promise<void> {
+    const queue = this.queues.get(job.sessionId) ?? [];
+    if (job.delivery === "redirect") {
+      queue.splice(0, queue.length, job);
+    }
+    else queue.push(job);
+    this.queues.set(job.sessionId, queue);
+    if (job.delivery !== "redirect") return;
+    const controller = this.controllers.get(job.sessionId);
+    if (!controller) {
+      await this.sessions.interrupt(
+        job.sessionId,
+        "The previous runtime process ended before the new direction arrived. The agent will continue with your retained task history.",
+        "Direction updated",
+      );
+      await this.drainQueue(job.sessionId);
+      return;
+    }
+    this.redirects.add(job.sessionId);
+    await this.sessions.interrupt(
+      job.sessionId,
+      "The current turn was stopped. The agent will continue with your new direction and retained task history.",
+      "Direction updated",
+    );
+    const handoff = new Promise<void>((resolve, reject) => this.redirectWaiters.set(job.sessionId, { resolve, reject }));
+    controller.abort();
+    await handoff;
   }
 
   async interrupt(sessionId: string): Promise<void> {
@@ -132,6 +189,7 @@ export class AgentExecutionCoordinator {
     attachments: PromptAttachment[],
     skills: ResolvedSkill[],
     controller: AbortController,
+    instructionEventId?: string,
   ): Promise<void> {
     const approvalTools = new Map<string, string>();
     const events: EventSink = {
@@ -200,8 +258,9 @@ export class AgentExecutionCoordinator {
       },
     };
 
+    let completed = false;
     try {
-      const conversation = await this.sessions.conversationBeforeLatestUser(session.id);
+      const conversation = await this.sessions.conversationBeforeLatestUser(session.id, instructionEventId);
       if (skills.length) {
         await this.sessions.progress(
           session.id,
@@ -274,12 +333,41 @@ export class AgentExecutionCoordinator {
         ? `Evidence: ${result.output.evidence.join(", ")}`
         : `Completed in ${elapsedLabel(result.durationMs)}.`;
       await this.sessions.complete(session.id, result.output.answer, evidenceDetail);
+      completed = true;
     } catch (error) {
       if (controller.signal.aborted) return;
       const failure = safeFailure(error);
       await this.sessions.fail(session.id, `${failure.message}${failure.retryable ? " Check the runtime, then resume this task." : ""}`);
     } finally {
+      const redirected = this.redirects.delete(session.id);
+      if (instructionEventId) {
+        const settleInstruction = redirected ? this.sessions.markSteeringSuperseded(session.id, instructionEventId) : this.sessions.markSteeringHandled(session.id, instructionEventId);
+        await settleInstruction.catch(() => undefined);
+      }
       if (this.controllers.get(session.id) === controller) this.controllers.delete(session.id);
+      if (completed || redirected) await this.drainQueue(session.id);
+    }
+  }
+
+  private async drainQueue(sessionId: string): Promise<void> {
+    if (this.controllers.has(sessionId)) return;
+    const queue = this.queues.get(sessionId);
+    const next = queue?.shift();
+    if (!next) {
+      this.queues.delete(sessionId);
+      return;
+    }
+    if (!queue?.length) this.queues.delete(sessionId);
+    const session = await this.sessions.get(sessionId);
+    try {
+      await this.start(session, next.projectPath, next.prompt, next.attachments, next.skills, next.eventId);
+      this.redirectWaiters.get(sessionId)?.resolve();
+      this.redirectWaiters.delete(sessionId);
+    } catch (error) {
+      await this.sessions.markSteeringSuperseded(sessionId, next.eventId).catch(() => undefined);
+      this.redirectWaiters.get(sessionId)?.reject(error);
+      this.redirectWaiters.delete(sessionId);
+      throw error;
     }
   }
 

@@ -79,3 +79,30 @@ test("settles every open event and exposes a resumable recovery receipt after re
   await sessions.begin(session.id);
   assert.equal((await sessions.get(session.id)).settlement?.attempt, 2);
 });
+
+test("persists queued and redirecting instructions independently from run settlement", async () => {
+  const root = await mkdtemp(join(tmpdir(), "vraxis-session-steering-"));
+  const sessions = new SessionRegistry(root);
+  const session = await sessions.create({ projectId: "project-1", mode: "ask", runtimeId: "codex", prompt: "Inspect the project" });
+  await sessions.begin(session.id);
+
+  const queued = await sessions.steer(session.id, { prompt: "Check the tests next", delivery: "queue" }, [], "queue");
+  const redirected = await sessions.steer(session.id, { prompt: "Use the existing parser instead", delivery: "redirect" }, [], "redirect");
+  assert.deepEqual((await sessions.get(session.id)).steering, {
+    state: "redirecting",
+    pendingCount: 1,
+    updatedAt: (await sessions.get(session.id)).steering?.updatedAt,
+  });
+
+  const next = await sessions.nextSteeringInput(session.id);
+  assert.equal(next?.eventId, redirected.id);
+  assert.equal(next?.prompt, "Use the existing parser instead");
+  await sessions.markSteeringRunning(session.id, redirected.id);
+  assert.equal((await sessions.get(session.id)).steering, undefined);
+  await sessions.markSteeringHandled(session.id, redirected.id);
+  assert.equal((await sessions.get(session.id)).steering, undefined);
+
+  const events = (await sessions.events(session.id)).events;
+  assert.equal(events.find((event) => event.id === queued.id)?.steering?.state, "superseded");
+  assert.equal(events.find((event) => event.id === redirected.id)?.steering?.state, "handled");
+});

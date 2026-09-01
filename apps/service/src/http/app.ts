@@ -1023,6 +1023,23 @@ export function createApp(options: AppOptions) {
           );
         }
         const selectedSkills = await skills.resolve(projectPath, input.skillIds);
+        if (session.status === "running") {
+          const delivery = input.delivery ?? "queue";
+          const event = await sessions.steer(appendMessageMatch[1], input, selectedSkills.map((item) => item.reference), delivery);
+          const updatedSession = await sessions.get(appendMessageMatch[1]);
+          await execution.steer({
+            sessionId: updatedSession.id,
+            projectPath: executionPath,
+            prompt: input.prompt,
+            attachments: input.attachments ?? [],
+            skills: selectedSkills,
+            eventId: event.id,
+            delivery,
+          });
+          const update = await sessions.events(updatedSession.id, event.sequence - 1);
+          json(response, 202, { ...update.session, events: update.events });
+          return;
+        }
         const event = await sessions.append(appendMessageMatch[1], input, selectedSkills.map((item) => item.reference));
         const updatedSession = await sessions.get(appendMessageMatch[1]);
         await execution.start(updatedSession, executionPath, input.prompt, input.attachments, selectedSkills);
@@ -1187,13 +1204,14 @@ export function createApp(options: AppOptions) {
           await validateBuildRuntime(session.runtimeId);
         }
         const executionPath = await sessionWorkspace(session);
-        const input = await sessions.lastUserInput(session.id);
+        const pending = await sessions.nextSteeringInput(session.id);
+        const input = pending ?? await sessions.lastUserInput(session.id);
         await validateAttachmentFiles(
           (path) => session.worktree ? worktrees.resolveInside(session.worktree, path) : registry.resolveInside(session.projectId, path),
           input.attachments,
         );
         const selectedSkills = await skills.resolve(projectPath, input.skillIds);
-        await execution.resume(session.id, executionPath, selectedSkills);
+        await execution.resume(session.id, executionPath, selectedSkills, pending);
         json(response, 202, { status: "running" });
         return;
       }

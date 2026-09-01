@@ -41,6 +41,9 @@ export function withProductCapabilities(runtime: RuntimeSummary): RuntimeSummary
     capability("controlled-browser", "Controlled browser", browserControl ? "available" : "unavailable", browserControl
       ? "The agent can inspect and actuate the isolated task browser through approvals."
       : installed ? "Browser context may be visible, but governed browser actuation is unavailable." : unavailableDetail),
+    capability("steerable-task", "Steerable task", installed ? "available" : "unavailable", installed
+      ? "Follow-ups can queue or redirect the active turn using the retained task transcript; native provider sessions are not assumed."
+      : unavailableDetail),
     capability("task-evidence", "Task evidence", governedTools ? "available" : "unavailable", governedTools
       ? "The harness can inspect a secret-safe index of retained approvals, terminal runs, browser actions, and verification status."
       : installed ? "This harness cannot receive the task-scoped Vraxis evidence tool safely." : unavailableDetail),

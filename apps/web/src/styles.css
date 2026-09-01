@@ -655,6 +655,28 @@ osx-app-shell { height: 100%; }
 
 .message-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
 .message-attachments > span { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 4px 8px; border: 1px solid var(--osx-border-soft, #384148); border-radius: 999px; color: var(--osx-muted, #a5adb2); font-size: 12px; }
+
+.message-delivery {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  margin-top: 10px;
+  padding: 3px 8px 3px 6px;
+  border-radius: 999px;
+  color: var(--osx-muted, #a5adb2);
+  background: color-mix(in srgb, var(--osx-text, #eef1f2) 5%, transparent);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.message-delivery > osx-icon { flex: 0 0 auto; }
+
+.message-delivery.queued,
+.message-delivery.running { color: var(--osx-accent-ink, #8fd4f4); }
+.message-delivery.superseded { color: var(--osx-warning, #d79a42); }
+
+.steering-delivery-control select { max-width: 170px; }
 .attachment-handoff { display: grid; gap: 12px; }
 .attachment-handoff > p { margin: 0; color: var(--osx-muted); font-size: 12px; line-height: 1.5; }
 .attachment-handoff ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
