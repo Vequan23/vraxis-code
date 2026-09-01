@@ -4,7 +4,7 @@ import { captureWorkspaceState, resetWorkspaceState, restoreWorkspaceState, work
 
 function state(): BootstrapState {
   return {
-    contractVersion: 26,
+    contractVersion: 27,
     projects: [
       { id: "alpha", name: "Alpha", path: "/alpha", branch: "main", status: "ready" },
       { id: "beta", name: "Beta", path: "/beta", branch: "main", status: "ready" },
@@ -12,6 +12,7 @@ function state(): BootstrapState {
     sessions: [],
     runtimes: [],
     modelProviders: [],
+    mcpServers: [],
     skills: [],
     selectedProjectId: "alpha",
     selectedSessionId: "session-alpha",

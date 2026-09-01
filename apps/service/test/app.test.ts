@@ -17,6 +17,7 @@ import { DeterministicCodingRuntimeEngine, InterruptibleCodingRuntimeEngine } fr
 import type { ProofKeyRotationAttestationV1, ProofTrustState, TaskProofEnvelopeV1, UnderstandArtifactEnvelopeV1 } from "@vraxis/code-contracts";
 import { BrowserWorkspace } from "../src/browser/browser-workspace.js";
 import { createApp, type AppOptions } from "../src/http/app.js";
+import type { McpConnector } from "../src/mcp/mcp-server-registry.js";
 import { TaskProofSigner, verifyProofKeyRotation, verifyTaskProof } from "../src/receipts/task-proof.js";
 import { verifyUnderstandArtifact } from "../src/receipts/understand-artifact.js";
 import { VerificationRegistry } from "../src/verification/verification-registry.js";
@@ -24,7 +25,7 @@ import { VerificationRegistry } from "../src/verification/verification-registry.
 async function fixture(
   folderPicker?: () => Promise<string | null>,
   runtimeEngine: CodingRuntimeEngine = new DeterministicCodingRuntimeEngine(),
-  providerOptions: Pick<AppOptions, "credentialStore" | "providerFetch" | "discoverSkills" | "discover" | "projectInspector" | "browserWorkspace" | "runtimeProbeEngine"> = {},
+  providerOptions: Pick<AppOptions, "credentialStore" | "providerFetch" | "discoverSkills" | "discover" | "projectInspector" | "browserWorkspace" | "runtimeProbeEngine" | "mcpConnect"> = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "vraxis-code-test-"));
   const dataDirectory = join(root, "data");
@@ -725,6 +726,96 @@ test("connects a direct model provider without exposing its credential", async (
   assert.equal((await fetch(`${app.baseUrl}/api/model-providers/${connected.id}`, { method: "DELETE" })).status, 200);
   const removed = await (await fetch(`${app.baseUrl}/api/bootstrap`)).json() as { modelProviders: unknown[] };
   assert.deepEqual(removed.modelProviders, []);
+});
+
+test("governs MCP connection discovery and project access through the approval lifecycle", async (context) => {
+  const secret = "test-mcp-secret";
+  const credentials = new MemoryCredentialStore();
+  let connections = 0;
+  const mcpConnect: McpConnector = async (definition, options) => {
+    connections += 1;
+    const decision = await options.authorizer.decide({
+      serverId: definition.id,
+      serverName: definition.name,
+      action: definition.transport.type === "stdio" ? "launch-local-process" : "connect-remote-server",
+      transport: definition.transport.type,
+      target: definition.transport.type === "stdio" ? definition.transport.command : definition.transport.url,
+      ...(definition.transport.type === "stdio" ? { workingDirectory: definition.transport.cwd } : {}),
+      credentialReferences: [],
+    });
+    assert.equal(decision, "approved");
+    return {
+      inventory: {
+        serverId: definition.id,
+        configuredName: definition.name,
+        serverName: "Fixture MCP",
+        serverVersion: "1.0.0",
+        protocolEra: "modern",
+        protocolVersion: "2026-06-18",
+        tools: [{ name: "search", agentToolName: `mcp__${definition.id}__search`, description: "Search project documentation." }],
+        resources: [{ uri: "fixture://docs", name: "docs", description: "Project documentation." }],
+        resourceTemplates: [],
+        prompts: [{ name: "review", description: "Review a change." }],
+        warnings: [],
+      },
+      tools: [],
+      async close() {},
+    };
+  };
+  const app = await fixture(undefined, new DeterministicCodingRuntimeEngine(), { credentialStore: credentials, mcpConnect });
+  context.after(() => app.close());
+  const registered = await fetch(`${app.baseUrl}/api/projects`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path: app.project }),
+  });
+  const project = await registered.json() as { id: string };
+
+  const preparedResponse = await fetch(`${app.baseUrl}/api/mcp-servers`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      name: "Project docs",
+      transport: "stdio",
+      command: "node",
+      args: ["server.mjs"],
+      projectIds: [project.id],
+      credential: { kind: "environment", name: "FIXTURE_TOKEN", value: secret },
+    }),
+  });
+  assert.equal(preparedResponse.status, 202);
+  const prepared = await preparedResponse.json() as { approval: { id: string; state: string; source: string } };
+  assert.equal(prepared.approval.state, "pending");
+  assert.equal(prepared.approval.source, "mcp");
+  assert.equal(connections, 0);
+  assert.deepEqual((await (await fetch(`${app.baseUrl}/api/bootstrap`)).json() as { mcpServers: unknown[] }).mcpServers, []);
+
+  const approved = await fetch(`${app.baseUrl}/api/approvals/${prepared.approval.id}/decision`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ decision: "approve" }),
+  });
+  assert.equal(approved.status, 200);
+  assert.equal(connections, 1);
+  const connectedState = await (await fetch(`${app.baseUrl}/api/bootstrap`)).json() as {
+    mcpServers: Array<{ id: string; status: string; tools: Array<{ name: string }>; projectIds: string[] }>;
+  };
+  const connection = connectedState.mcpServers[0]!;
+  assert.equal(connection.status, "connected");
+  assert.equal(connection.tools[0]?.name, "search");
+  assert.deepEqual(connection.projectIds, [project.id]);
+  const registryContents = await readFile(join(app.dataDirectory, "mcp-servers.json"), "utf8");
+  assert.doesNotMatch(registryContents, new RegExp(secret));
+
+  const disabled = await fetch(`${app.baseUrl}/api/mcp-servers/${connection.id}/projects`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ projectIds: [] }),
+  });
+  assert.equal(disabled.status, 200);
+  assert.deepEqual((await disabled.json() as { projectIds: string[] }).projectIds, []);
+  assert.equal((await fetch(`${app.baseUrl}/api/mcp-servers/${connection.id}`, { method: "DELETE" })).status, 200);
+  assert.deepEqual((await (await fetch(`${app.baseUrl}/api/bootstrap`)).json() as { mcpServers: unknown[] }).mcpServers, []);
 });
 
 test("rejects non-loopback origins", async (context) => {

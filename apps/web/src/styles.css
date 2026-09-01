@@ -391,6 +391,114 @@ osx-app-shell { height: 100%; }
 .provider-empty strong { font-size: 13px; font-weight: 600; }
 .provider-empty p { margin: 0; }
 
+.mcp-settings { gap: 15px; }
+.mcp-settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.mcp-form {
+  display: grid;
+  gap: 15px;
+  padding: 15px;
+  border: 1px solid color-mix(in srgb, var(--osx-accent, #4aa9dc) 36%, var(--osx-border-soft, #384148));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--osx-surface-sunken, #101416) 58%, transparent);
+}
+
+.mcp-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.mcp-form-grid > * { min-width: 0; width: 100%; }
+.mcp-approval { display: block; }
+.mcp-list { display: grid; gap: 9px; }
+
+.mcp-card {
+  min-width: 0;
+  display: grid;
+  gap: 11px;
+  padding: 12px;
+  border: 1px solid var(--osx-border-soft, #384148);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--osx-surface-sunken, #101416) 56%, transparent);
+}
+
+.mcp-card > header {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.mcp-card-icon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--osx-accent, #4aa9dc);
+  background: color-mix(in srgb, var(--osx-accent, #4aa9dc) 10%, transparent);
+}
+
+.mcp-card > header > div { min-width: 0; display: grid; gap: 2px; }
+.mcp-card > header strong { overflow: hidden; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-card > header small { overflow: hidden; color: var(--osx-muted, #98a0a5); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-card-error { margin: 0; color: var(--osx-danger, #c95b55); }
+
+.mcp-capabilities { display: flex; flex-wrap: wrap; gap: 6px; }
+.mcp-capabilities span {
+  min-height: 25px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--osx-border-soft, #384148);
+  border-radius: 999px;
+  color: var(--osx-muted, #98a0a5);
+  font-size: 12px;
+}
+.mcp-capabilities strong { color: var(--osx-text, #eef1f2); font-weight: 650; }
+.mcp-card details { padding-top: 9px; border-top: 1px solid var(--osx-border-soft, #2c3338); }
+.mcp-card summary { color: var(--osx-muted, #98a0a5); font-size: 12px; cursor: pointer; }
+
+.mcp-capability-groups {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding-top: 10px;
+}
+.mcp-capability-groups section { min-width: 0; }
+.mcp-capability-groups section > strong { font-size: 12px; }
+.mcp-capability-groups ul { display: grid; gap: 7px; margin: 7px 0 0; padding: 0; list-style: none; }
+.mcp-capability-groups li { min-width: 0; color: var(--osx-text, #eef1f2); font-size: 12px; overflow-wrap: anywhere; }
+.mcp-capability-groups li small { display: block; margin-top: 2px; color: var(--osx-muted, #98a0a5); line-height: 1.4; }
+
+.mcp-card > footer {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 9px;
+  border-top: 1px solid var(--osx-border-soft, #2c3338);
+}
+.mcp-card-actions { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
+.mcp-card-actions > span { color: var(--osx-muted, #98a0a5); font-size: 12px; }
+
+@media (max-width: 760px) {
+  .mcp-form-grid,
+  .mcp-capability-groups { grid-template-columns: minmax(0, 1fr); }
+  .mcp-card > footer { align-items: flex-start; flex-direction: column; }
+  .mcp-card-actions { width: 100%; flex-wrap: wrap; justify-content: flex-start; }
+}
+
 .runtime-defaults {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

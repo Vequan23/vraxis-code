@@ -9,11 +9,13 @@ import {
   parseBrowserActionRequest,
   parseCommandRequest,
   parseConnectModelProviderRequest,
+  parseConnectMcpServerRequest,
   parseCreateTeamPolicyRequest,
   parseCreateSessionRequest,
   parseRegisterProjectRequest,
   parseTeamPolicyBundle,
   parseUpdateSettingsRequest,
+  parseUpdateMcpServerProjectsRequest,
 } from "../src/index.js";
 
 test("publishes safe mode-specific default agent profiles", () => {
@@ -216,6 +218,53 @@ test("parses durable application settings", () => {
   assert.throws(() => parseUpdateSettingsRequest({ theme: "midnight" }), /Theme is not supported/);
   assert.throws(() => parseUpdateSettingsRequest({ authorityMode: "unrestricted" }), /Authority mode is not supported/);
   assert.throws(() => parseUpdateSettingsRequest({}), /at least one setting/);
+});
+
+test("parses bounded MCP connections without accepting plaintext credential shortcuts", () => {
+  assert.deepEqual(parseConnectMcpServerRequest({
+    name: "Project tools",
+    transport: "stdio",
+    projectIds: ["project-1", "project-1"],
+    command: "npx",
+    args: ["-y", "@example/mcp-server"],
+    credential: { kind: "environment", name: "EXAMPLE_TOKEN", value: "secret" },
+  }), {
+    name: "Project tools",
+    transport: "stdio",
+    projectIds: ["project-1"],
+    command: "npx",
+    args: ["-y", "@example/mcp-server"],
+    credential: { kind: "environment", name: "EXAMPLE_TOKEN", value: "secret" },
+  });
+  assert.deepEqual(parseConnectMcpServerRequest({
+    name: "Remote tools",
+    transport: "streamable-http",
+    projectIds: ["project-1"],
+    url: "https://mcp.example.com/connect",
+    credential: { kind: "bearer", value: "secret" },
+  }), {
+    name: "Remote tools",
+    transport: "streamable-http",
+    projectIds: ["project-1"],
+    url: "https://mcp.example.com/connect",
+    credential: { kind: "bearer", value: "secret" },
+  });
+  assert.deepEqual(parseUpdateMcpServerProjectsRequest({ projectIds: [] }), { projectIds: [] });
+  assert.throws(() => parseConnectMcpServerRequest({ name: "Bad", transport: "stdio", projectIds: [], command: "node" }), /between 1 and 64/);
+  assert.throws(() => parseConnectMcpServerRequest({
+    name: "Bad",
+    transport: "stdio",
+    projectIds: ["project-1"],
+    command: "node",
+    credential: { kind: "bearer", value: "secret" },
+  }), /environment variable/);
+  assert.throws(() => parseConnectMcpServerRequest({
+    name: "Bad",
+    transport: "streamable-http",
+    projectIds: ["project-1"],
+    url: "https://example.com",
+    credential: { kind: "header", value: "secret" },
+  }), /Name the MCP credential/);
 });
 
 test("parses model provider connections without inventing optional fields", () => {

@@ -1,4 +1,4 @@
-export const contractVersion = 26 as const;
+export const contractVersion = 27 as const;
 
 export const sessionModes = ["ask", "plan", "build", "review"] as const;
 export type SessionMode = (typeof sessionModes)[number];
@@ -299,6 +299,38 @@ export interface ModelProviderSummary {
   fetchedAt?: string;
 }
 
+export const mcpTransportIds = ["stdio", "streamable-http"] as const;
+export type McpTransportId = (typeof mcpTransportIds)[number];
+export const mcpCredentialKinds = ["none", "bearer", "header", "environment"] as const;
+export type McpCredentialKind = (typeof mcpCredentialKinds)[number];
+
+export interface McpCapabilitySummary {
+  name: string;
+  title?: string;
+  description?: string;
+}
+
+export interface McpServerSummary {
+  id: string;
+  name: string;
+  transport: McpTransportId;
+  target: string;
+  projectIds: string[];
+  credentialConfigured: boolean;
+  credentialKind: McpCredentialKind;
+  status: "connected" | "needs-attention";
+  serverName?: string;
+  serverVersion?: string;
+  protocolVersion?: string;
+  protocolEra?: "legacy" | "modern";
+  tools: McpCapabilitySummary[];
+  resources: McpCapabilitySummary[];
+  prompts: McpCapabilitySummary[];
+  warnings: string[];
+  connectedAt?: string;
+  error?: string;
+}
+
 export interface WorkspaceFile {
   path: string;
   status?: WorkspaceChangeStatus;
@@ -417,9 +449,9 @@ export interface ApprovalSummary {
   scope: string;
   risk: ApprovalRisk;
   state: ApprovalState;
-  source: "agent" | "terminal" | "browser" | "worktree";
+  source: "agent" | "terminal" | "browser" | "worktree" | "mcp";
   actor?: "user" | "agent" | "system";
-  boundary?: "read-only-project" | "isolated-worktree" | "controlled-browser" | "approved-project";
+  boundary?: "read-only-project" | "isolated-worktree" | "controlled-browser" | "approved-project" | "external-server";
   authority?: {
     mode: AuthorityMode;
     decision: "pending" | "explicit" | "remembered" | "automatic" | "policy-denied";
@@ -751,6 +783,7 @@ export interface BootstrapState {
   sessions: SessionSummary[];
   runtimes: RuntimeSummary[];
   modelProviders: ModelProviderSummary[];
+  mcpServers: McpServerSummary[];
   skills: SkillSummary[];
   selectedProjectId?: string;
   selectedSessionId?: string;
@@ -1092,6 +1125,35 @@ export interface ConnectModelProviderRequest {
   model?: string;
 }
 
+export interface McpCredentialInput {
+  kind: Exclude<McpCredentialKind, "none">;
+  name?: string;
+  value: string;
+}
+
+interface ConnectMcpServerBaseRequest {
+  name: string;
+  projectIds: string[];
+  credential?: McpCredentialInput;
+}
+
+export interface ConnectMcpStdioServerRequest extends ConnectMcpServerBaseRequest {
+  transport: "stdio";
+  command: string;
+  args?: string[];
+}
+
+export interface ConnectMcpHttpServerRequest extends ConnectMcpServerBaseRequest {
+  transport: "streamable-http";
+  url: string;
+}
+
+export type ConnectMcpServerRequest = ConnectMcpStdioServerRequest | ConnectMcpHttpServerRequest;
+
+export interface UpdateMcpServerProjectsRequest {
+  projectIds: string[];
+}
+
 export interface BrowserActionRequest {
   sessionId: string;
   action: "navigate" | "click" | "type" | "capture" | "reload" | "back" | "forward" | "new-tab" | "select-tab" | "close-tab";
@@ -1304,6 +1366,40 @@ function modelProvider(value: unknown): ModelProviderId {
   return candidate as ModelProviderId;
 }
 
+function mcpProjectIds(value: unknown, allowEmpty = false): string[] {
+  if (!Array.isArray(value)) throw new TypeError("MCP projects must be an array.");
+  const projectIds = [...new Set(value.map((item) => boundedString(item, "MCP project ID", 128)))];
+  if ((!allowEmpty && projectIds.length === 0) || projectIds.length > 64) {
+    throw new TypeError(allowEmpty ? "Choose no more than 64 MCP projects." : "Choose between 1 and 64 MCP projects.");
+  }
+  return projectIds;
+}
+
+function mcpCredential(value: unknown, transport: McpTransportId): McpCredentialInput | undefined {
+  if (value === undefined) return undefined;
+  const input = record(value, "MCP credential");
+  const kind = boundedString(input.kind, "MCP credential kind", 32);
+  if (!mcpCredentialKinds.includes(kind as McpCredentialKind) || kind === "none") {
+    throw new TypeError("MCP credential kind is not supported.");
+  }
+  if (transport === "stdio" && kind !== "environment") {
+    throw new TypeError("Local MCP credentials must use an environment variable.");
+  }
+  if (transport === "streamable-http" && kind === "environment") {
+    throw new TypeError("Remote MCP credentials must use bearer or header authentication.");
+  }
+  const name = optionalString(input.name, "MCP credential name");
+  if ((kind === "header" || kind === "environment") && !name) {
+    throw new TypeError("Name the MCP credential header or environment variable.");
+  }
+  if (name && name.length > 128) throw new TypeError("MCP credential name is too long.");
+  return {
+    kind: kind as McpCredentialInput["kind"],
+    ...(name ? { name } : {}),
+    value: boundedString(input.value, "MCP credential value", 8_192),
+  };
+}
+
 export function parseCreateSessionRequest(value: unknown): CreateSessionRequest {
   const input = record(value, "Session request");
   const result: CreateSessionRequest = {
@@ -1379,6 +1475,43 @@ export function parseConnectModelProviderRequest(value: unknown): ConnectModelPr
   if (baseURL) result.baseURL = baseURL;
   if (model) result.model = model;
   return result;
+}
+
+export function parseConnectMcpServerRequest(value: unknown): ConnectMcpServerRequest {
+  const input = record(value, "MCP server connection");
+  const transport = boundedString(input.transport, "MCP transport", 32);
+  if (!mcpTransportIds.includes(transport as McpTransportId)) throw new TypeError("MCP transport is not supported.");
+  const common = {
+    name: boundedString(input.name, "MCP server name", 120),
+    projectIds: mcpProjectIds(input.projectIds),
+  };
+  const credential = mcpCredential(input.credential, transport as McpTransportId);
+  if (transport === "stdio") {
+    if (credential && credential.kind !== "environment") throw new TypeError("Local MCP credentials must use an environment variable.");
+    if (input.args !== undefined && !Array.isArray(input.args)) throw new TypeError("MCP arguments must be an array.");
+    const args = input.args === undefined
+      ? undefined
+      : input.args.map((item, index) => boundedString(item, `MCP argument ${index + 1}`, 4_096));
+    if (args && args.length > 64) throw new TypeError("Use no more than 64 MCP arguments.");
+    return {
+      ...common,
+      transport: "stdio",
+      command: boundedString(input.command, "MCP command", 1_024),
+      ...(args?.length ? { args } : {}),
+      ...(credential ? { credential } : {}),
+    };
+  }
+  if (credential?.kind === "environment") throw new TypeError("Remote MCP credentials must use bearer or header authentication.");
+  return {
+    ...common,
+    transport: "streamable-http",
+    url: boundedString(input.url, "MCP URL", 4_096),
+    ...(credential ? { credential } : {}),
+  };
+}
+
+export function parseUpdateMcpServerProjectsRequest(value: unknown): UpdateMcpServerProjectsRequest {
+  return { projectIds: mcpProjectIds(record(value, "MCP project access").projectIds, true) };
 }
 
 export function parseCreateTeamPolicyRequest(value: unknown): TeamPolicyCreateRequest {

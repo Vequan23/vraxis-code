@@ -10,7 +10,9 @@ import {
   type EventSink,
   type RuntimeReadiness,
   type AgentTool,
+  type ApprovalPolicy,
 } from "@vraxis/agent-v";
+import type { McpConnectionAuthorizer } from "@vraxis/agent-v/mcp";
 import { LocalCliRuntimeEngine, builtInRuntimes } from "@vraxis/agent-v/local-cli";
 import { type ModelProviderId } from "@vraxis/agent-v/providers";
 import { createAgentRuntime } from "@vraxis/agent-v/runtime";
@@ -25,6 +27,7 @@ import { createAgentEvidenceTool } from "../sessions/agent-evidence-tool.js";
 import { createAgentVerificationHandoffTool } from "../sessions/agent-verification-handoff-tool.js";
 import type { VerificationRegistry } from "../verification/verification-registry.js";
 import { createPromptWebFetchTool } from "../web/prompt-web-access.js";
+import type { McpServerRegistry, McpTaskConnection } from "../mcp/mcp-server-registry.js";
 
 const developmentCommands = ["bun", "cargo", "git", "go", "node", "npm", "npx", "pnpm", "python3", "pytest", "rg", "yarn"] as const;
 
@@ -43,6 +46,7 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
     private readonly browser?: BrowserWorkspace,
     private readonly terminal?: TerminalRegistry,
     private readonly verifications?: VerificationRegistry,
+    private readonly mcpServers?: McpServerRegistry,
     private readonly local = new LocalCliRuntimeEngine(),
   ) {}
 
@@ -64,8 +68,20 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
     if (!request.workspacePath) throw new AgentVError("unsupported-capability", "Vraxis Code tasks require an approved workspace.");
     const sessionId = request.sessionId;
     const mode = typeof request.metadata?.mode === "string" ? request.metadata.mode : "ask";
-    const productTools = await this.productTools(request, mode);
     const approvalPolicy = sessionId && this.approvals ? this.approvals.policy(sessionId, request.scope.projectId) : request.approvalPolicy;
+    const mcpConnections = this.mcpServers && approvalPolicy
+      ? await this.mcpServers.connectProject(
+        request.scope.projectId,
+        request.workspacePath,
+        this.mcpConnectionAuthorizer(request, approvalPolicy),
+        request.abortSignal,
+      )
+      : [];
+    try {
+    const productTools = [
+      ...await this.productTools(request, mode),
+      ...mcpConnections.flatMap((connection) => connection.tools),
+    ];
     if (!profile) {
       const definition = builtInRuntimes.find((runtime) => runtime.id === request.runtimeId);
       const readiness = await this.local.inspect(request.runtimeId);
@@ -177,6 +193,69 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
       activityCount: result.toolAudit.calls.length,
       attempts: 1,
     };
+    } finally {
+      await this.closeMcpConnections(mcpConnections);
+    }
+  }
+
+  private mcpConnectionAuthorizer(
+    request: CodingRuntimeRequest<unknown>,
+    approvalPolicy: ApprovalPolicy,
+  ): McpConnectionAuthorizer {
+    return {
+      decide: async (connection) => {
+        const approvalId = crypto.randomUUID();
+        const pending = approvalPolicy.decide({
+          id: approvalId,
+          runId: request.runId ?? request.sessionId ?? crypto.randomUUID(),
+          toolName: "connect-mcp-server",
+          input: {
+            target: connection.target,
+            transport: connection.transport,
+            server: connection.serverName,
+            ...(connection.workingDirectory ? { workingDirectory: connection.workingDirectory } : {}),
+          },
+          reason: connection.transport === "stdio"
+            ? `Allow Vraxis to launch ${connection.serverName} for this task. The process closes when the turn ends.`
+            : `Allow Vraxis to connect to ${connection.serverName} for this task. The connection closes when the turn ends.`,
+          category: connection.credentialReferences.length
+            ? "credentials"
+            : connection.transport === "stdio" ? "command" : "network",
+          metadata: { mcpServerId: connection.serverId, mcpServerName: connection.serverName },
+          toolVersion: "1.0.0",
+          risk: "external-side-effect",
+          sideEffect: "idempotent",
+          requiredPermissions: [connection.transport === "stdio" ? "command:execute" : "network:connect"],
+          scope: request.scope,
+        });
+        return this.waitForMcpDecision(pending, approvalPolicy, approvalId, request.abortSignal);
+      },
+    };
+  }
+
+  private async waitForMcpDecision(
+    pending: Promise<"approved" | "denied">,
+    approvalPolicy: ApprovalPolicy,
+    approvalId: string,
+    abortSignal?: AbortSignal,
+  ): Promise<"approved" | "denied"> {
+    if (!abortSignal) return pending;
+    if (abortSignal.aborted) {
+      await approvalPolicy.cancel?.(approvalId, "The task stopped before the MCP connection was approved.");
+      return "denied";
+    }
+    return new Promise((resolve, reject) => {
+      const abort = () => {
+        void approvalPolicy.cancel?.(approvalId, "The task stopped before the MCP connection was approved.");
+        resolve("denied");
+      };
+      abortSignal.addEventListener("abort", abort, { once: true });
+      void pending.then(resolve, reject).finally(() => abortSignal.removeEventListener("abort", abort));
+    });
+  }
+
+  private async closeMcpConnections(connections: McpTaskConnection[]): Promise<void> {
+    await Promise.allSettled(connections.map((connection) => connection.close()));
   }
 
   private async runLocal<T>(

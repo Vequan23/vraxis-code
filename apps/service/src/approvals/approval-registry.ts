@@ -49,6 +49,10 @@ function safeApprovalScope(value: string): string {
 }
 
 function titleForTool(toolName: string): string {
+  if (toolName === "connect-mcp-server") return "Connect MCP server";
+  if (toolName.startsWith("mcp__")) return `MCP · ${toolName.split("__").at(-1)?.replaceAll("_", " ") ?? "tool"}`;
+  if (toolName.startsWith("mcp_resource__")) return "MCP · Read resource";
+  if (toolName.startsWith("mcp_prompt__")) return "MCP · Get prompt";
   return toolName.split("-").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
 }
 
@@ -264,6 +268,10 @@ export class ApprovalRegistry {
   }
 
   private async requestAgentDecision(sessionId: string, projectId: string, request: AgentVApprovalRequest): Promise<"approved" | "denied"> {
+    const mcpRequest = request.toolName === "connect-mcp-server"
+      || request.toolName.startsWith("mcp__")
+      || request.toolName.startsWith("mcp_resource__")
+      || request.toolName.startsWith("mcp_prompt__");
     const approval = await this.request({
       sessionId,
       projectId,
@@ -272,9 +280,11 @@ export class ApprovalRegistry {
       description: request.reason,
       scope: scopeFor(request),
       risk: riskFor(request),
-      source: "agent",
+      source: mcpRequest ? "mcp" : "agent",
       actor: "agent",
-      boundary: request.category === "browser" ? "controlled-browser" : "isolated-worktree",
+      boundary: mcpRequest || request.category === "network" || request.category === "credentials"
+        ? "external-server"
+        : request.category === "browser" ? "controlled-browser" : "isolated-worktree",
     }, request.id);
     const persisted = (await this.list(sessionId)).find((item) => item.id === approval.id);
     if (persisted?.state === "approved") return "approved";

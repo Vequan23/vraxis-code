@@ -51,6 +51,7 @@ import {
 import { demoState, emptyState } from "./workspace/demo-state.js";
 import { chooseProjectFolder } from "./projects/project-picker.js";
 import ModelProviderSettings from "./settings/ModelProviderSettings.vue";
+import McpConnectionCenter from "./settings/McpConnectionCenter.vue";
 import AgentHarnessSettings from "./settings/AgentHarnessSettings.vue";
 import AgentDefaults from "./settings/AgentDefaults.vue";
 import AuthorityModeSettings from "./settings/AuthorityModeSettings.vue";
@@ -2276,6 +2277,10 @@ async function providersChanged(): Promise<void> {
   await loadState();
 }
 
+async function mcpServersChanged(): Promise<void> {
+  await loadState();
+}
+
 function eventStatus(event: ActivityEvent): "complete" | "streaming" | "error" {
   if (event.state === "failed") return "error";
   if (event.state === "running" || event.state === "pending") return "streaming";
@@ -2655,6 +2660,13 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
               @refresh="refreshRuntimes"
               @maintain="maintainRuntime"
               @probe="probeRuntime"
+            />
+
+            <McpConnectionCenter
+              :servers="state.mcpServers"
+              :projects="state.projects"
+              :selected-project-id="state.selectedProjectId"
+              @changed="mcpServersChanged"
             />
 
             <ModelProviderSettings

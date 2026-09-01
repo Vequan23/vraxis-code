@@ -4,6 +4,7 @@ import { readFile, stat } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { CodingRuntimeEngine, CredentialStore } from "@vraxis/agent-v";
+import type { McpConnectionAuthorizer } from "@vraxis/agent-v/mcp";
 import { SystemCredentialStore } from "@vraxis/agent-v/node";
 import { LocalCliRuntimeEngine } from "@vraxis/agent-v/local-cli";
 import {
@@ -13,9 +14,11 @@ import {
   parseBrowserActionRequest,
   parseCommandRequest,
   parseConnectModelProviderRequest,
+  parseConnectMcpServerRequest,
   parseCreateSessionRequest,
   parseRegisterProjectRequest,
   parseUpdateSettingsRequest,
+  parseUpdateMcpServerProjectsRequest,
   type BootstrapState,
   type AttachmentHandoffConsent,
   type ApprovalSummary,
@@ -46,6 +49,7 @@ import { SessionRegistry } from "../sessions/session-registry.js";
 import { AgentExecutionCoordinator } from "../sessions/agent-execution.js";
 import { SettingsRegistry } from "../settings/settings-registry.js";
 import { ModelProviderRegistry } from "../model-providers/model-provider-registry.js";
+import { McpServerRegistry, type McpConnector } from "../mcp/mcp-server-registry.js";
 import { VraxisCodeRuntimeEngine } from "../runtimes/vraxis-code-runtime.js";
 import { indexProjectFiles } from "../workspace/file-index.js";
 import { readProjectFile } from "../workspace/read-project-file.js";
@@ -91,6 +95,7 @@ export interface AppOptions {
   runtimeProbeEngine?: Pick<CodingRuntimeEngine, "probe">;
   credentialStore?: CredentialStore;
   providerFetch?: typeof globalThis.fetch;
+  mcpConnect?: McpConnector;
   discoverSkills?: SkillInventoryDiscovery;
   browserWorkspace?: BrowserWorkspace;
   browserRelay?: BrowserAutomationRelay;
@@ -140,6 +145,7 @@ export function createApp(options: AppOptions) {
   const settings = new SettingsRegistry(options.dataDirectory);
   const credentials = options.credentialStore ?? new SystemCredentialStore({ service: "Vraxis Code" });
   const modelProviders = new ModelProviderRegistry(options.dataDirectory, credentials, options.providerFetch);
+  const mcpServers = new McpServerRegistry(options.dataDirectory, credentials, options.mcpConnect);
   const importedAttachments = new AttachmentStore(options.dataDirectory);
   const skills = new SkillRegistry(options.discoverSkills);
   const worktrees = new GitWorktrees(options.dataDirectory);
@@ -215,9 +221,17 @@ export function createApp(options: AppOptions) {
     }
     manualActions.set(approval.id, action);
   }
+  function approvedMcpConnection(approvalId: string): McpConnectionAuthorizer {
+    return {
+      async decide() {
+        const approval = (await approvals.list("mcp-settings")).find((item) => item.id === approvalId);
+        return approval?.state === "executing" ? "approved" : "denied";
+      },
+    };
+  }
   const execution = new AgentExecutionCoordinator(
     sessions,
-    options.runtimeEngine ?? new VraxisCodeRuntimeEngine(modelProviders, credentials, approvals, browser, terminal, verifications),
+    options.runtimeEngine ?? new VraxisCodeRuntimeEngine(modelProviders, credentials, approvals, browser, terminal, verifications, mcpServers),
     importedAttachments,
     browser,
   );
@@ -701,6 +715,7 @@ export function createApp(options: AppOptions) {
           localRuntimes,
           providerRuntimes,
           providerSummaries,
+          mcpServerSummaries,
           projectSkills,
           browserState,
           projectDoctor,
@@ -714,6 +729,7 @@ export function createApp(options: AppOptions) {
           discoverLocalRuntimes(),
           modelProviders.runtimes(),
           modelProviders.summaries(),
+          mcpServers.summaries(),
           selected ? skills.summaries(selected.path) : Promise.resolve([]),
           selectedSession ? browser.state(selectedSession.id) : Promise.resolve(undefined),
           projectDoctorPromise,
@@ -735,6 +751,7 @@ export function createApp(options: AppOptions) {
           sessions: sessionData.sessions,
           runtimes: withProductCapabilityMatrix([...localRuntimes, ...providerRuntimes]),
           modelProviders: providerSummaries,
+          mcpServers: mcpServerSummaries,
           skills: projectSkills,
           ...(selected ? { selectedProjectId: selected.id } : {}),
           ...(selectedSession ? { selectedSessionId: selectedSession.id } : {}),
@@ -928,6 +945,97 @@ export function createApp(options: AppOptions) {
       if (request.method === "POST" && url.pathname === "/api/model-providers") {
         const input = parseConnectModelProviderRequest(await body(request));
         json(response, 201, await modelProviders.connect(input));
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/mcp-servers") {
+        const input = parseConnectMcpServerRequest(await body(request));
+        await Promise.all(input.projectIds.map((projectId) => registry.resolveInside(projectId)));
+        const target = input.transport === "stdio"
+          ? commandText(input.command, input.args ?? [])
+          : input.url;
+        const approval = await approvals.request({
+          sessionId: "mcp-settings",
+          projectId: input.projectIds[0]!,
+          capability: input.credential ? "credentials" : input.transport === "stdio" ? "command" : "network",
+          title: `Connect MCP · ${input.name}`,
+          description: input.transport === "stdio"
+            ? "Launch this local MCP server, inspect its advertised capabilities, then stop the validation process."
+            : "Contact this MCP server, inspect its advertised capabilities, then close the validation connection.",
+          scope: target,
+          risk: input.transport === "stdio" || input.credential ? "high" : "medium",
+          source: "mcp",
+          actor: "user",
+          boundary: "external-server",
+          rememberable: false,
+        }, undefined, false);
+        await registerManualAction(approval, {
+          approve: async () => {
+            await approvals.mark(approval.id, "executing");
+            try {
+              await mcpServers.connect(input, (projectId) => registry.resolveInside(projectId), approvedMcpConnection(approval.id));
+              await approvals.mark(approval.id, "completed");
+            } catch (error) {
+              const failure = error instanceof Error ? error.message : "The MCP server could not be connected.";
+              await approvals.mark(approval.id, "failed", failure);
+              throw error;
+            }
+          },
+        });
+        json(response, 202, { approval });
+        return;
+      }
+
+      const refreshMcpMatch = /^\/api\/mcp-servers\/([^/]+)\/refresh$/.exec(url.pathname);
+      if (request.method === "POST" && refreshMcpMatch?.[1]) {
+        const context = await mcpServers.approvalContext(refreshMcpMatch[1]);
+        const approval = await approvals.request({
+          sessionId: "mcp-settings",
+          projectId: context.projectId,
+          capability: context.credentialConfigured ? "credentials" : context.transport === "stdio" ? "command" : "network",
+          title: `Refresh MCP · ${context.name}`,
+          description: context.transport === "stdio"
+            ? "Launch this local MCP server again and refresh its capability inventory."
+            : "Reconnect to this MCP server and refresh its capability inventory.",
+          scope: context.target,
+          risk: context.transport === "stdio" || context.credentialConfigured ? "high" : "medium",
+          source: "mcp",
+          actor: "user",
+          boundary: "external-server",
+          rememberable: false,
+        }, undefined, false);
+        await registerManualAction(approval, {
+          approve: async () => {
+            await approvals.mark(approval.id, "executing");
+            try {
+              await mcpServers.refresh(refreshMcpMatch[1]!, (projectId) => registry.resolveInside(projectId), approvedMcpConnection(approval.id));
+              await approvals.mark(approval.id, "completed");
+            } catch (error) {
+              const failure = error instanceof Error ? error.message : "The MCP server could not be refreshed.";
+              await approvals.mark(approval.id, "failed", failure);
+              throw error;
+            }
+          },
+        });
+        json(response, 202, { approval });
+        return;
+      }
+
+      const updateMcpProjectsMatch = /^\/api\/mcp-servers\/([^/]+)\/projects$/.exec(url.pathname);
+      if (request.method === "POST" && updateMcpProjectsMatch?.[1]) {
+        const input = parseUpdateMcpServerProjectsRequest(await body(request));
+        json(response, 200, await mcpServers.updateProjects(
+          updateMcpProjectsMatch[1],
+          input.projectIds,
+          (projectId) => registry.resolveInside(projectId),
+        ));
+        return;
+      }
+
+      const removeMcpMatch = /^\/api\/mcp-servers\/([^/]+)$/.exec(url.pathname);
+      if (request.method === "DELETE" && removeMcpMatch?.[1]) {
+        await mcpServers.remove(removeMcpMatch[1]);
+        json(response, 200, { status: "removed" });
         return;
       }
 

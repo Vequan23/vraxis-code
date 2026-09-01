@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import test from "node:test";
 import { chromium, type BrowserContext } from "playwright";
-import { MemoryCredentialStore, defineOutput, localExecutionScope, type ApprovalRequest, type CodingRuntimeRequest, type CodingRuntimeResult, type RuntimeReadiness } from "@vraxis/agent-v";
+import { MemoryCredentialStore, defineOutput, localExecutionScope, type AgentTool, type ApprovalRequest, type CodingRuntimeRequest, type CodingRuntimeResult, type RuntimeReadiness } from "@vraxis/agent-v";
 import { LocalCliRuntimeEngine } from "@vraxis/agent-v/local-cli";
 import { executeAgentTool, type BrowserController } from "@vraxis/agent-v/tools";
 import { ApprovalRegistry } from "../src/approvals/approval-registry.js";
@@ -13,6 +13,7 @@ import { BrowserWorkspace } from "../src/browser/browser-workspace.js";
 import { commandArguments, executableCandidates, TerminalRegistry, terminatePty } from "../src/terminal/terminal-registry.js";
 import { createAgentTerminalPollTool, createAgentTerminalTool } from "../src/terminal/agent-terminal-tool.js";
 import { ModelProviderRegistry } from "../src/model-providers/model-provider-registry.js";
+import { McpServerRegistry, type McpConnector } from "../src/mcp/mcp-server-registry.js";
 import { VraxisCodeRuntimeEngine } from "../src/runtimes/vraxis-code-runtime.js";
 import { VerificationRegistry } from "../src/verification/verification-registry.js";
 
@@ -503,7 +504,7 @@ test("local Build harnesses receive governed file and terminal tools with native
   const browser = new BrowserWorkspace(root);
   const verifications = new VerificationRegistry(root);
   const local = new CapturingLocalRuntime();
-  const engine = new VraxisCodeRuntimeEngine(new ModelProviderRegistry(root, credentials), credentials, approvals, browser, terminal, verifications, local);
+  const engine = new VraxisCodeRuntimeEngine(new ModelProviderRegistry(root, credentials), credentials, approvals, browser, terminal, verifications, undefined, local);
   const output = defineOutput({ name: "ok", jsonSchema: { type: "object" }, parse: () => ({ ok: true }) });
   for (const runtimeId of ["codex", "claude-code", "opencode", "cursor"]) {
     await engine.run({
@@ -557,6 +558,76 @@ test("local Build harnesses receive governed file and terminal tools with native
   assert.ok(local.captured?.approvalPolicy);
 });
 
+test("project-enabled MCP tools live only for the task and retain independent approval policy", async () => {
+  const root = await mkdtemp(join(tmpdir(), "vraxis-runtime-mcp-test-"));
+  const credentials = new MemoryCredentialStore();
+  let closes = 0;
+  const mcpTool: AgentTool<Record<string, never>, { ok: true }> = {
+    name: "mcp__task_tools__search",
+    version: "1.0.0",
+    description: "Search task tools.",
+    input: defineOutput({ name: "mcp-input", jsonSchema: { type: "object" }, parse: () => ({}) }),
+    output: defineOutput({ name: "mcp-output", jsonSchema: { type: "object" }, parse: () => ({ ok: true }) }),
+    requiresApproval: true,
+    approvalCategory: "other",
+    approvalReason: "Allow the external MCP tool.",
+    risk: "external-side-effect",
+    sideEffect: "non-idempotent",
+    requiredPermissions: ["mcp:task-tools:tools"],
+    timeoutMs: 1_000,
+    execute: async () => ({ ok: true }),
+  };
+  const connector: McpConnector = async (definition, options) => {
+    assert.equal((await options.authorizer.decide({
+      serverId: definition.id,
+      serverName: definition.name,
+      action: "connect-remote-server",
+      transport: "streamable-http",
+      target: "https://mcp.example.com/connect",
+      credentialReferences: [],
+    })), "approved");
+    return {
+      inventory: { serverId: definition.id, configuredName: definition.name, tools: [], resources: [], resourceTemplates: [], prompts: [], warnings: [] },
+      tools: [mcpTool],
+      async close() { closes += 1; },
+    };
+  };
+  const mcpServers = new McpServerRegistry(root, credentials, connector);
+  await mcpServers.connect({
+    name: "Task tools",
+    transport: "streamable-http",
+    url: "https://mcp.example.com/connect",
+    projectIds: ["project-mcp"],
+  }, async () => root, { async decide() { return "approved"; } });
+  closes = 0;
+
+  class CapturingLocalRuntime extends LocalCliRuntimeEngine {
+    captured?: CodingRuntimeRequest<unknown>;
+    override async inspect(runtimeId: string): Promise<RuntimeReadiness> {
+      return { runtimeId, availability: "installed", verification: "ready", version: "codex-cli 0.151.0", detail: "Ready." };
+    }
+    override async run<T>(request: CodingRuntimeRequest<T>): Promise<CodingRuntimeResult<T>> {
+      this.captured = request as CodingRuntimeRequest<unknown>;
+      return { runId: "mcp-run", output: request.output.parse({ ok: true }), provenance: { engineId: "capture", adapterStrategy: "capture", runtime: request.runtimeId }, durationMs: 1, runtimeId: request.runtimeId, activityCount: 0, attempts: 1 };
+    }
+  }
+  const local = new CapturingLocalRuntime();
+  const engine = new VraxisCodeRuntimeEngine(new ModelProviderRegistry(root, credentials), credentials, undefined, undefined, undefined, undefined, mcpServers, local);
+  await engine.run({
+    runtimeId: "codex",
+    workspacePath: root,
+    workspaceAccess: "read-only",
+    sessionId: "session-mcp",
+    scope: localExecutionScope("project-mcp"),
+    input: { prompt: "Use the configured task tools." },
+    output: defineOutput({ name: "ok", jsonSchema: { type: "object" }, parse: () => ({ ok: true }) }),
+    approvalPolicy: { async decide() { return "approved"; } },
+  });
+  assert.ok(local.captured?.tools?.some((tool) => tool.name === mcpTool.name));
+  assert.ok(local.captured?.approvalPolicy, "MCP tool calls must retain the task approval policy");
+  assert.equal(closes, 1, "task MCP connections must close when the runtime turn finishes");
+});
+
 test("agent browser controls advance approved receipts through execution to completion", async () => {
   const root = await mkdtemp(join(tmpdir(), "vraxis-browser-receipt-test-"));
   class CapturingLocalRuntime extends LocalCliRuntimeEngine {
@@ -583,7 +654,7 @@ test("agent browser controls advance approved receipts through execution to comp
     allowedOrigins: async () => [],
     controller: () => controlled,
   } as unknown as BrowserWorkspace;
-  const engine = new VraxisCodeRuntimeEngine(new ModelProviderRegistry(root, credentials), credentials, approvals, browser, undefined, undefined, local);
+  const engine = new VraxisCodeRuntimeEngine(new ModelProviderRegistry(root, credentials), credentials, approvals, browser, undefined, undefined, undefined, local);
   const output = defineOutput({ name: "ok", jsonSchema: { type: "object" }, parse: () => ({ ok: true }) });
   await engine.run({ runtimeId: "codex", workspacePath: root, workspaceAccess: "read-only", sessionId: "session-browser-receipt", metadata: { mode: "ask" }, scope: localExecutionScope("project-browser-receipt"), input: { prompt: "Open it." }, output });
   const navigate = local.captured?.tools?.find((tool) => tool.name === "browser-navigate");
