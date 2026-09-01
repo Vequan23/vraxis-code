@@ -11,7 +11,7 @@
     "test:windows": "node --import tsx --test --test-force-exit test/*.test.ts"
   },
   "dependencies": {
-    "@vraxis/agent-v": "^0.10.0",
+    "@vraxis/agent-v": "^0.11.0",
     "@vraxis/code-contracts": "0.1.0",
     "node-pty": "^1.1.0",
     "pixelmatch": "^7.2.0",
