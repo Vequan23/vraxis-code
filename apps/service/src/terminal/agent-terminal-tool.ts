@@ -7,11 +7,13 @@ import type { TerminalRegistry } from "./terminal-registry.js";
 interface TerminalToolInput {
   command: string;
   cwd: string;
+  background: boolean;
+  timeoutMs: number;
 }
 
 interface TerminalToolOutput extends JsonObject {
   runId: string;
-  status: "success" | "error" | "interrupted";
+  status: "running" | "success" | "error" | "interrupted";
   command: string;
   cwd: string;
   output: string;
@@ -27,17 +29,22 @@ const inputContract = defineOutput<TerminalToolInput>({
     properties: {
       command: { type: "string", minLength: 1, description: "Executable and arguments. Shell operators and expansion are not supported." },
       cwd: { type: "string", description: "Project-relative working directory. Defaults to the workspace root." },
+      background: { type: "boolean", description: "Return a run handle immediately for a long-running process." },
+      timeoutMs: { type: "number", description: "Command deadline between 1 second and 30 minutes." },
     },
     required: ["command"],
     additionalProperties: false,
   },
   parse(value) {
-    const record = value as { command?: unknown; cwd?: unknown };
+    const record = value as { command?: unknown; cwd?: unknown; background?: unknown; timeoutMs?: unknown };
     if (typeof record?.command !== "string" || !record.command.trim()) throw new TypeError("Command must be a non-empty string.");
     if (record.cwd !== undefined && typeof record.cwd !== "string") throw new TypeError("Command cwd must be a string.");
+    if (record.background !== undefined && typeof record.background !== "boolean") throw new TypeError("Command background must be a boolean.");
+    const timeoutMs = record.timeoutMs === undefined ? 120_000 : Number(record.timeoutMs);
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 30 * 60_000) throw new TypeError("Command timeoutMs must be between 1000 and 1800000.");
     const cwd = typeof record.cwd === "string" && record.cwd.trim() ? record.cwd.trim() : ".";
     if (isAbsolute(cwd)) throw new TypeError("Command cwd must be relative to the approved workspace.");
-    return { command: record.command.trim(), cwd };
+    return { command: record.command.trim(), cwd, background: record.background === true, timeoutMs };
   },
 });
 
@@ -47,7 +54,7 @@ const outputContract = defineOutput<TerminalToolOutput>({
     type: "object",
     properties: {
       runId: { type: "string" },
-      status: { type: "string", enum: ["success", "error", "interrupted"] },
+      status: { type: "string", enum: ["running", "success", "error", "interrupted"] },
       command: { type: "string" },
       cwd: { type: "string" },
       output: { type: "string" },
@@ -59,7 +66,7 @@ const outputContract = defineOutput<TerminalToolOutput>({
   },
   parse(value) {
     const result = value as TerminalToolOutput;
-    if (!result || typeof result.runId !== "string" || !["success", "error", "interrupted"].includes(result.status)) throw new TypeError("Terminal result is invalid.");
+    if (!result || typeof result.runId !== "string" || !["running", "success", "error", "interrupted"].includes(result.status)) throw new TypeError("Terminal result is invalid.");
     return result;
   },
 });
@@ -84,7 +91,7 @@ export function createAgentTerminalTool(options: {
   return defineTool<TerminalToolInput, TerminalToolOutput>({
     name: "terminal-run",
     version: "1.0.0",
-    description: "Run one command without a shell in Vraxis Code's visible terminal. The user must approve every invocation, and the result is retained as a terminal receipt.",
+    description: "Use to run one approved command without a shell in Vraxis Code's visible terminal; choose background for servers and poll the retained run separately.",
     input: inputContract,
     output: outputContract,
     requiresApproval: true,
@@ -93,14 +100,24 @@ export function createAgentTerminalTool(options: {
     risk: "privileged",
     sideEffect: "non-idempotent",
     requiredPermissions: ["command:execute"],
-    timeoutMs: 125_000,
+    timeoutMs: 30 * 60_000 + 5_000,
     async execute(input, context) {
       if (!context.approvalId) throw new TypeError("The terminal command is missing its approval receipt.");
       const absoluteCwd = await resolveCommandDirectory(options.workspacePath, input.cwd);
       const run = await options.terminal.prepare(options.sessionId, context.approvalId, input.command, input.cwd);
       await options.approvals.mark(context.approvalId, "executing");
       try {
-        const completed = await options.terminal.execute(run.id, absoluteCwd, context.abortSignal);
+        const execution = options.terminal.execute(run.id, absoluteCwd, context.abortSignal, input.timeoutMs);
+        if (input.background) {
+          void execution.then(async (completed) => {
+            if (completed.status === "success") await options.approvals.mark(context.approvalId!, "completed");
+            else await options.approvals.mark(context.approvalId!, "failed", completed.output.trim().slice(-500) || "Command failed.");
+          }).catch(async (error) => {
+            await options.approvals.mark(context.approvalId!, "failed", error instanceof Error ? error.message : "Command execution failed.");
+          });
+          return { runId: run.id, status: "running", command: run.command, cwd: run.cwd, output: "" };
+        }
+        const completed = await execution;
         if (completed.status === "success") await options.approvals.mark(context.approvalId, "completed");
         else await options.approvals.mark(context.approvalId, "failed", completed.output.trim().slice(-500) || "Command failed.");
         return {
@@ -116,6 +133,70 @@ export function createAgentTerminalTool(options: {
         await options.approvals.mark(context.approvalId, "failed", error instanceof Error ? error.message : "Command execution failed.");
         throw error;
       }
+    },
+  });
+}
+
+const runHandleInput = defineOutput<{ runId: string }>({
+  name: "vraxis-terminal-run-handle",
+  jsonSchema: { type: "object", properties: { runId: { type: "string" } }, required: ["runId"], additionalProperties: false },
+  parse(value) {
+    const runId = (value as { runId?: unknown })?.runId;
+    if (typeof runId !== "string" || !runId.trim()) throw new TypeError("Terminal runId must be a non-empty string.");
+    return { runId };
+  },
+});
+
+function terminalResult(run: Awaited<ReturnType<TerminalRegistry["list"]>>[number]): TerminalToolOutput {
+  return {
+    runId: run.id,
+    status: run.status === "pending" || run.status === "running" ? "running" : run.status,
+    command: run.command,
+    cwd: run.cwd,
+    output: run.output,
+    ...(run.exitCode === undefined ? {} : { exitCode: run.exitCode }),
+    ...(run.durationMs === undefined ? {} : { durationMs: run.durationMs }),
+  };
+}
+
+export function createAgentTerminalPollTool(options: { sessionId: string; terminal: TerminalRegistry }): AgentTool<{ runId: string }, TerminalToolOutput> {
+  return defineTool({
+    name: "terminal-poll",
+    version: "1.0.0",
+    description: "Use after a background terminal-run to read its current output, status, duration, and exit code.",
+    input: runHandleInput,
+    output: outputContract,
+    requiresApproval: false,
+    risk: "read",
+    sideEffect: "none",
+    requiredPermissions: ["command:execute"],
+    timeoutMs: 5_000,
+    async execute({ runId }) {
+      const run = (await options.terminal.list(options.sessionId)).find((item) => item.id === runId);
+      if (!run) throw new TypeError("Terminal run was not found in this task.");
+      return terminalResult(run);
+    },
+  });
+}
+
+export function createAgentTerminalStopTool(options: { sessionId: string; terminal: TerminalRegistry }): AgentTool<{ runId: string }, TerminalToolOutput> {
+  return defineTool({
+    name: "terminal-stop",
+    version: "1.0.0",
+    description: "Use to stop a running background command that belongs to this task.",
+    input: runHandleInput,
+    output: outputContract,
+    requiresApproval: false,
+    risk: "write",
+    sideEffect: "idempotent",
+    requiredPermissions: ["command:execute"],
+    timeoutMs: 5_000,
+    async execute({ runId }) {
+      const run = (await options.terminal.list(options.sessionId)).find((item) => item.id === runId);
+      if (!run) throw new TypeError("Terminal run was not found in this task.");
+      if (run.status === "pending" || run.status === "running") await options.terminal.interrupt(runId);
+      const updated = (await options.terminal.list(options.sessionId)).find((item) => item.id === runId) ?? run;
+      return terminalResult(updated);
     },
   });
 }

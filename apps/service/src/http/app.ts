@@ -1,6 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
-import { extname, join } from "node:path";
+import { basename, extname, join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { CodingRuntimeEngine, CredentialStore } from "@vraxis/agent-v";
 import { SystemCredentialStore } from "@vraxis/agent-v/node";
@@ -29,6 +30,7 @@ import {
 } from "@vraxis/code-contracts";
 import { ApprovalRegistry } from "../approvals/approval-registry.js";
 import { BrowserWorkspace } from "../browser/browser-workspace.js";
+import type { BrowserAutomationRelay } from "../browser/browser-automation.js";
 import { renderBrowserReplay } from "../browser/browser-replay.js";
 import { ProjectRegistry } from "../projects/project-registry.js";
 import {
@@ -89,6 +91,7 @@ export interface AppOptions {
   providerFetch?: typeof globalThis.fetch;
   discoverSkills?: SkillInventoryDiscovery;
   browserWorkspace?: BrowserWorkspace;
+  browserRelay?: BrowserAutomationRelay;
   projectInspector?: ProjectInspector;
   startupRecovery?: StartupRecoverySummary;
 }
@@ -143,7 +146,7 @@ export function createApp(options: AppOptions) {
   const teamPolicy = new TeamPolicyRegistry(options.dataDirectory, proofSigner, proofTrust);
   const approvals = new ApprovalRegistry(options.dataDirectory, (input) => teamPolicy.decision(input));
   const terminal = new TerminalRegistry(options.dataDirectory);
-  const browser = options.browserWorkspace ?? new BrowserWorkspace(options.dataDirectory, credentials);
+  const browser = options.browserWorkspace ?? new BrowserWorkspace(options.dataDirectory, credentials, options.browserRelay);
   const verifications = new VerificationRegistry(options.dataDirectory);
   async function proofTrustState() {
     return proofTrust.state(await proofSigner.identity(), await proofSigner.rotationHistory());
@@ -242,7 +245,7 @@ export function createApp(options: AppOptions) {
   }
 
   async function sessionWorkspace(session: SessionSummary): Promise<string> {
-    if (session.worktree) return worktrees.resolveInside(session.worktree);
+    if (session.worktree && session.worktree.status !== "cleaned") return worktrees.resolveInside(session.worktree);
     return registry.resolveInside(session.projectId);
   }
 
@@ -486,9 +489,13 @@ export function createApp(options: AppOptions) {
     projectId: string,
     title: string,
   ): Promise<WorktreeSummary> {
-    if (session?.worktree) return session.worktree;
+    if (session?.worktree?.status === "active") return session.worktree;
+    if (session?.worktree && !["applied", "reverted", "archived", "cleaned"].includes(session.worktree.status)) {
+      throw new TypeError("Finish or recover the current Build worktree before continuing.");
+    }
     const worktree = await worktrees.create(projectPath, projectId, title);
-    if (session) await sessions.attachWorktree(session.id, worktree);
+    if (session?.worktree) await sessions.continueBuild(session.id, worktree);
+    else if (session) await sessions.attachWorktree(session.id, worktree);
     return worktree;
   }
 
@@ -532,9 +539,10 @@ export function createApp(options: AppOptions) {
       },
       project: { id: project.id, name: project.name, branch: project.branch },
       ...(session.worktree ? { worktree: session.worktree } : {}),
+      ...(session.worktreeHistory?.length ? { worktreeHistory: session.worktreeHistory } : {}),
       changes,
       approvals: await approvals.list(session.id),
-      terminalRuns: await terminal.list(session.id),
+      terminalRuns: (await terminal.list(session.id)).filter((run) => run.purpose !== "user-shell"),
       verificationRuns: await verifications.list(session.id),
       verificationHandoffs: await verifications.listHandoffs(session.id),
       ...(browserState ? { browser: {
@@ -646,8 +654,10 @@ export function createApp(options: AppOptions) {
         const data = await registry.read();
         const sessionData = await sessions.read();
         const selected = data.projects.find((project) => project.id === data.selectedProjectId);
-        const selectedSession = sessionData.sessions.find((session) => session.id === sessionData.selectedSessionId && session.projectId === selected?.id)
-          ?? sessionData.sessions.find((session) => session.projectId === selected?.id);
+        const selectedSession = sessionData.draftProjectId === selected?.id
+          ? undefined
+          : sessionData.sessions.find((session) => session.id === sessionData.selectedSessionId && session.projectId === selected?.id)
+            ?? sessionData.sessions.find((session) => session.projectId === selected?.id);
         let files = selected ? await indexProjectFiles(selected.path) : [];
         let changes: BootstrapState["changes"] = [];
         if (selectedSession?.worktree) {
@@ -895,6 +905,14 @@ export function createApp(options: AppOptions) {
         return;
       }
 
+      const newTaskMatch = /^\/api\/projects\/([^/]+)\/new-task$/.exec(url.pathname);
+      if (request.method === "POST" && newTaskMatch?.[1]) {
+        await registry.resolveInside(newTaskMatch[1]);
+        await sessions.startDraft(newTaskMatch[1]);
+        json(response, 200, { status: "ready", projectId: newTaskMatch[1] });
+        return;
+      }
+
       if (request.method === "POST" && url.pathname === "/api/sessions") {
         const input = parseCreateSessionRequest(await body(request));
         const projectPath = await registry.resolveInside(input.projectId);
@@ -934,7 +952,7 @@ export function createApp(options: AppOptions) {
         validateAttachmentConsent(input.attachments, input.attachmentConsent, runtimeId, modelId);
         if (nextMode === "build") {
           await validateBuildRuntime(runtimeId);
-          if (!session.worktree) {
+          if (!session.worktree || session.worktree.status !== "active") {
             await validateAttachmentFiles((path) => registry.resolveInside(session.projectId, path), input.attachments);
             await prepareWorktree(session, projectPath, session.projectId, input.prompt);
             session = await sessions.get(session.id);
@@ -1466,6 +1484,26 @@ export function createApp(options: AppOptions) {
         return;
       }
 
+      const userTerminalMatch = /^\/api\/sessions\/([^/]+)\/terminal-shell$/.exec(url.pathname);
+      if (request.method === "POST" && userTerminalMatch?.[1]) {
+        const session = await sessions.get(userTerminalMatch[1]);
+        const absoluteCwd = await sessionWorkspace(session);
+        const shell = process.platform === "win32"
+          ? process.env.COMSPEC ?? process.env.ComSpec ?? "cmd.exe"
+          : process.env.SHELL ?? "/bin/sh";
+        const shellArguments = process.platform === "win32" ? [] : ["-l"];
+        const run = await terminal.prepare(
+          session.id,
+          `user-terminal:${randomUUID()}`,
+          commandText(shell, shellArguments),
+          ".",
+          { purpose: "user-shell", label: basename(shell).replace(/\.exe$/i, "") },
+        );
+        void terminal.execute(run.id, absoluteCwd).catch(() => undefined);
+        json(response, 201, { run });
+        return;
+      }
+
       if (request.method === "POST" && url.pathname === "/api/browser/actions") {
         const input = parseBrowserActionRequest(await body(request));
         const session = await sessions.get(input.sessionId);
@@ -1544,6 +1582,53 @@ export function createApp(options: AppOptions) {
       if (request.method === "POST" && terminalInterruptMatch?.[1]) {
         await terminal.interrupt(terminalInterruptMatch[1]);
         json(response, 200, { status: "interrupted" });
+        return;
+      }
+
+      const terminalStreamMatch = /^\/api\/terminal\/([^/]+)\/stream$/.exec(url.pathname);
+      if (request.method === "GET" && terminalStreamMatch?.[1]) {
+        const runId = terminalStreamMatch[1];
+        const buffered: Parameters<Parameters<typeof terminal.subscribe>[1]>[0][] = [];
+        let ready = false;
+        let closed = false;
+        const send = (event: Parameters<Parameters<typeof terminal.subscribe>[1]>[0]) => {
+          if (closed) return;
+          response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+          if (event.type === "exit") {
+            closed = true;
+            response.end();
+          }
+        };
+        const unsubscribe = terminal.subscribe(runId, (event) => {
+          if (ready) send(event);
+          else buffered.push(event);
+        });
+        try {
+          const snapshot = await terminal.streamSnapshot(runId);
+          response.writeHead(200, {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-store",
+            connection: "keep-alive",
+            "x-accel-buffering": "no",
+          });
+          response.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`);
+          ready = true;
+          if (!snapshot.active) {
+            closed = true;
+            response.end();
+          } else {
+            for (const event of buffered) {
+              if (event.type !== "data" || event.sequence > snapshot.sequence) send(event);
+            }
+          }
+        } catch (error) {
+          unsubscribe();
+          throw error;
+        }
+        request.once("close", () => {
+          closed = true;
+          unsubscribe();
+        });
         return;
       }
 

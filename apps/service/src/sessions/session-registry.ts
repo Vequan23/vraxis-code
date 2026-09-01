@@ -17,6 +17,7 @@ import type {
 interface SessionData {
   schemaVersion: 1;
   selectedSessionId?: string;
+  draftProjectId?: string;
   sessions: SessionSummary[];
   events: ActivityEvent[];
 }
@@ -62,6 +63,7 @@ export class SessionRegistry {
       };
       data.sessions.unshift(session);
       data.selectedSessionId = id;
+      delete data.draftProjectId;
       data.events.push(this.userEvent(session, input.prompt, 1, timestamp, input.attachments, skills));
       return session;
     });
@@ -85,7 +87,15 @@ export class SessionRegistry {
       session.updatedAt = timestamp;
       session.status = "idle";
       data.selectedSessionId = session.id;
+      delete data.draftProjectId;
       return event;
+    });
+  }
+
+  async startDraft(projectId: string): Promise<void> {
+    await this.mutate((data) => {
+      delete data.selectedSessionId;
+      data.draftProjectId = projectId;
     });
   }
 
@@ -95,6 +105,27 @@ export class SessionRegistry {
       if (session.worktree) throw new TypeError("This task already has an isolated worktree.");
       session.worktree = worktree;
       session.updatedAt = new Date().toISOString();
+    });
+  }
+
+  async continueBuild(sessionId: string, worktree: WorktreeSummary): Promise<void> {
+    await this.mutate((data) => {
+      const session = this.session(data, sessionId);
+      const previous = session.worktree;
+      if (!previous) throw new TypeError("This task does not have a Build worktree to continue.");
+      if (!["applied", "reverted", "archived", "cleaned"].includes(previous.status)) {
+        throw new TypeError("Finish or recover the current Build worktree before continuing.");
+      }
+      session.worktreeHistory = [...(session.worktreeHistory ?? []), structuredClone(previous)];
+      session.worktree = worktree;
+      session.updatedAt = new Date().toISOString();
+      this.pushEvent(data, session, {
+        kind: "lifecycle",
+        title: "Build continued",
+        detail: `A fresh isolated worktree was created for the next edit. The previous checkpoint remains on ${previous.branch}.`,
+        state: "complete",
+        actor: "system",
+      });
     });
   }
 
@@ -312,10 +343,13 @@ export class SessionRegistry {
       session.status = "running";
       session.updatedAt = new Date().toISOString();
       data.selectedSessionId = session.id;
+      delete data.draftProjectId;
       this.pushEvent(data, session, {
         kind: "lifecycle",
         title: "Agent started",
-        detail: "Connecting to the selected runtime with read-only project access.",
+        detail: session.mode === "build"
+          ? "Connecting to the selected runtime inside the isolated Build worktree."
+          : "Connecting to the selected runtime with read-only project access.",
         state: "running",
         actor: "system",
       });
@@ -331,10 +365,44 @@ export class SessionRegistry {
     });
   }
 
+  async activity(
+    sessionId: string,
+    kind: "tool" | "approval",
+    title: string,
+    detail: string,
+    state: "pending" | "running" | "complete" | "failed" | "denied",
+  ): Promise<void> {
+    await this.mutate((data) => {
+      const session = this.session(data, sessionId);
+      if (session.status !== "running") return;
+      const existing = [...data.events].reverse().find((event) =>
+        event.sessionId === session.id
+        && event.kind === kind
+        && event.title === title
+        && (event.state === "pending" || event.state === "running"));
+      if (existing && state !== "pending" && state !== "running") {
+        existing.detail = detail;
+        existing.state = state;
+        existing.timestamp = new Date().toISOString();
+      } else {
+        this.pushEvent(data, session, { kind, title, detail, state, actor: "system" });
+      }
+      session.updatedAt = new Date().toISOString();
+    });
+  }
+
   async verification(sessionId: string, title: string, detail: string, state: "running" | "complete" | "failed" | "interrupted"): Promise<void> {
     await this.mutate((data) => {
       const session = this.session(data, sessionId);
       this.pushEvent(data, session, { kind: "verification", title, detail, state, actor: "system" });
+      session.updatedAt = new Date().toISOString();
+    });
+  }
+
+  async telemetry(sessionId: string, title: string, detail: string): Promise<void> {
+    await this.mutate((data) => {
+      const session = this.session(data, sessionId);
+      this.pushEvent(data, session, { kind: "telemetry", title, detail, state: "complete", actor: "system" });
       session.updatedAt = new Date().toISOString();
     });
   }
@@ -463,6 +531,7 @@ export class SessionRegistry {
     await this.mutate((data) => {
       this.session(data, sessionId);
       data.selectedSessionId = sessionId;
+      delete data.draftProjectId;
     });
   }
 

@@ -50,6 +50,11 @@ async function expectBasicAccessibility(page: import("@playwright/test").Page): 
   expect(issues).toEqual([]);
 }
 
+async function expectTaskPaneAtBottom(page: import("@playwright/test").Page): Promise<void> {
+  await expect.poll(() => page.getByLabel("Agent task").evaluate((pane) =>
+    pane.scrollHeight - pane.scrollTop - pane.clientHeight)).toBeLessThanOrEqual(2);
+}
+
 async function routeProofTrust(page: import("@playwright/test").Page): Promise<void> {
   await page.route("**/api/proof/trust", async (route) => route.fulfill({
     status: 200,
@@ -143,10 +148,10 @@ test("starts a task from a selected project and keeps evidence truthful", async 
   await expect(page.getByText("Uncommitted changes")).toHaveCount(0);
 
   await page.getByRole("tab", { name: "Terminal" }).click();
-  await expect(page.getByText("No commands yet", { exact: true })).toBeVisible();
+  await expect(page.getByText("Open a terminal", { exact: true })).toBeVisible();
 
   await page.getByRole("tab", { name: "Browser" }).click();
-  await expect(page.getByText("Open a page", { exact: true })).toBeVisible();
+  await expect(page.getByText("Preview your app", { exact: true })).toBeVisible();
   await expectBasicAccessibility(page);
   await page.screenshot({ path: testInfo.outputPath("redesigned-workspace.png"), fullPage: true });
   expect(browserErrors).toEqual([]);
@@ -159,7 +164,7 @@ test("discloses recovery after an unexpected service exit", async ({ page }) => 
     status: 200,
     contentType: "application/json",
     body: JSON.stringify({
-      contractVersion: 24,
+      contractVersion: 26,
       projects: [project],
       sessions: [],
       runtimes: [{ id: "codex", name: "Codex CLI", availability: "installed", detail: "Ready", acceptsCustomModel: true, kind: "local-cli", models: [], conformance: { state: "ready", detail: "Verified", checks: [] } }],
@@ -195,6 +200,10 @@ test("keeps project evidence compact and keyboard navigable", async ({ page }, t
   const tablist = page.getByRole("tablist", { name: "Project evidence" });
   const tablistBounds = await tablist.boundingBox();
   expect(tablistBounds?.height).toBeLessThanOrEqual(40);
+  await expect(tablist.getByText("Files", { exact: true })).toHaveCount(0);
+
+  await filesTab.hover();
+  await expect.poll(() => filesTab.evaluate((element) => getComputedStyle(element, "::after").opacity)).toBe("1");
 
   await filesTab.focus();
   await page.keyboard.press("ArrowRight");
@@ -250,7 +259,7 @@ test("makes durable authority visible, revocable, and exportable", async ({ page
     status: 200,
     contentType: "application/json",
     body: JSON.stringify({
-      contractVersion: 24,
+      contractVersion: 26,
       projects: [project, otherProject], sessions: [session],
       runtimes: [{ id: "codex", name: "Codex CLI", availability: "installed", detail: "Ready", acceptsCustomModel: true, models: [] }],
       modelProviders: [], skills: [], selectedProjectId: project.id, selectedSessionId: session.id,
@@ -358,7 +367,7 @@ test("hands off a privacy-preserving incident report without automatic upload", 
     kind: "vraxis.support-bundle",
     version: 1,
     generatedAt: "2026-08-31T12:00:00.000Z",
-    application: { name: "Vraxis Code", version: "0.1.0", contractVersion: 24 },
+    application: { name: "Vraxis Code", version: "0.1.0", contractVersion: 26 },
     environment: { platform: "darwin", architecture: "arm64", node: "22.14.0", desktop: true },
     inventory: {
       projects: { total: 1, ready: 1, unavailable: 0 },
@@ -421,7 +430,7 @@ test("reopens the exact signed-proof evidence target without reloading the task 
     status: 200,
     contentType: "application/json",
     body: JSON.stringify({
-      contractVersion: 24,
+      contractVersion: 26,
       projects: [project], sessions: [session],
       runtimes: [{ id: "codex", name: "Codex CLI", availability: "installed", detail: "Ready", acceptsCustomModel: true, models: [], capabilities: ["read-only-workspace", "workspace-write", "mcp-tools"] }],
       modelProviders: [], skills: [], selectedProjectId: project.id, selectedSessionId: session.id,
@@ -432,10 +441,121 @@ test("reopens the exact signed-proof evidence target without reloading the task 
 
   await page.goto("/?task=session-evidence&evidence=terminal&target=terminal-evidence");
   await expect(page.getByRole("tab", { name: "Terminal" })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByText("Command opened from proof", { exact: true })).toBeVisible();
-  await expect(page.locator("#evidence-terminal-terminal-evidence")).toHaveClass(/evidence-target-selected/);
+  await expect(page.getByRole("button", { name: "npm terminal", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(page.locator(".terminal-emulator .xterm-rows")).toContainText("All checks passed");
   await expect(page).toHaveURL(/\/$/);
   expect(selectionRequests).toBe(1);
+  expect(browserErrors).toEqual([]);
+});
+
+test("opens a real interactive terminal with PTY input, resize, and shell tabs", async ({ page }) => {
+  const browserErrors = collectBrowserErrors(page);
+  const project = { id: "project-terminal", name: "terminal-project", path: "/Users/engineer/terminal-project", branch: "main", status: "ready" };
+  const session = { id: "session-terminal", projectId: project.id, title: "Use the terminal", mode: "build", runtimeId: "codex", updatedAt: new Date().toISOString(), status: "idle" };
+  const terminalRuns: Array<Record<string, unknown>> = [];
+  const terminalInput: string[] = [];
+  const terminalSizes: Array<{ columns: number; rows: number }> = [];
+  let shellCount = 0;
+
+  await page.route("**/api/bootstrap", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      contractVersion: 26,
+      projects: [project], sessions: [session],
+      runtimes: [{ id: "codex", name: "Codex CLI", availability: "installed", detail: "Ready", acceptsCustomModel: true, models: [], capabilities: ["workspace-write"] }],
+      modelProviders: [], skills: [], selectedProjectId: project.id, selectedSessionId: session.id,
+      files: [], changes: [], events: [], approvals: [], approvalRules: [], terminalRuns, verificationRuns: [],
+      settings: { theme: "graphite-dark", defaultMode: "ask", defaultRuntimeId: "codex" },
+    }),
+  }));
+  await page.route("**/api/sessions/session-terminal/terminal-shell", async (route) => {
+    shellCount += 1;
+    const run = {
+      id: `shell-${shellCount}`,
+      sessionId: session.id,
+      approvalId: `user-terminal:${shellCount}`,
+      purpose: "user-shell",
+      label: "zsh",
+      command: "/bin/zsh -l",
+      cwd: ".",
+      status: "running",
+      output: "workspace $ ",
+      terminalKind: "pty",
+      columns: 100,
+      rows: 30,
+      outputVersion: 1,
+    };
+    terminalRuns.unshift(run);
+    await route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ run }) });
+  });
+  await page.route("**/api/sessions/session-terminal/events?*", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ session, events: [] }),
+  }));
+  await page.route("**/api/sessions/session-terminal/live-evidence", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ approvals: [], approvalRules: [], terminalRuns, verificationRuns: [], verificationHandoffs: [] }),
+  }));
+  await page.route("**/api/terminal/*/input", async (route) => {
+    const data = String((route.request().postDataJSON() as { data?: string }).data ?? "");
+    terminalInput.push(data);
+    if (data.includes("\r")) {
+      const run = terminalRuns.find((item) => item.id === "shell-1");
+      if (run) {
+        run.output = "workspace $ echo hello\r\nhello\r\nworkspace $ ";
+        run.outputVersion = 2;
+      }
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "written" }) });
+  });
+  await page.route("**/api/terminal/*/resize", async (route) => {
+    const size = route.request().postDataJSON() as { columns: number; rows: number };
+    terminalSizes.push(size);
+    const urlParts = route.request().url().split("/");
+    const id = urlParts[urlParts.length - 2];
+    const run = terminalRuns.find((item) => item.id === id) ?? terminalRuns[0];
+    if (run) Object.assign(run, size);
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ run }) });
+  });
+  await page.route("**/api/terminal/*/interrupt", async (route) => {
+    const urlParts = route.request().url().split("/");
+    const id = urlParts[urlParts.length - 2];
+    const run = terminalRuns.find((item) => item.id === id);
+    if (run) run.status = "interrupted";
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "interrupted" }) });
+  });
+  await page.route("**/api/terminal/*/stream", async (route) => {
+    const urlParts = route.request().url().split("/");
+    const id = urlParts[urlParts.length - 2];
+    const run = terminalRuns.find((item) => item.id === id) ?? terminalRuns[0];
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream", "cache-control": "no-store" },
+      body: `event: snapshot\ndata: ${JSON.stringify({ run, sequence: 0, active: Boolean(run && run.status === "running") })}\n\n`,
+    });
+  });
+
+  await page.goto("/");
+  await page.keyboard.press("Control+Backquote");
+  await expect(page.getByRole("tab", { name: "Terminal" })).toHaveAttribute("aria-selected", "true");
+  await expect.poll(() => shellCount).toBe(1);
+  await expect(page.getByRole("button", { name: "zsh terminal", exact: true })).toHaveAttribute("aria-current", "page");
+  const input = page.getByRole("textbox", { name: "Terminal input" });
+  await input.pressSequentially("echo hello");
+  await input.press("Enter");
+  await expect.poll(() => terminalInput.join("")).toContain("echo hello\r");
+  await expect.poll(() => terminalSizes.length).toBeGreaterThan(0);
+  await expect(page.locator(".terminal-emulator .xterm-rows")).toContainText("hello");
+
+  await page.getByRole("button", { name: "New terminal" }).click();
+  await expect.poll(() => shellCount).toBe(2);
+  await expect(page.getByRole("button", { name: "zsh terminal", exact: true })).toHaveCount(2);
+  await page.getByRole("button", { name: "Close zsh terminal" }).last().click();
+  await expect(page.getByRole("button", { name: "zsh terminal", exact: true })).toHaveCount(1);
+  await expectBasicAccessibility(page);
   expect(browserErrors).toEqual([]);
 });
 
@@ -477,9 +597,9 @@ test("turns discovered project checks into approved, retained verification proof
   await page.route("**/api/bootstrap", async (route) => {
     bootstrapRequests += 1;
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
-      contractVersion: 24,
+      contractVersion: 26,
       projects: [project], sessions: [session],
-      runtimes: [{ id: "codex", name: "Codex CLI", availability: "installed", detail: "Ready", acceptsCustomModel: true, models: [], capabilities: ["workspace-write"] }],
+      runtimes: [{ id: "codex", name: "Codex CLI", kind: "local-cli", availability: "installed", detail: "Ready", acceptsCustomModel: true, models: [], capabilities: ["workspace-write"], conformance: { state: "ready", checkedAt: new Date().toISOString(), durationMs: 1, detail: "Ready", checks: [] } }],
       modelProviders: [], skills: [], selectedProjectId: project.id, selectedSessionId: session.id,
       files: [{ path: "src/index.ts" }], changes: [{ path: "src/index.ts", status: "modified" }], events: [], approvals, terminalRuns, verificationRuns, verificationHandoffs, projectDoctor: doctor,
       settings: { theme: "graphite-dark", defaultMode: "ask", defaultRuntimeId: "codex" },
@@ -556,7 +676,8 @@ test("turns discovered project checks into approved, retained verification proof
   });
 
   await page.goto("/");
-  await page.getByRole("tab", { name: "Verify" }).click();
+  await expect(page.getByRole("tab", { name: "Verify", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Review and run checks" }).click();
   await expect(page.getByText("Project Doctor", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Project recipe")).toBeVisible();
   await expect(page.getByText("Project contract · .vraxis/verify.json", { exact: true })).toBeVisible();
@@ -572,18 +693,9 @@ test("turns discovered project checks into approved, retained verification proof
   await page.getByRole("button", { name: "Allow once" }).click();
   await expect(page.locator(".verification-workflow strong").filter({ hasText: /^Passed$/ })).toBeVisible();
   await expect(page.getByLabel("Task evidence ledger")).toContainText("1 verified");
-  await page.getByRole("button", { name: "Understand" }).click();
-  await expect(page.getByRole("region", { name: "Task understanding" })).toContainText("All 1 changed path is covered");
-  await expect(page.getByRole("region", { name: "Task understanding" })).toContainText("Teach it back");
-  await page.screenshot({ path: testInfo.outputPath("understand-artifact.png"), fullPage: true });
-  await page.getByRole("button", { name: "Explore evidence" }).click();
-  await expect(page.getByRole("tab", { name: "Changes" })).toHaveAttribute("aria-selected", "true");
-  await page.getByRole("button", { name: "Close understanding" }).click();
-  await expect(page.getByRole("region", { name: "Task understanding" })).toHaveCount(0);
-  await page.getByRole("tab", { name: "Verify" }).click();
-  const proofDownload = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Download proof" }).click();
-  await expect((await proofDownload).suggestedFilename()).toMatch(/proof\.html$/);
+  await expect(page.getByRole("button", { name: "Understand", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Download proof", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Signed JSON", exact: true })).toHaveCount(0);
   await expect(page.getByText(
     `Recipe ${recipeFingerprint.slice(0, 12)} · 0 services · 1 command receipt · 0 browser assertions`,
     { exact: true },
@@ -644,7 +756,7 @@ test("shows governed service health and can stop and tear down an active verific
     body: JSON.stringify({
       contractVersion: 11,
       projects: [project], sessions: [session],
-      runtimes: [{ id: "codex", name: "Codex CLI", availability: "installed", detail: "Ready", acceptsCustomModel: true, models: [], capabilities: ["workspace-write"] }],
+      runtimes: [{ id: "codex", name: "Codex CLI", kind: "local-cli", availability: "installed", detail: "Ready", acceptsCustomModel: true, models: [], capabilities: ["workspace-write"], conformance: { state: "ready", checkedAt: new Date().toISOString(), durationMs: 1, detail: "Ready", checks: [] } }],
       modelProviders: [], skills: [], selectedProjectId: project.id, selectedSessionId: session.id,
       files: [], changes: [], events: [], ...liveEvidence(),
       projectDoctor: {
@@ -670,7 +782,8 @@ test("shows governed service health and can stop and tear down an active verific
   }));
 
   await page.goto("/");
-  await page.getByRole("tab", { name: "Verify" }).click();
+  await expect(page.getByRole("tab", { name: "Verify", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Review and run checks" }).click();
   const serviceHealth = page.getByLabel("Governed service health");
   await expect(serviceHealth.getByText("Preview server", { exact: true })).toBeVisible();
   await expect(serviceHealth.getByText(/http:\/\/127\.0\.0\.1:4318\/health · HTTP 200 · 2 attempts/)).toBeVisible();
@@ -744,9 +857,12 @@ test("shares numbered page controls with the user and agent without selector inp
 
   await page.goto("/");
   await page.getByRole("tab", { name: "Browser" }).click();
-  await expect(page.getByText("Page controls", { exact: true })).toBeVisible();
-  await expect(page.getByText("The agent sees the same refs.")).toBeVisible();
+  await expect(page.getByText("Shared with the agent", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Prompt context").getByText("Local app", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Task evidence ledger")).toContainText("1 browser action");
+  await page.getByRole("button", { name: "Show browser activity" }).click();
+  await expect(page.getByText("Interactive controls", { exact: true })).toBeVisible();
+  await expect(page.getByText("Select a control here or directly on the page.")).toBeVisible();
   await page.getByText("Network · 1").click();
   await expect(page.getByText("GET · fetch")).toBeVisible();
   await expect(page.getByRole("button", { name: "Choose e1, Email" })).toBeVisible();
@@ -755,11 +871,62 @@ test("shares numbered page controls with the user and agent without selector inp
 
   await page.getByRole("option", { name: /Email/ }).click();
   await page.getByRole("textbox", { name: "Text to type" }).fill("engineer@example.com");
-  await page.getByRole("button", { name: "Type into control" }).click();
+  await page.getByRole("button", { name: "Type", exact: true }).click();
   await expect.poll(() => browserRequests[0]?.target).toBe("e1");
   await page.getByRole("button", { name: /Docs/ }).click();
   await expect.poll(() => browserRequests[1]?.tabId).toBe("tab-2");
   expect(browserRequests[1]?.action).toBe("select-tab");
+  expect(browserErrors).toEqual([]);
+});
+
+test("hosts the desktop browser as a live native surface and hides it outside the browser tab", async ({ page }) => {
+  const browserErrors = collectBrowserErrors(page);
+  const project = { id: "project-native-browser", name: "native-browser", path: "/Users/engineer/native-browser", branch: "main", status: "ready" };
+  const session = { id: "session-native-browser", projectId: project.id, title: "Use the live page", mode: "build", runtimeId: "codex", updatedAt: new Date().toISOString(), status: "idle" };
+  await page.addInitScript(() => {
+    const host = window as Window & { __vraxisBrowserLayouts?: Array<Record<string, unknown>> };
+    host.__vraxisBrowserLayouts = [];
+    host.vraxisDesktop = {
+      browserView: {
+        async setLayout(layout) { host.__vraxisBrowserLayouts!.push(structuredClone(layout) as unknown as Record<string, unknown>); },
+        onState() { return () => undefined; },
+      },
+    };
+  });
+  await page.route("**/api/bootstrap", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      contractVersion: 26,
+      projects: [project],
+      sessions: [session],
+      runtimes: [{ id: "codex", name: "Codex CLI", availability: "installed", detail: "Ready", acceptsCustomModel: true, models: [], kind: "local-cli", capabilities: ["workspace-write"] }],
+      modelProviders: [], skills: [], selectedProjectId: project.id, selectedSessionId: session.id,
+      files: [], changes: [], events: [], approvals: [], approvalRules: [], terminalRuns: [], verificationRuns: [],
+      settings: { theme: "graphite-dark", defaultMode: "ask", defaultRuntimeId: "codex" },
+    }),
+  }));
+  await page.route("**/api/sessions/session-native-browser/live-evidence", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ approvals: [], approvalRules: [], terminalRuns: [], verificationRuns: [], verificationHandoffs: [] }),
+  }));
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Browser" }).click();
+
+  await expect(page.getByLabel("Live embedded browser")).toBeVisible();
+  await expect(page.getByText("Native interactive page", { exact: true })).toBeVisible();
+  await expect(page.locator(".browser-frame img")).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => {
+    const layouts = (window as Window & { __vraxisBrowserLayouts?: Array<{ visible?: boolean; bounds?: { width?: number; height?: number } }> }).__vraxisBrowserLayouts ?? [];
+    return layouts.some(layout => layout.visible && Number(layout.bounds?.width) > 1 && Number(layout.bounds?.height) > 1);
+  })).toBe(true);
+
+  await page.getByRole("tab", { name: "Files" }).click();
+  await expect.poll(() => page.evaluate(() => {
+    const layouts = (window as Window & { __vraxisBrowserLayouts?: Array<{ visible?: boolean }> }).__vraxisBrowserLayouts ?? [];
+    return layouts.at(-1)?.visible;
+  })).toBe(false);
   expect(browserErrors).toEqual([]);
 });
 
@@ -815,12 +982,13 @@ test("keeps restart-recovered browser proof visible and stale controls safe unti
 
   await page.goto("/");
   await page.getByRole("tab", { name: "Browser" }).click();
-  await expect(page.getByText("Saved evidence", { exact: true })).toBeVisible();
-  await expect(page.getByText("Retained viewport", { exact: true })).toBeVisible();
-  await expect(page.getByText("Saved control map. Restore the browser before acting.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Retained after restart", { exact: true })).toBeVisible();
+  await expect(page.getByText("Shared with the agent", { exact: true })).toBeVisible();
   await expect(page.getByAltText("Captured page Saved preview")).toBeVisible();
+  await page.getByRole("button", { name: "Show browser activity" }).click();
+  await expect(page.getByText("Restore the browser before acting on retained controls.", { exact: true })).toBeVisible();
   await page.getByRole("option", { name: /Email/ }).click();
-  await expect(page.getByRole("button", { name: "Type into control" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Type", exact: true })).toBeDisabled();
   await page.getByRole("button", { name: "Restore browser" }).click();
   await expect.poll(() => browserRequests[0]?.action).toBe("capture");
   await page.screenshot({ path: testInfo.outputPath("retained-browser-evidence.png"), fullPage: true });
@@ -965,6 +1133,7 @@ test("runs the selected mode and model without reloading the workspace", async (
   });
 
   await page.goto("/");
+  await page.addStyleTag({ content: ".session-pane::before { content: ''; display: block; flex: 0 0 1200px; }" });
   await expect(page.getByLabel("Runtime")).toHaveValue("codex");
   await page.getByRole("radio", { name: "Plan", exact: true }).click();
   await page.getByRole("button", { name: "GPT-5.6-Sol", exact: true }).click();
@@ -981,6 +1150,7 @@ test("runs the selected mode and model without reloading the workspace", async (
   await page.getByRole("option", { name: /ux-fundamentals/ }).click();
   await expect(page.getByLabel("Prompt context").getByText("ux-fundamentals", { exact: true })).toBeVisible();
   await composer.fill("Where is the entry point?");
+  await page.getByLabel("Agent task").evaluate((pane) => { pane.scrollTop = 0; });
   await page.getByRole("button", { name: "Send message" }).click();
   const handoff = page.getByRole("dialog", { name: "Send external files?" });
   await expect(handoff).toBeVisible();
@@ -990,6 +1160,7 @@ test("runs the selected mode and model without reloading the workspace", async (
   await handoff.getByRole("button", { name: "Send files" }).click();
   await expect(handoff).toHaveCount(0);
   await expect.poll(() => submittedMode).toBe("plan");
+  await expectTaskPaneAtBottom(page);
   expect(submittedMode).toBe("plan");
   expect(session.modelId).toBe("gpt-5.6-terra");
   expect(bootstrapRequests).toBe(1);
@@ -1004,12 +1175,19 @@ test("runs the selected mode and model without reloading the workspace", async (
     modelId: "gpt-5.6-terra",
     confirmed: true,
   });
-  await expect(page.getByText("Agent is working", { exact: true })).toBeVisible();
   await expect(page.getByText("Reading the project")).toBeVisible();
   await expect(page.getByText("The entry point is")).toBeVisible();
   await expect(page.getByLabel("Attached context").getByText("ux-fundamentals", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Prompt context")).toHaveCount(0);
   await expect(page.locator(".session-note").filter({ hasText: "Task complete" })).toBeVisible();
+  await expect(page.locator("osx-agent-run-status")).toHaveCount(0);
+  await expectTaskPaneAtBottom(page);
+
+  await page.getByLabel("Agent task").evaluate((pane) => { pane.scrollTop = 0; });
+  await expect.poll(() => page.getByLabel("Agent task").evaluate((pane) =>
+    pane.scrollHeight - pane.scrollTop - pane.clientHeight)).toBeGreaterThan(100);
+  await page.getByRole("radio", { name: "Review", exact: true }).click();
+  await expectTaskPaneAtBottom(page);
   expect(browserErrors).toEqual([]);
 });
 
@@ -1043,6 +1221,8 @@ test("starts Build in an isolated worktree and opens a closable exact diff", asy
   let created = false;
   let polls = 0;
   let submittedMode = "";
+  let followUpMode = "";
+  let followedUpSessionId = "";
   let applied = false;
   let bootstrapRequests = 0;
   const approvals: Array<Record<string, unknown>> = [];
@@ -1088,6 +1268,39 @@ test("starts Build in an isolated worktree and opens a closable exact diff", asy
     submittedMode = request.mode;
     created = true;
     await route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ ...session, events: initialEvents }) });
+  });
+  await page.route("**/api/sessions/build-1/messages", async (route) => {
+    const request = route.request().postDataJSON() as { mode: string };
+    followUpMode = request.mode;
+    followedUpSessionId = session.id;
+    const previousWorktree = { ...worktree };
+    Object.assign(worktree, {
+      id: "worktree-2",
+      path: "/Users/engineer/.vraxis/code/worktrees/project-build/worktree-2",
+      branch: "vraxis/refine-health-check-87654321",
+      baseCommit: "fedcba0987654321",
+      status: "active",
+    });
+    Object.assign(session, { status: "idle", worktreeHistory: [previousWorktree] });
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...session,
+        events: [{
+          id: "build-event-7",
+          sessionId: session.id,
+          sequence: 7,
+          timestamp: new Date().toISOString(),
+          runtimeId: "codex",
+          kind: "lifecycle",
+          title: "Build continued",
+          detail: "A fresh isolated worktree was created for the next edit.",
+          state: "complete",
+          actor: "system",
+        }],
+      }),
+    });
   });
   await page.route("**/api/sessions/build-1/events?after=*", async (route) => {
     polls += 1;
@@ -1203,7 +1416,14 @@ test("starts Build in an isolated worktree and opens a closable exact diff", asy
   await page.getByRole("button", { name: "Allow once" }).click();
   await expect(page.getByText("Changes applied", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("Applied", { exact: true })).toBeVisible();
-  await expect(page.getByRole("radio", { name: "Review", exact: true })).toBeChecked();
+  await expect(page.getByRole("radio", { name: "Build", exact: true })).toBeChecked();
+  await expect(page.getByRole("textbox", { name: "Message to agent" })).toBeEnabled();
+  await expect(page.getByText("New isolated worktree on send", { exact: false })).toBeVisible();
+  await page.getByRole("textbox", { name: "Message to agent" }).fill("Refine the health check");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect.poll(() => followUpMode).toBe("build");
+  expect(followedUpSessionId).toBe("build-1");
+  await expect(page.getByText("vraxis/refine-health-check-87654321", { exact: true })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Message to agent" })).toBeEnabled();
   await page.screenshot({ path: testInfo.outputPath("applied-build.png"), fullPage: true });
   expect(bootstrapRequests).toBe(1);
@@ -1250,7 +1470,7 @@ test("scrolls long file previews inside the Files pane", async ({ page }, testIn
   expect(browserErrors).toEqual([]);
 });
 
-test("approves terminal and browser actions without reloading the workspace", async ({ page }, testInfo) => {
+test("approves browser actions without reloading the workspace", async ({ page }, testInfo) => {
   const browserErrors = collectBrowserErrors(page);
   const project = { id: "project-live", name: "live-project", path: "/Users/engineer/live-project", branch: "main", status: "ready" };
   const session = { id: "session-live", projectId: project.id, title: "Verify the app", mode: "build", runtimeId: "codex", updatedAt: new Date().toISOString(), status: "idle" };
@@ -1258,7 +1478,6 @@ test("approves terminal and browser actions without reloading the workspace", as
   const terminalRuns: Array<Record<string, unknown>> = [];
   let browser: Record<string, unknown> | undefined;
   let bootstrapRequests = 0;
-  let nextApprovalSource = "";
 
   await page.route("**/api/bootstrap", async (route) => {
     bootstrapRequests += 1;
@@ -1284,24 +1503,14 @@ test("approves terminal and browser actions without reloading the workspace", as
       }),
     });
   });
-  await page.route("**/api/commands", async (route) => {
-    nextApprovalSource = "terminal";
-    approvals.unshift({ id: "approval-terminal", sessionId: session.id, requestedAt: new Date().toISOString(), capability: "command", title: "Run npm test", description: "Run without a shell.", scope: ". · npm test", risk: "high", state: "pending", source: "terminal" });
-    terminalRuns.unshift({ id: "run-1", sessionId: session.id, approvalId: "approval-terminal", command: "npm test", cwd: ".", status: "pending", output: "" });
-    await route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ approval: approvals[0], run: terminalRuns[0] }) });
-  });
   await page.route("**/api/browser/actions", async (route) => {
-    nextApprovalSource = "browser";
     approvals.unshift({ id: "approval-browser", sessionId: session.id, requestedAt: new Date().toISOString(), capability: "browser", title: "Browser navigate", description: "Open an isolated browser.", scope: "http://127.0.0.1:4318/", risk: "high", state: "pending", source: "browser" });
     await route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ approval: approvals[0] }) });
   });
   await page.route("**/api/approvals/*/decision", async (route) => {
     const selected = approvals.find((item) => item.state === "pending");
     if (selected) selected.state = "completed";
-    if (nextApprovalSource === "terminal") {
-      Object.assign(terminalRuns[0]!, { status: "success", output: "all tests passed\n", exitCode: 0, durationMs: 321 });
-    } else {
-      browser = {
+    browser = {
         sessionId: session.id,
         status: "ready",
         url: "http://127.0.0.1:4318/",
@@ -1313,13 +1522,12 @@ test("approves terminal and browser actions without reloading the workspace", as
         tabs: [{ id: "tab-preview", title: "Vraxis preview", url: "http://127.0.0.1:4318/", active: true }],
         controls: [],
         allowedOrigins: ["http://127.0.0.1:4318"],
-        console: [],
-        network: [],
+        console: [{ id: "console-error", timestamp: new Date().toISOString(), level: "error", text: "Historical page error" }],
+        network: [{ id: "network-error", timestamp: new Date().toISOString(), method: "GET", url: "http://127.0.0.1:4318/missing", resourceType: "fetch", state: "error", failure: "net::ERR_FAILED" }],
         actions: [{ id: "browser-action-1", action: "navigate", target: "http://127.0.0.1:4318/", status: "success", timestamp: new Date().toISOString(), detail: "Opened the preview.", actor: "user", afterFrameId: "frame-after" }],
         frames: [{ id: "frame-after", actionId: "browser-action-1", phase: "after", url: "http://127.0.0.1:4318/", title: "Vraxis preview", timestamp: new Date().toISOString(), screenshotVersion: 1 }],
         updatedAt: new Date().toISOString(),
       };
-    }
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ approval: selected }) });
   });
   await page.route("**/api/sessions/session-live/live-evidence", async (route) => {
@@ -1341,25 +1549,88 @@ test("approves terminal and browser actions without reloading the workspace", as
   });
 
   await page.goto("/");
-  await page.getByRole("tab", { name: "Terminal" }).click();
-  await page.getByLabel("Command").fill("npm test");
-  await page.getByRole("button", { name: "Request run" }).click();
-  await expect(page.getByText("Action needs your approval")).toBeVisible();
-  await page.getByRole("button", { name: "Allow once" }).click();
-  await expect(page.getByText("all tests passed")).toBeVisible();
-
+  await page.addStyleTag({ content: ".session-pane::before { content: ''; display: block; flex: 0 0 1200px; }" });
+  const taskPane = page.getByLabel("Agent task");
   await page.getByRole("tab", { name: "Browser" }).click();
-  await page.getByLabel("Address").fill("http://127.0.0.1:4318/");
-  await page.getByRole("button", { name: "Open" }).click();
+  await page.getByRole("textbox", { name: "Address", exact: true }).fill("http://127.0.0.1:4318/");
+  await taskPane.evaluate((pane) => { pane.scrollTop = 0; });
+  await page.getByRole("button", { name: "Open address", exact: true }).click();
   await expect(page.getByText("Action needs your approval")).toBeVisible();
+  await expectTaskPaneAtBottom(page);
   await page.getByRole("button", { name: "Allow once" }).click();
   await expect(page.getByRole("button", { name: "Vraxis preview", exact: true })).toBeVisible();
   await expect(page.getByAltText("Captured page Vraxis preview")).toBeVisible();
+  await expect(page.getByText(/needs review/i)).toHaveCount(0);
   const replayDownload = page.waitForEvent("download");
   await page.getByRole("button", { name: "Export replay" }).click();
   expect((await replayDownload).suggestedFilename()).toMatch(/browser-replay\.html$/);
   await page.screenshot({ path: testInfo.outputPath("approval-browser-terminal.png"), fullPage: true });
   expect(bootstrapRequests).toBe(1);
+  expect(browserErrors).toEqual([]);
+});
+
+test("starts another task in the same project without losing task history", async ({ page }) => {
+  const browserErrors = collectBrowserErrors(page);
+  const project = { id: "project-thread", name: "thread-project", path: "/Users/engineer/thread-project", branch: "main", status: "ready" };
+  const previousSession = { id: "session-previous", projectId: project.id, title: "Previous conversation", mode: "ask", runtimeId: "codex", updatedAt: new Date().toISOString(), status: "idle" };
+  const sessions: Array<Record<string, unknown>> = [previousSession];
+  let selectedSessionId: string | undefined = previousSession.id;
+  let newTaskRequests = 0;
+
+  await page.route("**/api/bootstrap", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        contractVersion: 5,
+        projects: [project],
+        sessions,
+        runtimes: [{ id: "codex", name: "Codex CLI", availability: "installed", detail: "Ready", acceptsCustomModel: true, models: [], capabilities: ["workspace-write"] }],
+        modelProviders: [],
+        skills: [],
+        selectedProjectId: project.id,
+        ...(selectedSessionId ? { selectedSessionId } : {}),
+        files: [{ path: "src/index.ts" }],
+        changes: [],
+        events: selectedSessionId ? [{ id: "event-previous", sessionId: previousSession.id, sequence: 1, kind: "message", title: "Keep this conversation", detail: "Keep this conversation", state: "complete", timestamp: new Date().toISOString(), actor: "user" }] : [],
+        approvals: [],
+        approvalRules: [],
+        terminalRuns: [],
+        verificationRuns: [],
+        verificationHandoffs: [],
+        settings: { theme: "graphite-dark", defaultMode: "ask", defaultRuntimeId: "codex" },
+      }),
+    });
+  });
+  await page.route("**/api/projects/project-thread/new-task", async (route) => {
+    newTaskRequests += 1;
+    selectedSessionId = undefined;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "ready", projectId: project.id }) });
+  });
+  await page.route("**/api/sessions", async (route) => {
+    const input = route.request().postDataJSON() as { prompt: string; mode: string; runtimeId: string };
+    const nextSession = { id: "session-next", projectId: project.id, title: input.prompt, mode: input.mode, runtimeId: input.runtimeId, updatedAt: new Date().toISOString(), status: "idle" };
+    sessions.unshift(nextSession);
+    selectedSessionId = nextSession.id;
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({ ...nextSession, events: [{ id: "event-next", sessionId: nextSession.id, sequence: 1, kind: "message", title: input.prompt, detail: input.prompt, state: "complete", timestamp: new Date().toISOString(), actor: "user" }] }),
+    });
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Previous conversation" })).toBeVisible();
+  await page.getByRole("button", { name: "New task", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "New task", exact: true })).toBeVisible();
+  await expect(page.getByText("Keep this conversation", { exact: true })).toHaveCount(0);
+  expect(newTaskRequests).toBe(1);
+
+  await page.getByRole("textbox", { name: "Message to agent" }).fill("Start a separate investigation");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.getByRole("heading", { name: "Start a separate investigation" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Previous conversation/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Start a separate investigation/ })).toBeVisible();
   expect(browserErrors).toEqual([]);
 });
 
@@ -1530,7 +1801,7 @@ test("saves runtime and model defaults in a dedicated settings surface", async (
       kind: "vraxis.support-bundle",
       version: 1,
       generatedAt: new Date().toISOString(),
-      application: { name: "Vraxis Code", version: "0.1.0", contractVersion: 24 },
+      application: { name: "Vraxis Code", version: "0.1.0", contractVersion: 26 },
       environment: { platform: "darwin", architecture: "arm64", node: "22.12.0", desktop: true },
       inventory: { projects: { total: 1, ready: 1, unavailable: 0 }, sessions: { idle: 1, running: 0, failed: 0, interrupted: 0 }, runtimes: [] },
       recovery: { previousUnexpectedExit: false, approvalsInterrupted: 0, terminalRunsInterrupted: 0, verificationsInterrupted: 0, worktreesNeedingReview: 0 },
@@ -1549,8 +1820,8 @@ test("saves runtime and model defaults in a dedicated settings surface", async (
   await page.getByRole("radio", { name: /Graphite Dark/ }).click();
   await expect(page.locator(".product-root")).toHaveAttribute("data-osx-theme", "graphite-dark");
   expect(settingsState.theme).toBe("graphite-dark");
-  await page.getByRole("radio", { name: "Build Make changes inside an isolated worktree." }).click();
-  await expect(page.getByRole("radio", { name: "Build Make changes inside an isolated worktree." })).toBeChecked();
+  await expect(page.getByRole("heading", { name: "New tasks", exact: true })).toHaveCount(0);
+  await expect(page.getByText("Default mode", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Agent harnesses" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Proof identity & trust" })).toBeVisible();
   const diagnostics = page.locator(".support-diagnostics");

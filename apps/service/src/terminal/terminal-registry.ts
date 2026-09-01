@@ -11,6 +11,16 @@ interface TerminalData {
   runs: TerminalRunSummary[];
 }
 
+export type TerminalStreamEvent =
+  | { type: "data"; sequence: number; data: string }
+  | { type: "exit"; run: TerminalRunSummary };
+
+export interface TerminalStreamSnapshot {
+  run: TerminalRunSummary;
+  sequence: number;
+  active: boolean;
+}
+
 const emptyData: TerminalData = { schemaVersion: 1, runs: [] };
 const maximumOutputBytes = 1024 * 1024;
 const inheritedEnvironment = [
@@ -181,6 +191,8 @@ export class TerminalRegistry {
   private readonly processes = new Map<string, IPty>();
   private readonly executions = new Map<string, Promise<TerminalRunSummary>>();
   private readonly interrupted = new Set<string>();
+  private readonly liveOutput = new Map<string, { output: string; sequence: number }>();
+  private readonly streamListeners = new Map<string, Set<(event: TerminalStreamEvent) => void>>();
 
   constructor(dataDirectory: string) {
     this.file = join(dataDirectory, "terminal-runs.json");
@@ -191,13 +203,40 @@ export class TerminalRegistry {
     return data.runs.filter((item) => !sessionId || item.sessionId === sessionId);
   }
 
-  async prepare(sessionId: string, approvalId: string, command: string, cwd: string): Promise<TerminalRunSummary> {
+  subscribe(id: string, listener: (event: TerminalStreamEvent) => void): () => void {
+    const listeners = this.streamListeners.get(id) ?? new Set<(event: TerminalStreamEvent) => void>();
+    listeners.add(listener);
+    this.streamListeners.set(id, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (!listeners.size) this.streamListeners.delete(id);
+    };
+  }
+
+  async streamSnapshot(id: string): Promise<TerminalStreamSnapshot> {
+    const run = await this.get(id);
+    const live = this.liveOutput.get(id);
+    return {
+      run: live ? { ...run, output: live.output } : run,
+      sequence: live?.sequence ?? 0,
+      active: Boolean(live),
+    };
+  }
+
+  async prepare(
+    sessionId: string,
+    approvalId: string,
+    command: string,
+    cwd: string,
+    context: Partial<Pick<TerminalRunSummary, "purpose" | "label">> = {},
+  ): Promise<TerminalRunSummary> {
     commandArguments(command);
     return this.mutate((data) => {
       const run: TerminalRunSummary = {
         id: randomUUID(),
         sessionId,
         approvalId,
+        ...context,
         command,
         cwd,
         status: "pending",
@@ -223,18 +262,36 @@ export class TerminalRegistry {
     const resolvedCommand = await resolveExecutable(executable, environment);
     const startedAt = Date.now();
     await this.update(id, { status: "running", startedAt: new Date(startedAt).toISOString() });
-    const execution = new Promise<TerminalRunSummary>((resolve, reject) => {
-      const child = spawnPty(resolvedCommand.executable, [...resolvedCommand.prefixArguments, ...args], {
+    this.liveOutput.set(id, { output: prepared.output, sequence: 0 });
+    let child: IPty;
+    try {
+      child = spawnPty(resolvedCommand.executable, [...resolvedCommand.prefixArguments, ...args], {
         cwd: absoluteCwd,
         env: environment,
         name: "xterm-256color",
-        cols: 100,
-        rows: 30,
+        cols: prepared.columns ?? 100,
+        rows: prepared.rows ?? 30,
       });
+    } catch (error) {
+      const failure = error instanceof Error ? error.message : "The terminal process could not start.";
+      const run = await this.update(id, {
+        status: "error",
+        output: `${failure}\n`,
+        completedAt: new Date().toISOString(),
+        durationMs: Date.now() - startedAt,
+      });
+      this.publish(id, { type: "exit", run });
+      this.liveOutput.delete(id);
+      return run;
+    }
+    const execution = new Promise<TerminalRunSummary>((resolve, reject) => {
       this.processes.set(id, child);
       let output = "";
       let outputVersion = prepared.outputVersion ?? 0;
       let truncated = false;
+      const retainedSegmentBytes = Math.floor(maximumOutputBytes / 2);
+      let outputHead = Buffer.alloc(0);
+      let outputTail = Buffer.alloc(0);
       let flushTimer: NodeJS.Timeout | undefined;
       let flushes: Promise<unknown> = Promise.resolve();
       let settled = false;
@@ -255,12 +312,25 @@ export class TerminalRegistry {
         flushTimer = setTimeout(() => void persistOutput(), 75);
       };
       const append = (chunk: string) => {
-        if (truncated) return;
-        const next = output + String(chunk);
-        if (Buffer.byteLength(next) > maximumOutputBytes) {
-          output = `${Buffer.from(next).subarray(0, maximumOutputBytes).toString("utf8")}\n[Output truncated at 1 MB]\n`;
-          truncated = true;
-        } else output = next;
+        const data = String(chunk);
+        const incoming = Buffer.from(data);
+        if (!truncated) {
+          const next = Buffer.concat([Buffer.from(output), incoming]);
+          if (next.byteLength <= maximumOutputBytes) output = next.toString("utf8");
+          else {
+            truncated = true;
+            outputHead = next.subarray(0, retainedSegmentBytes);
+            outputTail = next.subarray(-retainedSegmentBytes);
+            output = `${outputHead.toString("utf8")}\n[Output truncated; showing the first and last 512 KB]\n${outputTail.toString("utf8")}`;
+          }
+        } else {
+          const nextTail = Buffer.concat([outputTail, incoming]);
+          outputTail = nextTail.subarray(Math.max(0, nextTail.byteLength - retainedSegmentBytes));
+          output = `${outputHead.toString("utf8")}\n[Output truncated; showing the first and last 512 KB]\n${outputTail.toString("utf8")}`;
+        }
+        const sequence = (this.liveOutput.get(id)?.sequence ?? 0) + 1;
+        this.liveOutput.set(id, { output, sequence });
+        this.publish(id, { type: "data", sequence, data });
         scheduleOutput();
       };
       child.onData(append);
@@ -285,6 +355,8 @@ export class TerminalRegistry {
           durationMs: Date.now() - startedAt,
           outputTruncated: truncated,
         });
+        this.publish(id, { type: "exit", run });
+        this.liveOutput.delete(id);
         resolve(run);
       })().catch(reject));
     });
@@ -364,6 +436,10 @@ export class TerminalRegistry {
 
   private terminateProcess(child: IPty, signal = "SIGTERM"): void {
     terminatePty(child, signal);
+  }
+
+  private publish(id: string, event: TerminalStreamEvent): void {
+    for (const listener of this.streamListeners.get(id) ?? []) listener(event);
   }
 
   private closeDeadline(milliseconds: number): Promise<void> {

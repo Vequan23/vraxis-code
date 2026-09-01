@@ -7,11 +7,11 @@ import test from "node:test";
 import { chromium, type BrowserContext } from "playwright";
 import { MemoryCredentialStore, defineOutput, localExecutionScope, type ApprovalRequest, type CodingRuntimeRequest, type CodingRuntimeResult, type RuntimeReadiness } from "@vraxis/agent-v";
 import { LocalCliRuntimeEngine } from "@vraxis/agent-v/local-cli";
-import { executeAgentTool } from "@vraxis/agent-v/tools";
+import { executeAgentTool, type BrowserController } from "@vraxis/agent-v/tools";
 import { ApprovalRegistry } from "../src/approvals/approval-registry.js";
 import { BrowserWorkspace } from "../src/browser/browser-workspace.js";
 import { commandArguments, executableCandidates, TerminalRegistry, terminatePty } from "../src/terminal/terminal-registry.js";
-import { createAgentTerminalTool } from "../src/terminal/agent-terminal-tool.js";
+import { createAgentTerminalPollTool, createAgentTerminalTool } from "../src/terminal/agent-terminal-tool.js";
 import { ModelProviderRegistry } from "../src/model-providers/model-provider-registry.js";
 import { VraxisCodeRuntimeEngine } from "../src/runtimes/vraxis-code-runtime.js";
 import { VerificationRegistry } from "../src/verification/verification-registry.js";
@@ -249,6 +249,55 @@ test("streams bounded terminal output while a command is still running", async (
   assert.match(completed.output, /first.*second/s);
 });
 
+test("publishes PTY output to live subscribers without waiting for retained-output persistence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "vraxis-terminal-live-test-"));
+  const terminal = new TerminalRegistry(root);
+  const run = await terminal.prepare(
+    "session-live",
+    "approval-live",
+    "node -e \"process.stdin.setEncoding('utf8'); process.stdin.once('data', value => { console.log(value.trim()); process.exit(0); })\"",
+    ".",
+  );
+  const data = new Promise<{ sequence: number; data: string }>((resolve) => {
+    const unsubscribe = terminal.subscribe(run.id, (event) => {
+      if (event.type !== "data" || !event.data.includes("live-keystroke")) return;
+      unsubscribe();
+      resolve(event);
+    });
+  });
+  const execution = terminal.execute(run.id, root);
+  for (let attempt = 0; attempt < 40 && (await terminal.list("session-live"))[0]?.status !== "running"; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  await terminal.input(run.id, "live-keystroke\r");
+  const streamed = await Promise.race([
+    data,
+    new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Live terminal output timed out.")), 500)),
+  ]);
+  assert.ok(streamed.sequence > 0);
+  assert.match(streamed.data, /live-keystroke/);
+  const completed = await execution;
+  assert.equal(completed.status, "success");
+});
+
+test("retains the beginning and end of oversized terminal output", async () => {
+  const root = await mkdtemp(join(tmpdir(), "vraxis-terminal-truncation-test-"));
+  const terminal = new TerminalRegistry(root);
+  const run = await terminal.prepare(
+    "session-truncation",
+    "approval-truncation",
+    "node -e \"process.stdout.write('HEAD-' + 'x'.repeat(1100000) + '-TAIL')\"",
+    ".",
+  );
+  const completed = await terminal.execute(run.id, root);
+  assert.equal(completed.status, "success");
+  assert.equal(completed.outputTruncated, true);
+  assert.match(completed.output, /^HEAD-/);
+  assert.match(completed.output, /Output truncated; showing the first and last 512 KB/);
+  assert.match(completed.output, /-TAIL$/);
+  assert.ok(Buffer.byteLength(completed.output) < 1_050_000);
+});
+
 test("interrupts and retains active terminal work during graceful application shutdown", async () => {
   const root = await mkdtemp(join(tmpdir(), "vraxis-terminal-close-test-"));
   const terminal = new TerminalRegistry(root);
@@ -316,6 +365,36 @@ test("an agent terminal command waits for approval and retains the exact termina
   assert.equal(receipt?.approvalId, pending.id);
   assert.equal(receipt?.status, "success");
   assert.equal((await approvals.list("session-agent"))[0]?.state, "completed");
+});
+
+test("an agent can start and poll a long-running command without blocking its trajectory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "vraxis-agent-background-terminal-"));
+  const approvals = new ApprovalRegistry(root);
+  const terminal = new TerminalRegistry(root);
+  const sessionId = "session-background";
+  const execution = executeAgentTool({
+    tool: createAgentTerminalTool({ sessionId, workspacePath: root, terminal, approvals }),
+    input: { command: "node -e \"console.log('ready'); setTimeout(() => console.log('done'), 50)\"", background: true, timeoutMs: 5_000 },
+    runId: "run-background",
+    sessionId,
+    scope: { ...localExecutionScope("project-background"), permissions: ["command:execute"] },
+    approvalPolicy: approvals.policy(sessionId),
+  });
+  const pending = await pendingApproval(approvals, sessionId);
+  await approvals.decide(pending.id, "approve");
+  const started = await execution as { runId: string; status: string };
+  assert.equal(started.status, "running");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const polled = await executeAgentTool({
+    tool: createAgentTerminalPollTool({ sessionId, terminal }),
+    input: { runId: started.runId },
+    runId: "poll-background",
+    sessionId,
+    scope: { ...localExecutionScope("project-background"), permissions: ["command:execute"] },
+  }) as { status: string; output: string; exitCode?: number };
+  assert.equal(polled.status, "success");
+  assert.equal(polled.exitCode, 0);
+  assert.match(polled.output, /ready.*done/s);
 });
 
 test("a denied agent terminal command never creates a process receipt", async () => {
@@ -438,13 +517,15 @@ test("local Build harnesses receive governed file and terminal tools with native
     });
     const names = local.captured?.tools?.map((tool) => tool.name) ?? [];
     assert.ok(names.includes("terminal-run"), `${runtimeId} must receive the governed terminal`);
+    assert.ok(names.includes("terminal-poll"), `${runtimeId} must receive background terminal polling`);
+    assert.ok(names.includes("terminal-stop"), `${runtimeId} must receive background terminal cancellation`);
     assert.ok(names.includes("evidence-status"), `${runtimeId} must receive task evidence`);
     assert.ok(names.includes("request-verification"), `${runtimeId} must receive the product-owned verification handoff`);
     assert.ok(names.includes("browser-navigate"), `${runtimeId} must receive governed browser navigation`);
     assert.ok(names.includes("browser-network"), `${runtimeId} must receive browser evidence`);
     assert.ok(names.includes("browser-screenshot"), `${runtimeId} must receive screenshot evidence`);
     assert.ok(names.includes("browser-wait"), `${runtimeId} must receive bounded browser waits`);
-    assert.ok(names.includes("write-text"), `${runtimeId} must receive governed workspace writes`);
+    assert.ok(names.includes("create-text"), `${runtimeId} must receive governed file creation`);
     assert.ok(names.includes("apply-workspace-patch"), `${runtimeId} must receive governed patch application`);
     assert.equal(names.includes("run-command"), false, `${runtimeId} must not receive the native command bypass`);
     assert.ok(local.captured?.approvalPolicy, `${runtimeId} must receive the product approval policy`);
@@ -462,11 +543,52 @@ test("local Build harnesses receive governed file and terminal tools with native
   });
   const cursorNames = local.captured?.tools?.map((tool) => tool.name) ?? [];
   assert.ok(cursorNames.includes("read-text"));
-  assert.equal(cursorNames.includes("write-text"), false);
+  assert.equal(cursorNames.includes("create-text"), false);
   assert.equal(cursorNames.includes("terminal-run"), false);
+  assert.ok(cursorNames.includes("browser-snapshot"));
+  assert.ok(cursorNames.includes("browser-navigate"));
+  assert.ok(cursorNames.includes("browser-click"));
+  assert.ok(cursorNames.includes("browser-type"));
   assert.ok(cursorNames.includes("evidence-status"));
   assert.ok(cursorNames.includes("request-verification"));
   assert.ok(local.captured?.approvalPolicy);
+});
+
+test("agent browser controls advance approved receipts through execution to completion", async () => {
+  const root = await mkdtemp(join(tmpdir(), "vraxis-browser-receipt-test-"));
+  class CapturingLocalRuntime extends LocalCliRuntimeEngine {
+    captured?: CodingRuntimeRequest<unknown>;
+    override async inspect(runtimeId: string): Promise<RuntimeReadiness> {
+      return { runtimeId, availability: "installed", verification: "ready", version: "codex-cli 1.0.0", detail: "Ready." };
+    }
+    override async run<T>(request: CodingRuntimeRequest<T>): Promise<CodingRuntimeResult<T>> {
+      this.captured = request as CodingRuntimeRequest<unknown>;
+      return { runId: "run", output: request.output.parse({ ok: true }), provenance: { engineId: "capture", adapterStrategy: "capture", runtime: request.runtimeId }, durationMs: 1, runtimeId: request.runtimeId, activityCount: 0, attempts: 1 };
+    }
+  }
+  const credentials = new MemoryCredentialStore();
+  const approvals = new ApprovalRegistry(root);
+  const local = new CapturingLocalRuntime();
+  const controlled: BrowserController = {
+    currentUrl: async () => "http://127.0.0.1:4318/",
+    snapshot: async () => ({ title: "Vraxis Code" }),
+    navigate: async (url) => ({ url }),
+    click: async (target) => ({ target }),
+    type: async (target, value) => ({ target, value }),
+  };
+  const browser = {
+    allowedOrigins: async () => [],
+    controller: () => controlled,
+  } as unknown as BrowserWorkspace;
+  const engine = new VraxisCodeRuntimeEngine(new ModelProviderRegistry(root, credentials), credentials, approvals, browser, undefined, undefined, local);
+  const output = defineOutput({ name: "ok", jsonSchema: { type: "object" }, parse: () => ({ ok: true }) });
+  await engine.run({ runtimeId: "codex", workspacePath: root, workspaceAccess: "read-only", sessionId: "session-browser-receipt", metadata: { mode: "ask" }, scope: localExecutionScope("project-browser-receipt"), input: { prompt: "Open it." }, output });
+  const navigate = local.captured?.tools?.find((tool) => tool.name === "browser-navigate");
+  assert.ok(navigate);
+  const approval = await approvals.request({ sessionId: "session-browser-receipt", projectId: "project-browser-receipt", capability: "browser", title: "Browser Navigate", description: "Navigate the controlled browser.", scope: "http://127.0.0.1:4318", risk: "medium", source: "agent" });
+  await approvals.decide(approval.id, "approve");
+  await navigate.execute({ url: "http://127.0.0.1:4318" }, { runId: "run", sessionId: "session-browser-receipt", scope: localExecutionScope("project-browser-receipt"), toolCallId: "call", approvalId: approval.id, artifacts: [] });
+  assert.equal((await approvals.list("session-browser-receipt"))[0]?.state, "completed");
 });
 
 test("controls an isolated browser and captures visible evidence", async (context) => {

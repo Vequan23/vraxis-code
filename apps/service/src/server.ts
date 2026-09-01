@@ -4,7 +4,9 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createApp } from "./http/app.js";
+import { listenLoopback } from "./http/listen-loopback.js";
 import { ServiceLifecycleMarker } from "./diagnostics/service-lifecycle.js";
+import { DesktopBrowserRelay } from "./browser/desktop-browser-relay.js";
 
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT ?? 4317);
@@ -14,18 +16,22 @@ await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
 if (process.platform !== "win32") await chmod(dataDirectory, 0o700);
 const lifecycle = new ServiceLifecycleMarker(dataDirectory);
 const startupRecovery = await lifecycle.begin();
+const browserEndpoint = process.env.VRAXIS_DESKTOP_BROWSER_ENDPOINT;
+const browserToken = process.env.VRAXIS_DESKTOP_BROWSER_TOKEN;
+if (Boolean(browserEndpoint) !== Boolean(browserToken)) throw new Error("The desktop browser control channel is incomplete.");
+const browserRelay = browserEndpoint && browserToken ? new DesktopBrowserRelay(browserEndpoint, browserToken) : undefined;
 
 const app = createApp({
   dataDirectory,
   publicDirectory,
   startupRecovery,
+  ...(browserRelay ? { browserRelay } : {}),
   ...(process.env.VRAXIS_DESKTOP_TOKEN ? { desktopToken: process.env.VRAXIS_DESKTOP_TOKEN } : {}),
 });
 const server = createServer(app);
 
-server.listen(port, "127.0.0.1", () => {
-  console.log(`Vraxis Code service listening on http://127.0.0.1:${port}`);
-});
+await listenLoopback(server, port);
+console.log(`Vraxis Code service listening on http://127.0.0.1:${port}`);
 
 let shuttingDown = false;
 async function shutdown(): Promise<void> {

@@ -1,4 +1,4 @@
-export const contractVersion = 24 as const;
+export const contractVersion = 26 as const;
 
 export const sessionModes = ["ask", "plan", "build", "review"] as const;
 export type SessionMode = (typeof sessionModes)[number];
@@ -24,6 +24,20 @@ const repositoryReadTools = [
   "git-show",
 ] as const;
 
+const browserEvidenceTools = [
+  "browser-snapshot",
+  "browser-console",
+  "browser-network",
+  "browser-screenshot",
+  "browser-wait",
+] as const;
+
+const browserControlTools = [
+  "browser-navigate",
+  "browser-click",
+  "browser-type",
+] as const;
+
 export const modeAgentProfiles: Readonly<Record<SessionMode, ModeAgentProfile>> = {
   ask: {
     mode: "ask",
@@ -31,8 +45,8 @@ export const modeAgentProfiles: Readonly<Record<SessionMode, ModeAgentProfile>> 
     description: "Understand the project and answer with file-backed evidence.",
     access: "read-only",
     skillNames: ["Repository comprehension", "General utilities"],
-    toolIds: ["calculate", "date-time", "evidence-status", "request-verification", ...repositoryReadTools],
-    guardedToolIds: [],
+    toolIds: ["calculate", "date-time", "evidence-status", "request-verification", ...repositoryReadTools, ...browserEvidenceTools],
+    guardedToolIds: browserControlTools,
   },
   plan: {
     mode: "plan",
@@ -40,8 +54,8 @@ export const modeAgentProfiles: Readonly<Record<SessionMode, ModeAgentProfile>> 
     description: "Map the architecture and produce an actionable plan without changing files.",
     access: "read-only",
     skillNames: ["Repository comprehension", "Project architecture", "General utilities"],
-    toolIds: ["calculate", "date-time", "evidence-status", "request-verification", ...repositoryReadTools],
-    guardedToolIds: [],
+    toolIds: ["calculate", "date-time", "evidence-status", "request-verification", ...repositoryReadTools, ...browserEvidenceTools],
+    guardedToolIds: browserControlTools,
   },
   build: {
     mode: "build",
@@ -55,24 +69,20 @@ export const modeAgentProfiles: Readonly<Record<SessionMode, ModeAgentProfile>> 
       "evidence-status",
       "request-verification",
       ...repositoryReadTools,
-      "browser-snapshot",
-      "browser-console",
-      "browser-network",
-      "browser-screenshot",
-      "browser-wait",
+      ...browserEvidenceTools,
     ],
     guardedToolIds: [
-      "write-text",
+      "create-text",
       "apply-text-edits",
       "apply-workspace-patch",
       "create-directory",
       "move-path",
       "remove-path",
       "terminal-run",
+      "terminal-poll",
+      "terminal-stop",
       "http-fetch",
-      "browser-navigate",
-      "browser-click",
-      "browser-type",
+      ...browserControlTools,
     ],
   },
   review: {
@@ -81,8 +91,8 @@ export const modeAgentProfiles: Readonly<Record<SessionMode, ModeAgentProfile>> 
     description: "Inspect changes, history, regressions, and trust boundaries without editing.",
     access: "read-only",
     skillNames: ["Repository comprehension", "Code review", "Security review", "General utilities"],
-    toolIds: ["calculate", "date-time", "evidence-status", "request-verification", ...repositoryReadTools],
-    guardedToolIds: [],
+    toolIds: ["calculate", "date-time", "evidence-status", "request-verification", ...repositoryReadTools, ...browserEvidenceTools],
+    guardedToolIds: browserControlTools,
   },
 };
 
@@ -131,6 +141,7 @@ export interface SessionSummary {
   updatedAt: string;
   status: "idle" | "running" | "interrupted" | "failed";
   worktree?: WorktreeSummary;
+  worktreeHistory?: WorktreeSummary[];
 }
 
 export interface WorktreeSummary {
@@ -348,7 +359,7 @@ export interface ActivityEvent {
   sequence: number;
   timestamp: string;
   runtimeId: string;
-  kind: "message" | "progress" | "tool" | "approval" | "verification" | "lifecycle";
+  kind: "message" | "progress" | "tool" | "approval" | "verification" | "telemetry" | "lifecycle";
   title: string;
   detail: string;
   state: "pending" | "running" | "complete" | "failed" | "denied" | "interrupted";
@@ -429,6 +440,8 @@ export interface TerminalRunSummary {
   id: string;
   sessionId: string;
   approvalId: string;
+  purpose?: "task" | "user-shell";
+  label?: string;
   command: string;
   cwd: string;
   status: "pending" | "running" | "success" | "error" | "interrupted";
@@ -732,6 +745,7 @@ export interface TaskReceiptV1 {
   session: Pick<SessionSummary, "id" | "title" | "mode" | "status" | "runtimeId" | "modelId" | "updatedAt">;
   project: Pick<ProjectSummary, "id" | "name" | "branch">;
   worktree?: WorktreeSummary;
+  worktreeHistory?: WorktreeSummary[];
   changes: WorkspaceChange[];
   approvals: ApprovalSummary[];
   terminalRuns: TerminalRunSummary[];

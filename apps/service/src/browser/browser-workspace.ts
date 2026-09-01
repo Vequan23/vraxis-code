@@ -14,6 +14,8 @@ import type {
   BrowserSessionSummary,
 } from "@vraxis/code-contracts";
 import { BrowserStateVault, type BrowserStorageState } from "./browser-state-vault.js";
+import type { BrowserAutomationObservation, BrowserAutomationRelay } from "./browser-automation.js";
+import { normalizeBrowserObservation } from "./browser-automation.js";
 
 interface BrowserPage {
   id: string;
@@ -145,8 +147,11 @@ export class BrowserWorkspace {
   private readonly operationQueues = new Map<string, Promise<void>>();
   private mutations: Promise<void> = Promise.resolve();
   private readonly persistenceTimers = new Map<string, NodeJS.Timeout>();
+  private readonly relayStates = new Map<string, BrowserSessionSummary>();
+  private readonly relayRefreshes = new Map<string, Promise<BrowserSessionSummary>>();
+  private readonly relayCapturedAt = new Map<string, number>();
 
-  constructor(dataDirectory: string, credentials?: CredentialStore) {
+  constructor(dataDirectory: string, credentials?: CredentialStore, private readonly relay?: BrowserAutomationRelay) {
     this.captureDirectory = join(dataDirectory, "browser-captures");
     this.profileDirectory = join(dataDirectory, "browser-profiles");
     this.evidenceFile = join(dataDirectory, "browser-evidence.json");
@@ -155,6 +160,8 @@ export class BrowserWorkspace {
 
   async state(sessionId: string): Promise<BrowserSessionSummary | undefined> {
     assertSessionId(sessionId);
+    const relayed = this.relayStates.get(sessionId);
+    if (relayed) return this.refreshRelay(sessionId);
     const active = this.sessions.get(sessionId)?.state;
     if (active) return structuredClone(active);
     const retained = await this.retainedState(sessionId);
@@ -174,7 +181,7 @@ export class BrowserWorkspace {
   }
 
   async allowedOrigins(sessionId: string): Promise<string[]> {
-    const state = this.sessions.get(sessionId)?.state ?? await this.retainedState(sessionId);
+    const state = this.relayStates.get(sessionId) ?? this.sessions.get(sessionId)?.state ?? await this.retainedState(sessionId);
     return [...(state?.allowedOrigins ?? [])];
   }
 
@@ -187,11 +194,149 @@ export class BrowserWorkspace {
     this.operationQueues.set(input.sessionId, queued);
     await previous.catch(() => undefined);
     try {
-      return await this.performAction(input, receipt);
+      return this.relay ? await this.performRelayAction(input, receipt) : await this.performAction(input, receipt);
     } finally {
       release();
       if (this.operationQueues.get(input.sessionId) === queued) this.operationQueues.delete(input.sessionId);
     }
+  }
+
+  async observe(sessionId: string, value: unknown): Promise<BrowserSessionSummary> {
+    if (!this.relay) throw new TypeError("The desktop browser relay is unavailable.");
+    assertSessionId(sessionId);
+    const observation = normalizeBrowserObservation(value, sessionId);
+    return this.mergeRelayObservation(observation);
+  }
+
+  private async performRelayAction(input: BrowserActionRequest, receipt: BrowserActionReceipt): Promise<BrowserSessionSummary> {
+    const relay = this.relay;
+    if (!relay) throw new Error("The desktop browser relay is unavailable.");
+    const actionId = randomUUID();
+    const hasLiveState = this.relayStates.has(input.sessionId);
+    let state = this.relayStates.get(input.sessionId) ?? await this.retainedState(input.sessionId) ?? this.emptyState(input.sessionId);
+    const target = this.relayActionTarget(state, input);
+    const beforeFrameId = input.action === "capture" ? undefined : await this.copyRelayFrame(state, actionId, "before");
+    try {
+      const relayInput = input.action === "capture" && !hasLiveState && state.url
+        ? { sessionId: input.sessionId, action: "navigate" as const, target: state.url }
+        : input;
+      const observation = await relay.perform(relayInput);
+      state = await this.mergeRelayObservation(observation);
+      if (input.action === "navigate" && input.target) {
+        const origin = safeUrl(input.target).origin;
+        if (!state.allowedOrigins.includes(origin)) state.allowedOrigins.push(origin);
+      }
+      const afterFrameId = await this.copyRelayFrame(state, actionId, "after");
+      this.recordActionState(state, actionId, input.action, target, "success", this.actionDetail(input.action, state), receipt, beforeFrameId, afterFrameId);
+      this.relayStates.set(input.sessionId, state);
+      await this.persistState(state);
+      return structuredClone(state);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Browser action failed.";
+      state.status = "error";
+      state.error = message;
+      state.updatedAt = new Date().toISOString();
+      this.recordActionState(state, actionId, input.action, target, "error", message, receipt, beforeFrameId);
+      this.relayStates.set(input.sessionId, state);
+      await this.persistState(state);
+      throw error;
+    }
+  }
+
+  private async mergeRelayObservation(observation: BrowserAutomationObservation): Promise<BrowserSessionSummary> {
+    const previous = this.relayStates.get(observation.sessionId) ?? await this.retainedState(observation.sessionId) ?? this.emptyState(observation.sessionId);
+    const state: BrowserSessionSummary = {
+      ...previous,
+      status: "ready",
+      url: observation.url,
+      title: observation.title,
+      snapshot: observation.snapshot,
+      viewport: { ...observation.viewport },
+      activeTabId: observation.activeTabId,
+      tabs: structuredClone(observation.tabs),
+      controls: structuredClone(observation.controls),
+      console: structuredClone(observation.console),
+      network: structuredClone(observation.network),
+      updatedAt: new Date().toISOString(),
+    };
+    delete state.error;
+    if (observation.screenshotBase64) {
+      await mkdir(this.captureDirectory, { recursive: true, mode: 0o700 });
+      if (process.platform !== "win32") await chmod(this.captureDirectory, 0o700);
+      const screenshot = Buffer.from(observation.screenshotBase64, "base64");
+      if (!screenshot.length || screenshot.length > 12 * 1024 * 1024) throw new TypeError("Embedded browser screenshot is outside the retained evidence limit.");
+      await writeFile(this.screenshotPath(observation.sessionId), screenshot, { mode: 0o600 });
+      if (process.platform !== "win32") await chmod(this.screenshotPath(observation.sessionId), 0o600);
+      state.screenshotVersion += 1;
+    }
+    this.relayStates.set(observation.sessionId, state);
+    this.relayCapturedAt.set(observation.sessionId, Date.now());
+    await this.persistState(state);
+    return structuredClone(state);
+  }
+
+  private async refreshRelay(sessionId: string, force = false): Promise<BrowserSessionSummary> {
+    const relay = this.relay;
+    if (!relay) throw new Error("The desktop browser relay is unavailable.");
+    const current = this.relayStates.get(sessionId);
+    if (!force && current && Date.now() - (this.relayCapturedAt.get(sessionId) ?? 0) < 350) return structuredClone(current);
+    const existing = this.relayRefreshes.get(sessionId);
+    if (existing) return structuredClone(await existing);
+    const refresh = relay.perform({ sessionId, action: "capture" }).then(observation => this.mergeRelayObservation(observation));
+    this.relayRefreshes.set(sessionId, refresh);
+    try { return structuredClone(await refresh); }
+    finally { if (this.relayRefreshes.get(sessionId) === refresh) this.relayRefreshes.delete(sessionId); }
+  }
+
+  private emptyState(sessionId: string): BrowserSessionSummary {
+    return {
+      sessionId,
+      status: "opening",
+      url: "",
+      title: "",
+      snapshot: "",
+      screenshotVersion: 0,
+      viewport: { ...viewport },
+      activeTabId: "",
+      tabs: [],
+      controls: [],
+      allowedOrigins: [],
+      console: [],
+      network: [],
+      actions: [],
+      frames: [],
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  private async copyRelayFrame(
+    state: BrowserSessionSummary,
+    actionId: string,
+    phase: BrowserActionFrameSummary["phase"],
+  ): Promise<string | undefined> {
+    if (!state.url || !state.screenshotVersion) return undefined;
+    try { await stat(this.screenshotPath(state.sessionId)); } catch { return undefined; }
+    const id = randomUUID();
+    const path = this.framePath(state.sessionId, id);
+    await copyFile(this.screenshotPath(state.sessionId), path);
+    if (process.platform !== "win32") await chmod(path, 0o600);
+    state.frames ??= [];
+    state.frames.unshift({ id, actionId, phase, url: state.url, title: state.title, timestamp: new Date().toISOString(), screenshotVersion: state.screenshotVersion });
+    state.frames.splice(maximumFrames);
+    return id;
+  }
+
+  private relayActionTarget(state: BrowserSessionSummary, input: BrowserActionRequest): string {
+    if (input.tabId) {
+      const tabUrl = state.tabs.find((tab) => tab.id === input.tabId)?.url;
+      return tabUrl ? redactedUrl(tabUrl) : "browser tab";
+    }
+    if (input.target) {
+      const ref = input.target.replace(/^@/, "");
+      const control = state.controls.find((item) => item.ref === ref);
+      return control ? `${control.label} (${control.ref})` : input.action === "navigate" ? redactedUrl(input.target) : input.target;
+    }
+    return state.url ? redactedUrl(state.url) : "active page";
   }
 
   private async performAction(input: BrowserActionRequest, receipt: BrowserActionReceipt): Promise<BrowserSessionSummary> {
@@ -263,10 +408,10 @@ export class BrowserWorkspace {
 
   controller(sessionId: string): BrowserController {
     return {
-      currentUrl: async () => this.activePage(await this.open(sessionId)).page.url(),
-      snapshot: async () => this.snapshotResult(await this.capture(await this.open(sessionId))),
+      currentUrl: async () => this.relay ? (await this.refreshRelay(sessionId)).url : this.activePage(await this.open(sessionId)).page.url(),
+      snapshot: async () => this.snapshotResult(await this.captureState(sessionId)),
       consoleMessages: async () => {
-        const state = await this.capture(await this.open(sessionId));
+        const state = await this.captureState(sessionId);
         const messages: JsonObject[] = state.console.map((item) => ({
           id: item.id,
           timestamp: item.timestamp,
@@ -276,7 +421,7 @@ export class BrowserWorkspace {
         return { url: state.url, messages };
       },
       networkRequests: async () => {
-        const state = await this.capture(await this.open(sessionId));
+        const state = await this.captureState(sessionId);
         const requests: JsonObject[] = state.network.map((item) => ({
           id: item.id,
           timestamp: item.timestamp,
@@ -291,7 +436,7 @@ export class BrowserWorkspace {
         return { url: state.url, requests };
       },
       screenshot: async () => {
-        const state = await this.capture(await this.open(sessionId));
+        const state = await this.captureState(sessionId);
         return { url: state.url, title: state.title, screenshotVersion: state.screenshotVersion, viewport: state.viewport };
       },
       wait: async (target, options) => this.waitForTarget(sessionId, target, options),
@@ -323,8 +468,7 @@ export class BrowserWorkspace {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
       if (options?.abortSignal?.aborted) throw new Error("Browser wait was cancelled.");
-      const session = await this.open(sessionId);
-      const state = await this.capture(session);
+      const state = await this.captureState(sessionId);
       const ref = target.trim().replace(/^@/, "");
       const matchedControl = /^e\d+$/.test(ref) && state.controls.some((control) => control.ref === ref && !control.disabled);
       const matchedText = !/^e\d+$/.test(ref) && state.snapshot.toLocaleLowerCase().includes(target.trim().toLocaleLowerCase());
@@ -336,9 +480,10 @@ export class BrowserWorkspace {
 
   async contextArtifact(sessionId: string): Promise<ContextArtifact | undefined> {
     const current = this.sessions.get(sessionId);
-    const state = current ? await this.capture(current) : await this.state(sessionId);
+    const liveRelay = this.relayStates.has(sessionId);
+    const state = liveRelay ? await this.refreshRelay(sessionId) : current ? await this.capture(current) : await this.state(sessionId);
     if (!state?.url) return undefined;
-    const retained = !current;
+    const retained = !current && !liveRelay;
     const controls = state.controls.length
       ? state.controls.map((control) => `${control.ref} [${control.kind}] ${control.label} (${control.action}${control.disabled ? ", disabled" : ""})`).join("\n")
       : "No visible interactive controls were found.";
@@ -363,6 +508,13 @@ export class BrowserWorkspace {
   async close(): Promise<void> {
     for (const timer of this.persistenceTimers.values()) clearTimeout(timer);
     this.persistenceTimers.clear();
+    this.relay?.close();
+    const relayed = [...this.relayStates.values()];
+    await Promise.all(relayed.map(async state => {
+      state.status = "closed";
+      state.updatedAt = new Date().toISOString();
+      await this.persistState(state);
+    }));
     const active = [...this.sessions.values()];
     await Promise.all(active.map(async (session) => {
       session.state.status = "closed";
@@ -376,6 +528,12 @@ export class BrowserWorkspace {
     for (const timer of this.persistenceTimers.values()) clearTimeout(timer);
     this.persistenceTimers.clear();
     this.sessions.clear();
+    this.relayStates.clear();
+    this.relayCapturedAt.clear();
+  }
+
+  private async captureState(sessionId: string): Promise<BrowserSessionSummary> {
+    return this.relay ? this.refreshRelay(sessionId, true) : this.capture(await this.open(sessionId));
   }
 
   private async open(sessionId: string, restoreRetainedUrl = true): Promise<SessionBrowser> {
@@ -777,20 +935,34 @@ export class BrowserWorkspace {
     beforeFrameId?: string,
     afterFrameId?: string,
   ): void {
-    session.state.actions.unshift({
+    this.recordActionState(session.state, id, action, target, status, detail, receipt, beforeFrameId, afterFrameId);
+  }
+
+  private recordActionState(
+    state: BrowserSessionSummary,
+    id: string,
+    action: BrowserActionSummary["action"],
+    target: string,
+    status: BrowserActionSummary["status"],
+    detail: string,
+    receipt: BrowserActionReceipt,
+    beforeFrameId?: string,
+    afterFrameId?: string,
+  ): void {
+    state.actions.unshift({
       id,
       action,
       target: target.slice(0, 240),
       status,
       timestamp: new Date().toISOString(),
       detail,
-      screenshotVersion: session.state.screenshotVersion,
+      screenshotVersion: state.screenshotVersion,
       ...(receipt.actor ? { actor: receipt.actor } : {}),
       ...(receipt.approvalId ? { approvalId: receipt.approvalId } : {}),
       ...(beforeFrameId ? { beforeFrameId } : {}),
       ...(afterFrameId ? { afterFrameId } : {}),
     });
-    session.state.actions.splice(maximumActions);
+    state.actions.splice(maximumActions);
   }
 
   private schedulePersistence(state: BrowserSessionSummary): void {

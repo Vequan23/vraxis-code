@@ -20,13 +20,21 @@ test("publishes safe mode-specific default agent profiles", () => {
   assert.deepEqual(Object.keys(modeAgentProfiles), ["ask", "plan", "build", "review"]);
   assert.equal(modeAgentProfile("plan").access, "read-only");
   assert.ok(modeAgentProfile("plan").skillNames.includes("Project architecture"));
-  assert.ok(!modeAgentProfile("plan").toolIds.includes("write-text"));
+  assert.ok(!modeAgentProfile("plan").toolIds.includes("create-text"));
   assert.equal(modeAgentProfile("build").access, "isolated-worktree");
   assert.ok(modeAgentProfile("ask").toolIds.includes("evidence-status"));
+  assert.ok(modeAgentProfile("ask").toolIds.includes("browser-snapshot"));
+  assert.ok(modeAgentProfile("ask").guardedToolIds.includes("browser-navigate"));
+  assert.ok(modeAgentProfile("plan").guardedToolIds.includes("browser-type"));
   assert.ok(modeAgentProfile("build").guardedToolIds.includes("terminal-run"));
+  assert.ok(modeAgentProfile("build").guardedToolIds.includes("terminal-poll"));
+  assert.ok(modeAgentProfile("build").guardedToolIds.includes("terminal-stop"));
+  assert.ok(modeAgentProfile("build").guardedToolIds.includes("create-text"));
   assert.ok(modeAgentProfile("build").guardedToolIds.includes("remove-path"));
   assert.ok(modeAgentProfile("build").guardedToolIds.includes("browser-navigate"));
-  assert.deepEqual(modeAgentProfile("review").guardedToolIds, []);
+  assert.ok(modeAgentProfile("review").toolIds.includes("browser-network"));
+  assert.ok(modeAgentProfile("review").guardedToolIds.includes("browser-click"));
+  assert.ok(!modeAgentProfile("review").guardedToolIds.includes("terminal-run"));
 });
 
 test("parses a bounded project registration", () => {

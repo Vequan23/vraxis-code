@@ -752,6 +752,118 @@ test("executes an Ask task and restores its ordered agent-v events", async (cont
   assert.equal(runtime.requests[1]?.runtimeModel, "gpt-5.6-terra");
   assert.match(runtime.requests[1]?.input.instructions ?? "", /Review the engineer's requested area/);
   assert.deepEqual(runtime.requests[1]?.input.messages?.map((message) => message.role), ["user", "assistant"]);
+
+  const newTask = await fetch(`${app.baseUrl}/api/projects/${project.id}/new-task`, { method: "POST" });
+  assert.equal(newTask.status, 200);
+  const freshTask = await (await fetch(`${app.baseUrl}/api/bootstrap`)).json() as {
+    selectedSessionId?: string;
+    sessions: unknown[];
+    events: unknown[];
+  };
+  assert.equal(freshTask.selectedSessionId, undefined);
+  assert.equal(freshTask.sessions.length, 1);
+  assert.deepEqual(freshTask.events, []);
+
+  const restored = await fetch(`${app.baseUrl}/api/sessions/${state.sessions[0]?.id}/select`, { method: "POST" });
+  assert.equal(restored.status, 200);
+  const restoredTask = await (await fetch(`${app.baseUrl}/api/bootstrap`)).json() as {
+    selectedSessionId?: string;
+    events: unknown[];
+  };
+  assert.equal(restoredTask.selectedSessionId, state.sessions[0]?.id);
+  assert.ok(restoredTask.events.length > 0);
+});
+
+test("opens an interactive user shell in the selected task workspace", async (context) => {
+  const app = await fixture();
+  context.after(() => app.close());
+  const registered = await fetch(`${app.baseUrl}/api/projects`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path: app.project }),
+  });
+  const project = await registered.json() as { id: string };
+  const created = await fetch(`${app.baseUrl}/api/sessions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ projectId: project.id, mode: "ask", runtimeId: "codex", prompt: "Open a terminal" }),
+  });
+  const session = await created.json() as { id: string };
+  await waitForIdle(app.baseUrl);
+
+  const opened = await fetch(`${app.baseUrl}/api/sessions/${session.id}/terminal-shell`, { method: "POST" });
+  assert.equal(opened.status, 201);
+  const prepared = await opened.json() as { run: { id: string; approvalId: string; purpose?: string; cwd: string } };
+  assert.equal(prepared.run.purpose, "user-shell");
+  assert.equal(prepared.run.cwd, ".");
+  assert.match(prepared.run.approvalId, /^user-terminal:/);
+
+  let run: { status: string; output: string; columns?: number; rows?: number } | undefined;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const evidence = await (await fetch(`${app.baseUrl}/api/sessions/${session.id}/live-evidence`)).json() as {
+      terminalRuns: Array<{ id: string; status: string; output: string; columns?: number; rows?: number }>;
+    };
+    run = evidence.terminalRuns.find((item) => item.id === prepared.run.id);
+    if (run?.status === "running") break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(run?.status, "running");
+
+  const streamAbort = new AbortController();
+  context.after(() => streamAbort.abort());
+  const streamed = await fetch(`${app.baseUrl}/api/terminal/${prepared.run.id}/stream`, { signal: streamAbort.signal });
+  assert.equal(streamed.status, 200);
+  assert.match(streamed.headers.get("content-type") ?? "", /text\/event-stream/);
+  const reader = streamed.body!.getReader();
+  const decoder = new TextDecoder();
+  let streamText = "";
+  const readUntil = async (pattern: RegExp): Promise<void> => {
+    while (!pattern.test(streamText)) {
+      const result = await Promise.race([
+        reader.read(),
+        new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Terminal stream timed out.")), 1_000)),
+      ]);
+      if (result.done) break;
+      streamText += decoder.decode(result.value, { stream: true });
+    }
+    assert.match(streamText, pattern);
+  };
+  await readUntil(/event: snapshot/);
+
+  const resized = await fetch(`${app.baseUrl}/api/terminal/${prepared.run.id}/resize`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ columns: 122, rows: 38 }),
+  });
+  assert.equal(resized.status, 200);
+  const input = process.platform === "win32"
+    ? "echo vraxis-terminal-ready\r\nexit\r\n"
+    : "printf 'vraxis-terminal-ready\\n'\nexit\n";
+  const written = await fetch(`${app.baseUrl}/api/terminal/${prepared.run.id}/input`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ data: input }),
+  });
+  assert.equal(written.status, 200);
+  await readUntil(/event: data[\s\S]*vraxis-terminal-ready/);
+  streamAbort.abort();
+
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    const evidence = await (await fetch(`${app.baseUrl}/api/sessions/${session.id}/live-evidence`)).json() as {
+      terminalRuns: Array<{ id: string; status: string; output: string; columns?: number; rows?: number }>;
+    };
+    run = evidence.terminalRuns.find((item) => item.id === prepared.run.id);
+    if (run?.status === "success") break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(run?.status, "success");
+  assert.match(run?.output ?? "", /vraxis-terminal-ready/);
+  assert.equal(run?.columns, 122);
+  assert.equal(run?.rows, 38);
+  const receipt = await (await fetch(`${app.baseUrl}/api/sessions/${session.id}/receipt`)).json() as {
+    terminalRuns: Array<{ purpose?: string }>;
+  };
+  assert.deepEqual(receipt.terminalRuns, []);
 });
 
 test("discovers, attaches, persists, and applies agent-v skills", async (context) => {
@@ -979,6 +1091,112 @@ test("runs Plan read-only and rejects Build when the runtime cannot write worksp
   assert.equal(state.sessions.length, 1);
 });
 
+test("retains governed tool and approval activity in the task timeline", async (context) => {
+  class ActivityRuntime extends DeterministicCodingRuntimeEngine {
+    override async run<T>(request: CodingRuntimeRequest<T>, sink?: EventSink): Promise<CodingRuntimeResult<T>> {
+      const base = { runId: request.runId ?? crypto.randomUUID(), timestamp: new Date().toISOString(), scope: request.scope };
+      await sink?.emit({ ...base, type: "tool.requested", toolCallId: "browser-call", toolName: "browser-navigate" });
+      await sink?.emit({ ...base, type: "approval.requested", approvalId: "browser-approval", toolName: "browser-navigate", reason: "Open the requested preview." });
+      await sink?.emit({ ...base, type: "approval.resolved", approvalId: "browser-approval", decision: "approved" });
+      await sink?.emit({ ...base, type: "tool.completed", toolCallId: "browser-call", toolName: "browser-navigate", durationMs: 1250 });
+      return super.run(request, sink);
+    }
+  }
+
+  const app = await fixture(undefined, new ActivityRuntime());
+  context.after(() => app.close());
+  const projectResponse = await fetch(`${app.baseUrl}/api/projects`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path: app.project }),
+  });
+  const project = await projectResponse.json() as { id: string };
+  const created = await fetch(`${app.baseUrl}/api/sessions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ projectId: project.id, mode: "ask", runtimeId: "codex", prompt: "Open the preview" }),
+  });
+  assert.equal(created.status, 201);
+  await waitForIdle(app.baseUrl);
+
+  const state = await (await fetch(`${app.baseUrl}/api/bootstrap`)).json() as {
+    events: Array<{ kind: string; title: string; detail: string; state: string }>;
+  };
+  const activityShape = (event: { kind: string; title: string; detail: string; state: string }) => ({
+    kind: event.kind,
+    title: event.title,
+    detail: event.detail,
+    state: event.state,
+  });
+  assert.deepEqual(state.events.filter((event) => event.kind === "tool").map(activityShape), [{
+    kind: "tool",
+    title: "Browser · navigate",
+    detail: "Completed in 1.3 seconds with a retained task receipt.",
+    state: "complete",
+  }]);
+  assert.deepEqual(state.events.filter((event) => event.kind === "approval").map(activityShape), [{
+    kind: "approval",
+    title: "Approval · Browser · navigate",
+    detail: "Approved. The agent can continue this exact action.",
+    state: "complete",
+  }]);
+});
+
+test("persists disclosed context compaction and attributable run usage", async (context) => {
+  class ContextRuntime extends DeterministicCodingRuntimeEngine {
+    override async run<T>(request: CodingRuntimeRequest<T>, sink?: EventSink): Promise<CodingRuntimeResult<T>> {
+      const usage = {
+        system: 120,
+        tools: 240,
+        transcript: 360,
+        artifacts: 40,
+        toolResults: 80,
+        total: 840,
+        budget: 1_000,
+        remaining: 160,
+        utilization: 0.84,
+        estimated: true as const,
+      };
+      await sink?.emit({
+        runId: request.runId ?? crypto.randomUUID(),
+        timestamp: new Date().toISOString(),
+        scope: request.scope,
+        type: "context.compacted",
+        removedMessages: 3,
+        disclosure: "Earlier messages were replaced by a continuity record.",
+        usage,
+      });
+      const result = await super.run(request, sink);
+      return { ...result, usage: { input: 900, output: 100, total: 1_000, context: usage, cost: { status: "included" } } };
+    }
+  }
+
+  const app = await fixture(undefined, new ContextRuntime());
+  context.after(() => app.close());
+  const projectResponse = await fetch(`${app.baseUrl}/api/projects`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path: app.project }),
+  });
+  const project = await projectResponse.json() as { id: string };
+  const created = await fetch(`${app.baseUrl}/api/sessions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ projectId: project.id, mode: "ask", runtimeId: "codex", prompt: "Inspect a long task" }),
+  });
+  assert.equal(created.status, 201);
+  await waitForIdle(app.baseUrl);
+
+  const state = await (await fetch(`${app.baseUrl}/api/bootstrap`)).json() as {
+    events: Array<{ kind: string; title: string; detail: string }>;
+  };
+  const telemetry = state.events.filter((event) => event.kind === "telemetry");
+  assert.deepEqual(telemetry.map((event) => event.title), ["Context compacted", "Run usage"]);
+  assert.match(telemetry[0]?.detail ?? "", /3 older messages were replaced/);
+  assert.match(telemetry[0]?.detail ?? "", /tool results 80/);
+  assert.match(telemetry[1]?.detail ?? "", /1,000 tokens · Included/);
+});
+
 test("runs Build inside an isolated worktree and returns exact change evidence", async (context) => {
   class EditingRuntime extends DeterministicCodingRuntimeEngine {
     override async run<T>(request: CodingRuntimeRequest<T>, sink?: EventSink): Promise<CodingRuntimeResult<T>> {
@@ -1042,7 +1260,7 @@ test("runs Build inside an isolated worktree and returns exact change evidence",
     body: JSON.stringify({ projectId: project.id, mode: "build", runtimeId: "codex", prompt: "Set built to true" }),
   });
   assert.equal(created.status, 201);
-  const mutation = await created.json() as { id: string; worktree: { path: string; branch: string; baseBranch: string; baseCommit: string } };
+  const mutation = await created.json() as { id: string; worktree: { id: string; path: string; branch: string; baseBranch: string; baseCommit: string } };
   assert.ok(mutation.worktree.path.startsWith(join(await realpath(app.dataDirectory), "worktrees", project.id)));
   assert.match(mutation.worktree.branch, /^vraxis\/set-built-to-true-/);
   assert.equal(mutation.worktree.baseBranch, "main");
@@ -1142,10 +1360,25 @@ test("runs Build inside an isolated worktree and returns exact change evidence",
   const appliedFollowUp = await fetch(`${app.baseUrl}/api/sessions/${mutation.id}/messages`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ mode: "build", prompt: "Make another edit" }),
+    body: JSON.stringify({ mode: "build", runtimeId: "codex", prompt: "Make another edit" }),
   });
-  assert.equal(appliedFollowUp.status, 400);
-  assert.match(await appliedFollowUp.text(), /Start a new Build task/);
+  assert.equal(appliedFollowUp.status, 201);
+  const continuedBuild = await appliedFollowUp.json() as {
+    id: string;
+    worktree: { id: string; path: string; status: string; baseCommit: string };
+    worktreeHistory: Array<{ id: string; branch: string; status: string; checkpointCommit?: string }>;
+  };
+  assert.equal(continuedBuild.id, mutation.id);
+  assert.equal(continuedBuild.worktree.status, "active");
+  assert.notEqual(continuedBuild.worktree.id, mutation.worktree.id);
+  assert.equal(continuedBuild.worktreeHistory.length, 1);
+  assert.equal(continuedBuild.worktreeHistory[0]?.status, "applied");
+  assert.equal(continuedBuild.worktreeHistory[0]?.checkpointCommit, appliedState?.sessions[0]?.worktree?.checkpointCommit);
+  const continuedState = await waitForIdle(app.baseUrl);
+  assert.equal(await readFile(join(continuedBuild.worktree.path, "src", "index.ts"), "utf8"), "export const ready = false;\nexport const built = true;\n");
+  assert.equal(continuedState.events.filter((event) => event.actor === "user").length, 2);
+  assert.ok(continuedState.events.some((event) => event.title === "Build continued"));
+  assert.equal(runtime.requests[1]?.workspacePath, continuedBuild.worktree.path);
 
   const unsupported = await fetch(`${app.baseUrl}/api/sessions`, {
     method: "POST",

@@ -37,8 +37,6 @@ import {
   type TeamPolicyState,
   type TaskProofEnvelopeV1,
   type TaskEvidenceKindV1,
-  type UnderstandArtifactEnvelopeV1,
-  type UnderstandEvidenceLinkV1,
   type UpdateSettingsRequest,
   type UserSettings,
   type WorkspaceDiff,
@@ -57,11 +55,11 @@ import ProofTrustSettings from "./settings/ProofTrustSettings.vue";
 import TeamPolicySettings from "./settings/TeamPolicySettings.vue";
 import SupportDiagnostics from "./settings/SupportDiagnostics.vue";
 import FirstRunJourney from "./onboarding/FirstRunJourney.vue";
+import TerminalWorkbench from "./terminal/TerminalWorkbench.vue";
 import type { FirstRunActionId } from "./onboarding/first-run-readiness.js";
 import { highlightCode } from "./workspace/syntax-highlight.js";
 import { normalizeMode, selectedProject, selectedSession } from "./workspace/workspace-state.js";
 import WorkspaceFileTree from "./workspace/WorkspaceFileTree.vue";
-import UnderstandArtifactPanel from "./understand/UnderstandArtifactPanel.vue";
 
 const previewVariant = new URLSearchParams(window.location.search).get("preview");
 const previewMode = Boolean(previewVariant);
@@ -70,6 +68,7 @@ const activeView = ref<"workspace" | "settings">("workspace");
 const inspector = ref<InspectorView>("files");
 const mode = ref<SessionMode>(state.settings.defaultMode);
 const composer = ref("");
+const sessionPane = ref<HTMLElement>();
 const composerAttachments = ref<OsxAgentComposerAttachment[]>([]);
 const composerContextItems = ref<OsxAgentComposerContextItem[]>([]);
 const attachmentReferences = new Map<string, PromptAttachment>();
@@ -95,6 +94,7 @@ const serviceOnline = ref(previewMode);
 const loadError = ref("");
 const taskError = ref("");
 const submitting = ref(false);
+const startingNewTask = ref(false);
 const registering = ref(false);
 const registrationError = ref("");
 const selectedFile = ref("");
@@ -121,29 +121,32 @@ const teamPolicy = ref<TeamPolicyState>({ status: "none" });
 const teamPolicyBusy = ref(false);
 const teamPolicyError = ref("");
 const teamPolicyNotice = ref("");
-const terminalCommand = ref("");
-const terminalCwd = ref(".");
-const terminalInput = ref("");
-const terminalSearch = ref("");
 const terminalError = ref("");
+const terminalStarting = ref(false);
 const browserUrl = ref("http://127.0.0.1:4318/");
 const browserText = ref("");
 const browserError = ref("");
+const browserDetailsOpen = ref(false);
 const selectedBrowserControlRef = ref("");
 const selectedBrowserActionId = ref("");
+const browserLiveSurface = ref<HTMLElement>();
 const selectedTerminalRunId = ref("");
 const focusedEvidence = ref<{ kind: TaskEvidenceKindV1; target: string }>();
 const approvalActionId = ref("");
 const verificationAction = ref("");
 const receiptExporting = ref<"html" | "json" | "">("");
 const browserReplayExporting = ref(false);
-const understandArtifact = ref<UnderstandArtifactEnvelopeV1>();
-const understandLoading = ref(false);
 const firstRunJourneyClosed = ref(false);
-watch(() => state.selectedSessionId, () => { understandArtifact.value = undefined; });
 let runPollTimer: ReturnType<typeof setTimeout> | undefined;
 let stopProtocolListener: (() => void) | undefined;
+let stopBrowserStateListener: (() => void) | undefined;
+let browserResizeObserver: ResizeObserver | undefined;
+let browserEvidenceTimer: ReturnType<typeof setTimeout> | undefined;
+let browserEvidenceInterval: ReturnType<typeof setInterval> | undefined;
+let lastBrowserLayoutSessionId = "";
 let protocolOpenQueue: Promise<void> = Promise.resolve();
+const terminalInputWrites = new Map<string, Promise<void>>();
+const desktopBrowserAvailable = Boolean(window.vraxisDesktop?.browserView);
 
 const project = computed(() => selectedProject(state));
 const session = computed(() => selectedSession(state));
@@ -216,12 +219,26 @@ const composerSuggestions = computed<OsxAgentComposerSuggestion[]>(() => [
     selectionBehavior: "attach" as const,
   })),
 ]);
+const browserComposerContext = computed<OsxAgentComposerContextItem | undefined>(() => state.browser?.url ? {
+  id: "browser:current-page",
+  label: state.browser.title || state.browser.url,
+  kind: "custom",
+  description: `Current browser page · ${state.browser.url}`,
+  icon: "eye",
+  removable: false,
+} : undefined);
+const visibleComposerContextItems = computed<OsxAgentComposerContextItem[]>(() => [
+  ...composerContextItems.value.filter((item) => item.id !== "browser:current-page"),
+  ...(browserComposerContext.value ? [browserComposerContext.value] : []),
+]);
+const buildWorktreeBlocked = computed(() => Boolean(session.value?.worktree
+  && ["applying", "conflicted", "missing", "stale"].includes(session.value.worktree.status)));
 const composerDisabled = computed(() =>
   !runtime.value
   || runtime.value.availability !== "installed"
   || !runtimeIsEnabled(runtime.value.id)
   || (mode.value === "build" && (!runtimeCanBuild.value
-    || Boolean(session.value?.worktree && session.value.worktree.status !== "active"))));
+    || buildWorktreeBlocked.value)));
 const sessionEvents = computed(() => state.events
   .filter((event) => event.sessionId === session.value?.id)
   .sort((left, right) => left.sequence - right.sequence));
@@ -243,8 +260,6 @@ const worktreeApplyPending = computed(() => latestWorktreeApproval.value?.state 
   || latestWorktreeApproval.value?.state === "approved"
   || latestWorktreeApproval.value?.state === "executing"
   || session.value?.worktree?.status === "applying");
-const worktreeApplied = computed(() => session.value?.worktree?.status === "applied");
-const activeTerminalRun = computed(() => state.terminalRuns.find((item) => item.status === "running"));
 const verificationRuns = computed(() => state.verificationRuns ?? []);
 const verificationHandoffs = computed(() => state.verificationHandoffs ?? []);
 const pendingVerificationHandoff = computed(() => verificationHandoffs.value.find((item) => item.state === "requested"));
@@ -316,14 +331,7 @@ const verificationSteps = computed<OsxPlanStep[]>(() => {
   }] : [];
   return [...serviceSteps, ...checkSteps, ...assertionSteps, ...visualSteps];
 });
-const hasMultipleTerminalRuns = computed(() => state.terminalRuns.length > 1);
-const visibleTerminalRuns = computed(() => {
-  const query = terminalSearch.value.trim().toLowerCase();
-  return query
-    ? state.terminalRuns.filter((item) => `${item.command}\n${item.cwd}\n${item.output}`.toLowerCase().includes(query))
-    : state.terminalRuns;
-});
-const buildWorktreeUnavailable = computed(() => Boolean(session.value?.worktree && session.value.worktree.status !== "active"));
+const taskTerminalRuns = computed(() => state.terminalRuns.filter((run) => run.purpose !== "user-shell"));
 const liveEvidenceActive = computed(() => pendingApprovals.value.length > 0
   || state.approvals.some((item) => item.state === "executing")
   || state.terminalRuns.some((item) => item.status === "pending" || item.status === "running")
@@ -332,6 +340,12 @@ const browserScreenshot = computed(() => state.browser?.url && state.browser?.sc
   ? `/api/browser/${state.browser.sessionId}/screenshot?v=${state.browser.screenshotVersion}`
   : "");
 const browserIsLive = computed(() => state.browser?.status === "ready");
+const desktopBrowserVisible = computed(() => desktopBrowserAvailable
+  && activeView.value === "workspace"
+  && inspector.value === "browser"
+  && Boolean(project.value)
+  && Boolean(session.value)
+  && (!state.browser || browserIsLive.value));
 const selectedBrowserControl = computed(() => state.browser?.controls.find((item) => item.ref === selectedBrowserControlRef.value));
 const selectedBrowserAction = computed(() => state.browser?.actions.find((item) => item.id === selectedBrowserActionId.value)
   ?? state.browser?.actions.find((item) => item.beforeFrameId || item.afterFrameId));
@@ -354,22 +368,16 @@ const focusedEvidenceSummary = computed(() => {
   return action ? { title: "Browser action opened from proof", detail: `${action.action} · ${action.target}`, icon: "eye" as const } : undefined;
 });
 const evidenceLedger = computed(() => {
-  const passedCommands = state.terminalRuns.filter((item) => item.status === "success").length;
-  const activeCommands = state.terminalRuns.filter((item) => item.status === "pending" || item.status === "running").length;
-  const failedCommands = state.terminalRuns.filter((item) => item.status === "error" || item.status === "interrupted").length;
-  const browserErrors = state.browser?.console.filter((item) => item.level === "error").length ?? 0;
-  const networkErrors = state.browser?.network.filter((item) => item.state === "error" || item.state === "blocked").length ?? 0;
+  const passedCommands = taskTerminalRuns.value.filter((item) => item.status === "success").length;
+  const activeCommands = taskTerminalRuns.value.filter((item) => item.status === "pending" || item.status === "running").length;
   return {
     passedCommands,
     activeCommands,
-    failedCommands,
     browserActions: state.browser?.actions.length ?? 0,
-    browserErrors,
-    networkErrors,
     pendingApprovals: pendingApprovals.value.length,
     verificationPassed: verificationRuns.value.filter((item) => item.state === "passed").length,
     verificationActive: verificationRuns.value.filter((item) => item.state === "ready" || item.state === "running" || item.state === "needs-browser").length,
-    hasEvidence: state.terminalRuns.length > 0 || Boolean(state.browser?.actions.length) || state.approvals.length > 0 || verificationRuns.value.length > 0,
+    hasEvidence: taskTerminalRuns.value.length > 0 || Boolean(state.browser?.actions.length) || state.approvals.length > 0 || verificationRuns.value.length > 0,
   };
 });
 const highlightedFile = computed(() => filePreview.value
@@ -380,7 +388,7 @@ const inspectorWidth = computed(() =>
   (inspector.value === "files" && selectedFile.value) || (inspector.value === "changes" && selectedChange.value)
     ? "680px"
     : inspector.value === "verify" ? "480px"
-    : inspector.value === "browser" ? "620px" : inspector.value === "terminal" ? "540px" : "360px");
+    : inspector.value === "browser" ? "620px" : inspector.value === "terminal" ? "clamp(540px, 44vw, 920px)" : "360px");
 const workspaceBranch = computed(() => session.value?.worktree?.status === "active"
   ? session.value.worktree.branch
   : project.value?.branch ?? "");
@@ -395,10 +403,14 @@ const firstRunBusy = computed(() => registering.value
   || Boolean(verificationAction.value)
   || Boolean(receiptExporting.value));
 const composerError = computed(() => taskError.value
-  || (mode.value === "build" && buildWorktreeUnavailable.value ? "This Build is finished or needs review. Start a new task for additional edits." : "")
+  || (mode.value === "build" && buildWorktreeBlocked.value ? "Finish or recover the current Build worktree before continuing." : "")
   || (mode.value === "build" && !runtimeCanBuild.value ? "Choose a runtime that supports guarded isolated-workspace writes for Build mode." : "")
   || (runtime.value && runtime.value.availability !== "installed" ? runtime.value.detail : ""));
-const composerStatus = computed(() => `${modeLabel.value} · ${runtime.value?.name ?? "Choose runtime"} · ${mode.value === "build" ? "Isolated worktree" : "Read only"}`);
+const composerStatus = computed(() => `${modeLabel.value} · ${runtime.value?.name ?? "Choose runtime"} · ${mode.value === "build"
+  ? session.value?.worktree && ["applied", "reverted", "archived", "cleaned"].includes(session.value.worktree.status)
+    ? "New isolated worktree on send"
+    : "Isolated worktree"
+  : "Read only"}`);
 const pendingImportedAttachments = computed(() => pendingAttachmentHandoff.value?.attachments.filter((item) => item.source === "imported") ?? []);
 const pendingHandoffDestination = computed(() => {
   const pending = pendingAttachmentHandoff.value;
@@ -406,47 +418,19 @@ const pendingHandoffDestination = computed(() => {
   const runtimeName = state.runtimes.find((item) => item.id === pending.runtimeId)?.name ?? pending.runtimeId;
   return pending.modelId ? `${runtimeName} · ${pending.modelId}` : runtimeName;
 });
-const runStatus = computed(() => {
-  if (!session.value) return undefined;
-  if (session.value.worktree?.status === "applying") return {
-    phase: "working",
-    label: "Applying changes",
-    detail: "The checkpoint is being validated against the approved project.",
-  } as const;
-  if (worktreeApplied.value) return {
-    phase: "complete",
-    label: "Changes applied",
-    detail: `The project now contains this Build. A checkpoint remains on ${session.value.worktree?.branch}.`,
-  } as const;
-  if (session.value.status === "running") return {
-    phase: "working",
-    label: "Agent is working",
-    detail: session.value.mode === "build" ? "Editing the isolated Build worktree." : "Reading the approved project with read-only access.",
-  } as const;
-  if (session.value.status === "failed") return { phase: "error", label: "Agent could not finish", detail: "Check the runtime, then resume this task." } as const;
-  if (session.value.status === "interrupted") return { phase: "error", label: "Task stopped", detail: "Resume when you are ready." } as const;
-  if (sessionEvents.value.some((event) => event.actor === "agent")) return { phase: "complete", label: "Task complete", detail: "The answer and its repository evidence are saved." } as const;
-  return undefined;
-});
 const themeOptions = [
   { value: "graphite-dark", label: "Graphite Dark", description: "Near-black surfaces with restrained neutral controls." },
   { value: "panther", label: "Panther", description: "Dark surfaces for focused work." },
   { value: "aqua", label: "Aqua", description: "Bright surfaces with blue accents." },
   { value: "graphite", label: "Graphite", description: "Neutral surfaces with quieter accents." },
 ];
-const modeOptions = [
-  { value: "ask", label: "Ask", description: "Read the project and answer questions." },
-  { value: "plan", label: "Plan", description: "Investigate and prepare an implementation plan." },
-  { value: "build", label: "Build", description: "Make changes inside an isolated worktree." },
-  { value: "review", label: "Review", description: "Inspect changes without editing them." },
-];
 const inspectorOptions = [
   { value: "files" as const, label: "Files", icon: "file-code" as const },
   { value: "changes" as const, label: "Changes", icon: "git-branch" as const },
-  { value: "verify" as const, label: "Verify", icon: "list-checks" as const },
   { value: "terminal" as const, label: "Terminal", icon: "terminal" as const },
   { value: "browser" as const, label: "Browser", icon: "eye" as const },
 ];
+const inspectorUsesTab = computed(() => inspectorOptions.some((item) => item.value === inspector.value));
 function syncTaskSelection(): void {
   if (session.value) {
     selectedRuntimeId.value = session.value.runtimeId;
@@ -460,8 +444,11 @@ function syncTaskSelection(): void {
 }
 
 function modeForSession(item: SessionSummary | undefined, fallback: SessionMode): SessionMode {
-  if (item?.mode === "build" && item.worktree && item.worktree.status !== "active") return "review";
   return item?.mode ?? fallback;
+}
+
+function visibleSessionMode(item: SessionSummary): SessionMode {
+  return item.id === state.selectedSessionId ? mode.value : item.mode;
 }
 
 async function loadState(): Promise<void> {
@@ -477,6 +464,7 @@ async function loadState(): Promise<void> {
     next.terminalRuns ??= [];
     next.verificationRuns ??= [];
     const projectChanged = state.selectedProjectId !== next.selectedProjectId;
+    if (!next.selectedSessionId) delete state.selectedSessionId;
     if (!next.browser) delete state.browser;
     Object.assign(state, next);
     if (next.browser?.url) browserUrl.value = next.browser.url;
@@ -513,13 +501,15 @@ function attachmentSizeLabel(size = 0): string {
 
 function chooseInspectorView(view: InspectorView): void {
   inspector.value = view;
+  if (view === "terminal") void ensureUserTerminal();
 }
 
-function terminalStatus(run: TerminalRunSummary): "idle" | "running" | "success" | "error" {
-  if (run.status === "pending") return "idle";
-  if (run.status === "running") return "running";
-  if (run.status === "success") return "success";
-  return "error";
+function handleWorkspaceShortcut(event: KeyboardEvent): void {
+  if (event.code !== "Backquote" || !event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+  if (activeView.value !== "workspace" || !project.value) return;
+  event.preventDefault();
+  chooseInspectorView("terminal");
+  void nextTick(() => document.querySelector<HTMLElement>(".terminal-emulator .xterm-helper-textarea")?.focus());
 }
 
 function verificationLabel(run: VerificationRunSummary): string {
@@ -546,27 +536,10 @@ function approvalDescription(approval: ApprovalSummary): string {
   return `${detail} ${requirement}`;
 }
 
-function updateTerminalCommand(event: Event): void {
-  terminalCommand.value = String(eventValue(event) ?? "");
-  terminalError.value = "";
-}
-
-function updateTerminalCwd(event: Event): void {
-  terminalCwd.value = String(eventValue(event) ?? ".");
-  terminalError.value = "";
-}
-
-function updateTerminalInput(event: Event): void {
-  terminalInput.value = String(eventValue(event) ?? "");
-  terminalError.value = "";
-}
-
-function updateTerminalSearch(event: Event): void {
-  terminalSearch.value = String(eventValue(event) ?? "");
-}
-
 function updateBrowserUrl(event: Event): void {
-  browserUrl.value = String(eventValue(event) ?? "");
+  browserUrl.value = event.target instanceof HTMLInputElement
+    ? event.target.value
+    : String(eventValue(event) ?? "");
   browserError.value = "";
 }
 
@@ -613,13 +586,40 @@ function moveInspectorFocus(event: KeyboardEvent, index: number): void {
   const next = inspectorOptions[nextIndex];
   if (!next) return;
   inspector.value = next.value;
-  const tabs = (event.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLButtonElement>("[role=\"tab\"]");
+  const tabs = (event.currentTarget as HTMLElement)
+    .closest<HTMLElement>("[role=\"tablist\"]")
+    ?.querySelectorAll<HTMLButtonElement>("[role=\"tab\"]");
   tabs?.[nextIndex]?.focus();
 }
 
+function taskPaneIsNearBottom(): boolean {
+  const pane = sessionPane.value;
+  if (!pane) return true;
+  return pane.scrollHeight - pane.scrollTop - pane.clientHeight <= 80;
+}
+
+async function scrollTaskToBottom(): Promise<void> {
+  await nextTick();
+  const pane = sessionPane.value;
+  if (!pane) return;
+  pane.scrollTop = pane.scrollHeight;
+}
+
+watch(
+  () => pendingApprovals.value.map((approval) => approval.id).sort().join(","),
+  (currentIds, previousIds) => {
+    if (!currentIds) return;
+    const previous = new Set(previousIds.split(",").filter(Boolean));
+    if (currentIds.split(",").some((id) => !previous.has(id))) void scrollTaskToBottom();
+  },
+  { flush: "post" },
+);
+
 function chooseMode(event: Event): void {
-  mode.value = normalizeMode(eventValue(event));
+  const nextMode = normalizeMode(eventValue(event));
+  mode.value = nextMode;
   taskError.value = "";
+  if (nextMode === "review") void scrollTaskToBottom();
 }
 
 function chooseTaskRuntime(event: Event): void {
@@ -650,7 +650,8 @@ function syncComposerAttachments(event: Event): void {
 }
 
 function syncComposerContext(event: Event): void {
-  composerContextItems.value = (eventValue(event) as OsxAgentComposerContextItem[] | undefined) ?? [];
+  composerContextItems.value = ((eventValue(event) as OsxAgentComposerContextItem[] | undefined) ?? [])
+    .filter((item) => item.id !== "browser:current-page");
 }
 
 async function acceptNativeAttachments(event: Event): Promise<void> {
@@ -744,12 +745,45 @@ async function chooseProject(event: Event): Promise<void> {
 
 async function chooseSession(item: SessionSummary): Promise<void> {
   activeView.value = "workspace";
-  if (item.id === state.selectedSessionId) return;
+  if (item.id === state.selectedSessionId) {
+    if (item.mode === "review" || mode.value === "review" || pendingApprovals.value.length) await scrollTaskToBottom();
+    return;
+  }
   focusedEvidence.value = undefined;
   await post(`/api/sessions/${item.id}/select`, {});
   state.selectedSessionId = item.id;
   mode.value = item.mode;
   await loadState();
+  if (item.mode === "review" || pendingApprovals.value.length) await scrollTaskToBottom();
+}
+
+async function startNewTask(): Promise<void> {
+  if (!project.value || previewMode || startingNewTask.value) return;
+  const projectId = project.value.id;
+  const retainedMode = mode.value;
+  const retainedRuntimeId = selectedRuntimeId.value;
+  const retainedModelId = selectedModelId.value;
+  startingNewTask.value = true;
+  taskError.value = "";
+  try {
+    await post(`/api/projects/${projectId}/new-task`, {});
+    focusedEvidence.value = undefined;
+    selectedTerminalRunId.value = "";
+    selectedBrowserActionId.value = "";
+    activeView.value = "workspace";
+    await loadState();
+    mode.value = retainedMode;
+    if (state.runtimes.some((item) => item.id === retainedRuntimeId)) {
+      selectedRuntimeId.value = retainedRuntimeId;
+      selectedModelId.value = retainedModelId;
+    }
+    await nextTick();
+    document.querySelector<HTMLElement>("osx-agent-composer")?.focus();
+  } catch (error) {
+    taskError.value = error instanceof Error ? error.message : "A new task could not be started.";
+  } finally {
+    startingNewTask.value = false;
+  }
 }
 
 function chooseFilePath(path: string): void {
@@ -931,6 +965,7 @@ async function sendPreparedPrompt(prepared: PreparedPrompt): Promise<void> {
       }) as SessionMutationResponse;
     }
     applySessionMutation(update);
+    await scrollTaskToBottom();
     composer.value = "";
     composerAttachments.value = [];
     composerContextItems.value = [];
@@ -990,6 +1025,9 @@ async function refreshWorkspaceEvidence(sessionId = session.value?.id): Promise<
 }
 
 function applyLiveEvidence(update: SessionLiveEvidenceResponse): void {
+  const knownApprovalIds = new Set(state.approvals.map((item) => item.id));
+  const knownTerminalRunIds = new Set(state.terminalRuns.map((item) => item.id));
+  const knownBrowserActionIds = new Set(state.browser?.actions.map((item) => item.id) ?? []);
   state.approvals = update.approvals;
   state.approvalRules = update.approvalRules ?? [];
   state.terminalRuns = update.terminalRuns;
@@ -999,6 +1037,13 @@ function applyLiveEvidence(update: SessionLiveEvidenceResponse): void {
     state.browser = update.browser;
     if (update.browser.url) browserUrl.value = update.browser.url;
   } else delete state.browser;
+
+  const newApproval = update.approvals.find((item) => item.source === "agent" && item.state === "pending" && !knownApprovalIds.has(item.id));
+  const newTerminalRun = update.terminalRuns.find((item) => !knownTerminalRunIds.has(item.id)
+    && update.approvals.some((approval) => approval.id === item.approvalId && approval.source === "agent"));
+  const newBrowserAction = update.browser?.actions.find((item) => item.actor === "agent" && !knownBrowserActionIds.has(item.id));
+  if (newBrowserAction || newApproval?.capability === "browser") inspector.value = "browser";
+  else if (newTerminalRun || newApproval?.capability === "command") inspector.value = "terminal";
 }
 
 async function refreshLiveEvidence(sessionId = session.value?.id): Promise<void> {
@@ -1009,21 +1054,19 @@ async function refreshLiveEvidence(sessionId = session.value?.id): Promise<void>
   if (session.value?.id === sessionId) applyLiveEvidence(result);
 }
 
-async function requestTerminalCommand(): Promise<void> {
-  if (!session.value || !terminalCommand.value.trim()) return;
+async function ensureUserTerminal(force = false): Promise<void> {
+  if (!session.value || terminalStarting.value || previewMode) return;
+  if (!force && state.terminalRuns.some((run) => run.purpose === "user-shell" && (run.status === "pending" || run.status === "running"))) return;
+  terminalStarting.value = true;
   terminalError.value = "";
   try {
-    const result = await post("/api/commands", {
-      sessionId: session.value.id,
-      command: terminalCommand.value.trim(),
-      cwd: terminalCwd.value.trim() || ".",
-    }) as { approval: ApprovalSummary; run: TerminalRunSummary };
-    state.approvals.unshift(result.approval);
+    const result = await post(`/api/sessions/${session.value.id}/terminal-shell`, {}) as { run: TerminalRunSummary };
     state.terminalRuns.unshift(result.run);
-    terminalCommand.value = "";
-    scheduleRunPoll();
+    scheduleRunPoll(true);
   } catch (error) {
-    terminalError.value = error instanceof Error ? error.message : "The command request could not be created.";
+    terminalError.value = error instanceof Error ? error.message : "The terminal could not be opened.";
+  } finally {
+    terminalStarting.value = false;
   }
 }
 
@@ -1425,11 +1468,6 @@ async function requestBrowserAction(
   }
 }
 
-function rerunTerminal(run: TerminalRunSummary): void {
-  terminalCommand.value = run.command;
-  void requestTerminalCommand();
-}
-
 async function interruptTerminal(run: TerminalRunSummary): Promise<void> {
   try {
     await post(`/api/terminal/${run.id}/interrupt`, {});
@@ -1439,14 +1477,29 @@ async function interruptTerminal(run: TerminalRunSummary): Promise<void> {
   }
 }
 
-async function sendTerminalInput(): Promise<void> {
-  if (!activeTerminalRun.value || !terminalInput.value) return;
-  try {
-    await post(`/api/terminal/${activeTerminalRun.value.id}/input`, { data: `${terminalInput.value}\r` });
-    terminalInput.value = "";
+function sendTerminalData(run: TerminalRunSummary, data: string): void {
+  if (run.status !== "running" || !data) return;
+  const previous = terminalInputWrites.get(run.id) ?? Promise.resolve();
+  const write = previous.then(async () => {
+    await post(`/api/terminal/${run.id}/input`, { data });
     scheduleRunPoll(true);
-  } catch (error) {
+  }).catch((error: unknown) => {
     terminalError.value = error instanceof Error ? error.message : "Terminal input could not be sent.";
+  });
+  terminalInputWrites.set(run.id, write);
+  void write.finally(() => {
+    if (terminalInputWrites.get(run.id) === write) terminalInputWrites.delete(run.id);
+  });
+}
+
+async function resizeTerminal(run: TerminalRunSummary, columns: number, rows: number): Promise<void> {
+  if (run.status !== "running") return;
+  try {
+    const result = await post(`/api/terminal/${run.id}/resize`, { columns, rows }) as { run: TerminalRunSummary };
+    const index = state.terminalRuns.findIndex((item) => item.id === result.run.id);
+    if (index >= 0) state.terminalRuns[index] = result.run;
+  } catch {
+    // A resize may race with process exit. The next evidence refresh owns the final state.
   }
 }
 
@@ -1499,44 +1552,6 @@ async function exportBrowserReplay(): Promise<void> {
   }
 }
 
-async function loadUnderstandArtifact(download = false): Promise<void> {
-  if (!session.value || understandLoading.value) return;
-  understandLoading.value = true;
-  taskError.value = "";
-  try {
-    const response = await fetch(`/api/sessions/${session.value.id}/understand.json`);
-    const result = await response.json() as UnderstandArtifactEnvelopeV1 & { error?: string };
-    if (!response.ok) throw new Error(result.error ?? "Task understanding could not be generated.");
-    understandArtifact.value = result;
-    if (download) {
-      const blob = new Blob([`${JSON.stringify(result, null, 2)}\n`], { type: "application/vnd.vraxis.understand+json" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `${project.value?.name ?? "vraxis"}-${session.value.id.slice(0, 8)}-understand.json`;
-      link.click();
-      URL.revokeObjectURL(url);
-    }
-  } catch (error) {
-    taskError.value = error instanceof Error ? error.message : "Task understanding could not be generated.";
-  } finally {
-    understandLoading.value = false;
-  }
-}
-
-async function exploreUnderstanding(link: UnderstandEvidenceLinkV1): Promise<void> {
-  if (["change", "terminal", "approval", "browser"].includes(link.kind)) {
-    await focusLinkedEvidence({ kind: link.kind as TaskEvidenceKindV1, target: link.target });
-    return;
-  }
-  if (link.kind === "verification") {
-    if (!verificationRuns.value.some((run) => run.id === link.target)) throw new TypeError("The linked verification is no longer available in this task.");
-    inspector.value = "verify";
-    return;
-  }
-  inspector.value = "changes";
-}
-
 async function interruptRun(): Promise<void> {
   if (!session.value || !sessionIsRunning.value) return;
   taskError.value = "";
@@ -1581,13 +1596,14 @@ async function pollRun(): Promise<void> {
     const response = await fetch(`/api/sessions/${sessionId}/events?after=${lastSequence}`);
     if (!response.ok) throw new Error("Run updates are unavailable.");
     const update = await response.json() as SessionEventsResponse;
+    const followNewestActivity = taskPaneIsNearBottom();
     const sessionIndex = state.sessions.findIndex((item) => item.id === sessionId);
     const wasRunning = sessionIndex >= 0 && state.sessions[sessionIndex]?.status === "running";
-    const previousWorktreeStatus = sessionIndex >= 0 ? state.sessions[sessionIndex]?.worktree?.status : undefined;
     if (sessionIndex >= 0) state.sessions[sessionIndex] = update.session;
-    if (previousWorktreeStatus !== "applied" && update.session.worktree?.status === "applied") mode.value = "review";
     const known = new Set(state.events.map((event) => event.id));
-    state.events.push(...update.events.filter((event) => !known.has(event.id)));
+    const newEvents = update.events.filter((event) => !known.has(event.id));
+    state.events.push(...newEvents);
+    if (followNewestActivity && newEvents.length) await scrollTaskToBottom();
     await refreshLiveEvidence(sessionId);
     serviceOnline.value = true;
     if (wasRunning && update.session.status !== "running" && update.session.worktree) {
@@ -1651,7 +1667,7 @@ function openSettings(): void {
 async function openHarnessSetup(): Promise<void> {
   openSettings();
   await nextTick();
-  document.getElementById("harness-settings-heading")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  document.getElementById("harness-settings-heading")?.scrollIntoView({ block: "start" });
 }
 
 async function handleFirstRunAction(action: FirstRunActionId): Promise<void> {
@@ -1680,7 +1696,6 @@ async function handleFirstRunAction(action: FirstRunActionId): Promise<void> {
   }
   if (action === "review-verification") {
     inspector.value = "verify";
-    if (!sessionIsRunning.value && verificationHasRecipe.value && session.value) await startVerification();
     return;
   }
   await exportTaskReceipt("json");
@@ -1734,10 +1749,6 @@ function chooseTheme(event: Event): void {
   if (appThemes.includes(theme as AppTheme)) void updateSettings({ theme: theme as AppTheme });
 }
 
-function chooseDefaultMode(event: Event): void {
-  void updateSettings({ defaultMode: normalizeMode(eventValue(event)) });
-}
-
 async function refreshRuntimes(): Promise<void> {
   if (runtimeRefreshing.value) return;
   runtimeRefreshing.value = true;
@@ -1789,7 +1800,7 @@ async function maintainRuntime(runtime: RuntimeSummary, action: RuntimeMaintenan
       const url = new URL(action.url ?? "");
       if (url.protocol !== "https:" || !runtimeDocumentationHosts.has(url.hostname)) throw new TypeError("Unsupported harness documentation URL.");
       window.open(url.href, "_blank", "noopener,noreferrer");
-      runtimeActionNotice.value = `Opened the official ${runtime.name} setup guide. Check again after installation.`;
+      runtimeActionNotice.value = `Opened the official ${runtime.name} setup guide. Return here and check again after installation.`;
     } catch (error) {
       settingsError.value = error instanceof Error ? error.message : "The setup guide could not be opened.";
     }
@@ -1800,35 +1811,30 @@ async function maintainRuntime(runtime: RuntimeSummary, action: RuntimeMaintenan
     return;
   }
   const command = [action.executable, ...(action.arguments ?? [])].map(terminalArgument).join(" ");
-  if (project.value) {
+  if (!project.value) {
     try {
-      const result = await post(`/api/runtimes/${encodeURIComponent(runtime.id)}/maintenance`, {
-        projectId: project.value.id,
-        actionId: action.id,
-      }) as SessionMutationResponse & { approval: ApprovalSummary; run: TerminalRunSummary };
-      const { approval, run, ...update } = result;
-      applySessionMutation(update);
-      state.approvals = [approval];
-      state.terminalRuns = [run];
-      inspector.value = "terminal";
-      activeView.value = "workspace";
-      scheduleRunPoll(true);
-      return;
-    } catch (error) {
-      settingsError.value = error instanceof Error ? error.message : "Runtime maintenance could not be prepared.";
-      return;
+      await navigator.clipboard.writeText(command);
+      runtimeActionNotice.value = `${action.label} was copied. Open a project, then run it from the governed terminal.`;
+    } catch {
+      settingsError.value = "Choose a project before running this harness action.";
     }
+    return;
   }
-  let copied = false;
   try {
-    await navigator.clipboard.writeText(command);
-    copied = true;
-  } catch {
-    // A visible, governed terminal handoff remains available when clipboard access is denied.
+    const result = await post(`/api/runtimes/${encodeURIComponent(runtime.id)}/maintenance`, {
+      projectId: project.value.id,
+      actionId: action.id,
+    }) as SessionMutationResponse & { approval: ApprovalSummary; run: TerminalRunSummary };
+    applySessionMutation(result);
+    state.approvals.unshift(result.approval);
+    state.terminalRuns.unshift(result.run);
+    activeView.value = "workspace";
+    inspector.value = "terminal";
+    scheduleRunPoll(true);
+    runtimeActionNotice.value = `${action.label} is ready for approval in the terminal.`;
+  } catch (error) {
+    settingsError.value = error instanceof Error ? error.message : "Runtime maintenance could not be prepared.";
   }
-  runtimeActionNotice.value = copied
-    ? `${action.label} command copied. Run it in a terminal, then check again.`
-    : `${action.label}: ${command}. Run it in a terminal, then check again.`;
 }
 
 async function providerConnected(providerId: string): Promise<void> {
@@ -1909,6 +1915,49 @@ function clearEvidenceFocus(): void {
   selectedTerminalRunId.value = "";
 }
 
+async function syncDesktopBrowserLayout(): Promise<void> {
+  const bridge = window.vraxisDesktop?.browserView;
+  if (!bridge) return;
+  await nextTick();
+  const sessionId = session.value?.id ?? lastBrowserLayoutSessionId;
+  if (!sessionId) return;
+  const surface = browserLiveSurface.value;
+  const visible = desktopBrowserVisible.value && Boolean(surface);
+  if (!visible) {
+    await bridge.setLayout({ sessionId, visible: false, bounds: { x: 0, y: 0, width: 1, height: 1 } }).catch(() => undefined);
+    return;
+  }
+  const bounds = surface!.getBoundingClientRect();
+  if (bounds.width < 1 || bounds.height < 1) return;
+  lastBrowserLayoutSessionId = sessionId;
+  await bridge.setLayout({
+    sessionId,
+    visible: true,
+    bounds: {
+      x: Math.max(0, Math.round(bounds.x)),
+      y: Math.max(0, Math.round(bounds.y)),
+      width: Math.max(1, Math.round(bounds.width)),
+      height: Math.max(1, Math.round(bounds.height)),
+    },
+  }).catch(() => undefined);
+}
+
+function scheduleBrowserEvidenceRefresh(sessionId: string, delay = 140): void {
+  if (browserEvidenceTimer) clearTimeout(browserEvidenceTimer);
+  browserEvidenceTimer = setTimeout(() => {
+    browserEvidenceTimer = undefined;
+    if (session.value?.id === sessionId) void refreshLiveEvidence(sessionId).catch(() => undefined);
+  }, delay);
+}
+
+function observeDesktopBrowserSurface(): void {
+  browserResizeObserver?.disconnect();
+  browserResizeObserver = undefined;
+  if (!desktopBrowserAvailable || !browserLiveSurface.value) return;
+  browserResizeObserver = new ResizeObserver(() => void syncDesktopBrowserLayout());
+  browserResizeObserver.observe(browserLiveSurface.value);
+}
+
 async function loadInitialState(): Promise<void> {
   const requestedUrl = new URL(window.location.href);
   const requestedTask = requestedUrl.searchParams.get("task")?.trim();
@@ -1925,6 +1974,7 @@ async function loadInitialState(): Promise<void> {
     }
   }
   await loadState();
+  if ((mode.value === "review" || pendingApprovals.value.length) && !evidenceFocus) await scrollTaskToBottom();
   if (evidenceFocus) {
     try {
       await focusLinkedEvidence(evidenceFocus);
@@ -1955,11 +2005,43 @@ onMounted(() => {
   stopProtocolListener = window.vraxisDesktop?.onOpenUrl?.((url) => {
     protocolOpenQueue = protocolOpenQueue.then(() => openProtocolLink(url));
   });
+  stopBrowserStateListener = window.vraxisDesktop?.browserView?.onState((browserState) => {
+    if (browserState.sessionId !== session.value?.id) return;
+    if (browserState.url) browserUrl.value = browserState.url;
+    if (!browserState.loading) scheduleBrowserEvidenceRefresh(browserState.sessionId);
+  });
+  window.addEventListener("resize", syncDesktopBrowserLayout);
+  window.addEventListener("scroll", syncDesktopBrowserLayout, true);
+  window.addEventListener("keydown", handleWorkspaceShortcut);
+  if (desktopBrowserAvailable) {
+    browserEvidenceInterval = setInterval(() => {
+      if (desktopBrowserVisible.value && session.value?.id && state.browser?.url) {
+        void refreshLiveEvidence(session.value.id).catch(() => undefined);
+      }
+    }, 1_500);
+  }
   void loadInitialState();
 });
 onBeforeUnmount(() => {
   clearRunPoll();
   stopProtocolListener?.();
+  stopBrowserStateListener?.();
+  browserResizeObserver?.disconnect();
+  if (browserEvidenceTimer) clearTimeout(browserEvidenceTimer);
+  if (browserEvidenceInterval) clearInterval(browserEvidenceInterval);
+  window.removeEventListener("resize", syncDesktopBrowserLayout);
+  window.removeEventListener("scroll", syncDesktopBrowserLayout, true);
+  window.removeEventListener("keydown", handleWorkspaceShortcut);
+  void window.vraxisDesktop?.browserView?.setLayout({
+    sessionId: session.value?.id ?? lastBrowserLayoutSessionId,
+    visible: false,
+    bounds: { x: 0, y: 0, width: 1, height: 1 },
+  }).catch(() => undefined);
+});
+
+watch([browserLiveSurface, desktopBrowserVisible, () => session.value?.id, browserDetailsOpen], async () => {
+  observeDesktopBrowserSurface();
+  await syncDesktopBrowserLayout();
 });
 </script>
 
@@ -1974,7 +2056,7 @@ onBeforeUnmount(() => {
       :sidebar-min-width="220"
       :sidebar-max-width="340"
       :inspector-min-width="320"
-      :inspector-max-width="760"
+      :inspector-max-width="inspector === 'terminal' || inspector === 'browser' ? 1200 : 760"
     >
       <div v-if="activeView === 'workspace' && project" slot="toolbar" class="workspace-identity" aria-label="Current project">
         <osx-icon name="folder" :size="15" />
@@ -2010,6 +2092,10 @@ onBeforeUnmount(() => {
           <div class="sidebar-heading">
             <span id="tasks-heading">Tasks</span>
           </div>
+          <button class="new-task-button" type="button" :disabled="startingNewTask" @click="startNewTask">
+            <osx-icon :name="startingNewTask ? 'loader' : 'plus'" :size="14" />
+            <span>{{ startingNewTask ? "Starting…" : "New task" }}</span>
+          </button>
           <button
             v-for="item in projectSessions"
             :key="item.id"
@@ -2018,7 +2104,7 @@ onBeforeUnmount(() => {
             @click="chooseSession(item)"
           >
             <span>{{ item.title }}</span>
-            <small>{{ item.mode }}</small>
+            <small>{{ visibleSessionMode(item) }}</small>
           </button>
           <p v-if="projectSessions.length === 0" class="sidebar-empty-copy">Your tasks will appear here.</p>
         </section>
@@ -2036,7 +2122,7 @@ onBeforeUnmount(() => {
         </div>
       </nav>
 
-      <section class="session-pane" :aria-label="activeView === 'settings' ? 'Settings' : 'Agent task'">
+      <section ref="sessionPane" class="session-pane" :aria-label="activeView === 'settings' ? 'Settings' : 'Agent task'">
         <div v-if="activeView === 'settings'" class="settings-pane">
           <header class="settings-header">
             <div>
@@ -2081,27 +2167,6 @@ onBeforeUnmount(() => {
                 :disabled="settingsSaving"
                 @change="chooseTheme"
               />
-            </section>
-
-            <section class="settings-section" aria-labelledby="task-settings">
-              <header>
-                <span class="section-icon"><osx-icon name="bot" :size="19" /></span>
-                <div>
-                  <h2 id="task-settings">New tasks</h2>
-                  <p>Choose the mode used when a new task opens.</p>
-                </div>
-              </header>
-              <div class="settings-fields">
-                <osx-radio-group
-                  label="Default mode"
-                  name="default-task-mode"
-                  variant="cards"
-                  :options="modeOptions"
-                  :value="state.settings.defaultMode"
-                  :disabled="settingsSaving"
-                  @change="chooseDefaultMode"
-                />
-              </div>
             </section>
 
             <AgentDefaults />
@@ -2267,49 +2332,7 @@ onBeforeUnmount(() => {
             <osx-icon-button label="Close evidence focus" icon="close" size="small" @click="clearEvidenceFocus" />
           </section>
 
-          <UnderstandArtifactPanel
-            v-if="understandArtifact"
-            :artifact="understandArtifact"
-            @close="understandArtifact = undefined"
-            @download="loadUnderstandArtifact(true)"
-            @explore="exploreUnderstanding"
-          />
-
-          <section v-if="pendingApprovals.length" class="approval-queue" aria-label="Approval requests" aria-live="polite">
-            <header>
-              <div>
-                <strong>{{ pendingApprovals.length === 1 ? "Action needs your approval" : `${pendingApprovals.length} actions need your approval` }}</strong>
-                <span>Review the exact authority and scope before the agent continues.</span>
-              </div>
-              <osx-badge size="small" :label="String(pendingApprovals.length)" tone="warning" />
-            </header>
-            <div v-for="approval in pendingApprovals" :key="approval.id" class="approval-request">
-              <osx-agent-approval
-                :title="approval.title"
-                :description="approvalDescription(approval)"
-                :risk="approval.risk"
-                :scope="approval.scope"
-                approve-label="Allow once"
-                reject-label="Deny"
-                :disabled="approvalActionId === approval.id"
-                @approve="decideApproval(approval, 'approve')"
-                @reject="decideApproval(approval, 'deny')"
-              />
-              <div v-if="approval.rememberable !== false" class="approval-duration-actions" aria-label="Remember this approval">
-                <span>Trust this exact scope:</span>
-                <osx-button size="small" variant="secondary" :disabled="Boolean(approvalActionId)" @click="decideApproval(approval, 'approve', 'session')">For this task</osx-button>
-                <osx-button size="small" variant="secondary" :disabled="Boolean(approvalActionId)" @click="decideApproval(approval, 'approve', 'project')">For this project</osx-button>
-              </div>
-            </div>
-          </section>
-
           <div v-if="sessionEvents.length" class="conversation" aria-live="polite">
-            <osx-agent-run-status
-              v-if="runStatus"
-              :phase="runStatus.phase"
-              :label="runStatus.label"
-              :detail="runStatus.detail"
-            />
             <template v-for="item in sessionEvents" :key="item.id">
               <osx-agent-message
                 v-if="item.kind === 'message'"
@@ -2339,8 +2362,8 @@ onBeforeUnmount(() => {
                 :status="progressStatus(item)"
                 :open="progressStatus(item) === 'streaming'"
               />
-              <div v-else-if="item.kind === 'lifecycle' || item.kind === 'verification'" :class="['session-note', item.state]">
-                <osx-icon :name="eventIcon(item)" :size="15" />
+              <div v-else-if="item.kind === 'lifecycle' || item.kind === 'verification' || item.kind === 'telemetry' || item.kind === 'tool' || item.kind === 'approval'" :class="['session-note', item.kind, item.state]">
+                <osx-icon :name="item.kind === 'tool' ? 'sparkle' : item.kind === 'approval' ? 'lock' : eventIcon(item)" :size="15" />
                 <div><strong>{{ item.title }}</strong><span>{{ item.detail }}</span></div>
               </div>
             </template>
@@ -2362,6 +2385,34 @@ onBeforeUnmount(() => {
               <button type="button" @click="useSuggestion('Find the cause of a failing test', 'ask')">Investigate a failure</button>
             </div>
           </div>
+
+          <section v-if="pendingApprovals.length" class="approval-queue" aria-label="Approval requests" aria-live="polite" aria-atomic="true">
+            <header>
+              <div>
+                <strong>{{ pendingApprovals.length === 1 ? "Action needs your approval" : `${pendingApprovals.length} actions need your approval` }}</strong>
+                <span>Review the exact authority and scope before the agent continues.</span>
+              </div>
+              <osx-badge size="small" :label="String(pendingApprovals.length)" tone="warning" />
+            </header>
+            <div v-for="approval in pendingApprovals" :key="approval.id" class="approval-request">
+              <osx-agent-approval
+                :title="approval.title"
+                :description="approvalDescription(approval)"
+                :risk="approval.risk"
+                :scope="approval.scope"
+                approve-label="Allow once"
+                reject-label="Deny"
+                :disabled="approvalActionId === approval.id"
+                @approve="decideApproval(approval, 'approve')"
+                @reject="decideApproval(approval, 'deny')"
+              />
+              <div v-if="approval.rememberable !== false" class="approval-duration-actions" aria-label="Remember this approval">
+                <span>Trust this exact scope:</span>
+                <osx-button size="small" variant="secondary" :disabled="Boolean(approvalActionId)" @click="decideApproval(approval, 'approve', 'session')">For this task</osx-button>
+                <osx-button size="small" variant="secondary" :disabled="Boolean(approvalActionId)" @click="decideApproval(approval, 'approve', 'project')">For this project</osx-button>
+              </div>
+            </div>
+          </section>
         </template>
       </section>
 
@@ -2375,7 +2426,7 @@ onBeforeUnmount(() => {
           :models="composerModelOptions"
           :access-mode="mode === 'build' ? 'Isolated worktree' : 'Read only'"
           :suggestions="composerSuggestions"
-          :context-items="composerContextItems"
+          :context-items="visibleComposerContextItems"
           :attachments="composerAttachments"
           :state="composerState"
           :status-text="composerStatus"
@@ -2426,23 +2477,24 @@ onBeforeUnmount(() => {
             type="button"
             role="tab"
             :class="['evidence-tab', { selected: inspector === item.value }]"
+            :aria-label="item.label"
             :aria-selected="inspector === item.value"
+            :data-tooltip="item.value === 'terminal' ? 'Terminal · Ctrl+`' : item.label"
             aria-controls="evidence-panel"
             :tabindex="inspector === item.value ? 0 : -1"
-            :title="item.label"
             @click="chooseInspectorView(item.value)"
             @keydown="moveInspectorFocus($event, index)"
           >
-            <osx-icon :name="item.icon" :size="14" />
-            <span>{{ item.label }}</span>
+            <osx-icon :name="item.icon" :size="17" />
           </button>
         </div>
 
         <section
           id="evidence-panel"
           :class="['evidence-panel', { 'has-ledger': evidenceLedger.hasEvidence }]"
-          role="tabpanel"
-          :aria-labelledby="`evidence-tab-${inspector}`"
+          :role="inspectorUsesTab ? 'tabpanel' : 'region'"
+          :aria-labelledby="inspectorUsesTab ? `evidence-tab-${inspector}` : undefined"
+          :aria-label="inspectorUsesTab ? undefined : 'Project verification'"
         >
           <section v-if="evidenceLedger.hasEvidence" class="evidence-ledger" aria-label="Task evidence ledger">
             <span class="evidence-ledger-title"><osx-icon name="list-checks" :size="14" /><strong>Evidence</strong></span>
@@ -2452,20 +2504,6 @@ onBeforeUnmount(() => {
             <span v-if="evidenceLedger.verificationActive" class="warning"><osx-icon name="list-checks" :size="13" />{{ evidenceLedger.verificationActive }} verifying</span>
             <span v-if="evidenceLedger.browserActions"><osx-icon name="eye" :size="13" />{{ evidenceLedger.browserActions }} browser {{ evidenceLedger.browserActions === 1 ? 'action' : 'actions' }}</span>
             <span v-if="evidenceLedger.pendingApprovals" class="warning"><osx-icon name="lock" :size="13" />{{ evidenceLedger.pendingApprovals }} waiting</span>
-            <span v-if="evidenceLedger.failedCommands || evidenceLedger.browserErrors || evidenceLedger.networkErrors" class="error">
-              <osx-icon name="warning" :size="13" />{{ evidenceLedger.failedCommands + evidenceLedger.browserErrors + evidenceLedger.networkErrors }} needs review
-            </span>
-            <span class="receipt-export-actions" aria-label="Export task evidence">
-              <osx-button size="small" icon="sparkle" :loading="understandLoading" :disabled="understandLoading" @click="loadUnderstandArtifact(false)">
-                Understand
-              </osx-button>
-              <osx-button size="small" icon="download" :loading="receiptExporting === 'html'" :disabled="Boolean(receiptExporting)" @click="exportTaskReceipt('html')">
-                Download proof
-              </osx-button>
-              <osx-button size="small" :loading="receiptExporting === 'json'" :disabled="Boolean(receiptExporting)" @click="exportTaskReceipt('json')">
-                Signed JSON
-              </osx-button>
-            </span>
           </section>
           <div v-if="inspector === 'files'" class="evidence-view file-inspector">
             <div
@@ -2897,139 +2935,97 @@ onBeforeUnmount(() => {
           </div>
 
           <div v-else-if="inspector === 'terminal'" class="evidence-view terminal-inspector">
-            <form class="terminal-command-form" @submit.prevent="requestTerminalCommand">
-              <osx-text-field
-                label="Command"
-                name="terminal-command"
-                placeholder="npm test"
-                icon="terminal"
-                :value="terminalCommand"
-                :disabled="!session"
-                :error="terminalError"
-                hint="Runs without a shell in the approved session workspace after you approve it."
-                @input="updateTerminalCommand"
-              />
-              <osx-text-field
-                label="Working directory"
-                name="terminal-cwd"
-                placeholder="."
-                :value="terminalCwd"
-                :disabled="!session"
-                hint="Project-relative folder"
-                @input="updateTerminalCwd"
-              />
-              <osx-button type="submit" variant="primary" size="small" :disabled="!session || !terminalCommand.trim()">Request run</osx-button>
-            </form>
-            <form v-if="activeTerminalRun" class="terminal-input-form" @submit.prevent="sendTerminalInput">
-              <osx-text-field
-                label="Terminal input"
-                name="terminal-input"
-                placeholder="Type input for the running process"
-                :value="terminalInput"
-                :error="terminalError"
-                hint="Sent directly to the approved PTY. Enter is appended automatically."
-                @input="updateTerminalInput"
-              />
-              <osx-button type="submit" variant="primary" size="small" :disabled="!terminalInput">Send</osx-button>
-            </form>
-            <osx-text-field
-              v-if="hasMultipleTerminalRuns"
-              label="Search terminal history"
-              name="terminal-search"
-              placeholder="Command or output"
-              icon="search"
-              :value="terminalSearch"
-              @input="updateTerminalSearch"
+            <TerminalWorkbench
+              :runs="state.terminalRuns"
+              :initial-run-id="selectedTerminalRunId"
+              :starting="terminalStarting"
+              :error="terminalError"
+              @create="ensureUserTerminal(true)"
+              @input="sendTerminalData"
+              @resize="resizeTerminal"
+              @interrupt="interruptTerminal"
             />
-            <div v-if="visibleTerminalRuns.length" class="terminal-run-list" aria-label="Command history">
-              <div
-                v-for="run in visibleTerminalRuns"
-                :id="evidenceDomId('terminal', run.id)"
-                :key="run.id"
-                :class="['terminal-run-receipt', { 'evidence-target-selected': selectedTerminalRunId === run.id }]"
-              >
-                <osx-terminal
-                  :title="run.status === 'pending' ? 'Waiting for approval' : run.status === 'running' ? 'Interactive PTY' : 'Command receipt'"
-                  :command="run.command"
-                  :cwd="run.cwd"
-                  :output="run.output"
-                  :status="terminalStatus(run)"
-                  :duration="run.durationMs !== undefined ? `${(run.durationMs / 1000).toFixed(1)}s` : undefined"
-                  :label="`${run.command} command output`"
-                  @rerun="rerunTerminal(run)"
-                  @interrupt="interruptTerminal(run)"
-                />
-                <small class="terminal-output-note">{{ run.terminalKind === "pty" ? `${run.columns ?? 100}×${run.rows ?? 30} PTY` : "Process" }} · replay {{ run.outputVersion ?? 0 }}</small>
-                <small v-if="run.outputTruncated" class="terminal-output-note">Output was capped at 1 MB. The command still completed normally.</small>
-              </div>
-            </div>
-            <div v-else class="evidence-empty" role="status">
-              <span><osx-icon name="terminal" :size="18" /></span>
-              <div><strong>No commands yet</strong><small>Request a command above. Its approval and output stay attached to this task.</small></div>
-            </div>
           </div>
 
-          <div v-else class="evidence-view browser-inspector">
-            <nav v-if="state.browser?.tabs.length" class="browser-tabs" aria-label="Browser tabs">
-              <div
-                v-for="tab in state.browser.tabs"
-                :key="tab.id"
-                class="browser-tab"
-                :class="{ selected: tab.active }"
-              >
-                <button type="button" :disabled="!browserIsLive || tab.active" :aria-current="tab.active ? 'page' : undefined" @click="!tab.active && requestBrowserAction('select-tab', { tabId: tab.id })">
-                  <osx-icon name="eye" :size="13" />
-                  <span>{{ tab.title || "New tab" }}</span>
-                </button>
-                <osx-icon-button label="Close tab" icon="close" size="small" :disabled="!browserIsLive" @click="requestBrowserAction('close-tab', { tabId: tab.id })" />
+          <div v-else :class="['evidence-view', 'browser-inspector', { 'details-open': browserDetailsOpen, 'native-browser': desktopBrowserAvailable }]">
+            <header class="browser-chrome">
+              <nav v-if="state.browser?.tabs.length" class="browser-tabs" aria-label="Browser tabs">
+                <div
+                  v-for="tab in state.browser.tabs"
+                  :key="tab.id"
+                  class="browser-tab"
+                  :class="{ selected: tab.active }"
+                >
+                  <button type="button" :disabled="!browserIsLive || tab.active" :aria-current="tab.active ? 'page' : undefined" @click="!tab.active && requestBrowserAction('select-tab', { tabId: tab.id })">
+                    <osx-icon name="eye" :size="13" />
+                    <span>{{ tab.title || "New tab" }}</span>
+                  </button>
+                  <osx-icon-button label="Close tab" icon="close" size="small" :disabled="!browserIsLive" @click="requestBrowserAction('close-tab', { tabId: tab.id })" />
+                </div>
+                <osx-icon-button label="New tab" icon="plus" size="small" :disabled="!browserIsLive" @click="requestBrowserAction('new-tab')" />
+              </nav>
+              <span v-else class="browser-window-label"><osx-icon name="eye" :size="14" /> Agent browser</span>
+              <div class="browser-chrome-actions">
+                <osx-icon-button :label="browserIsLive ? 'Sync current page' : 'Restore browser'" icon="refresh" size="small" :disabled="!state.browser?.url" @click="requestBrowserAction('capture')" />
+                <osx-icon-button v-if="state.browser?.frames?.length" label="Export replay" icon="download" size="small" :disabled="browserReplayExporting" @click="exportBrowserReplay" />
+                <osx-icon-button :label="browserDetailsOpen ? 'Hide browser activity' : 'Show browser activity'" icon="list-checks" size="small" :pressed="browserDetailsOpen" :disabled="!state.browser?.url" @click="browserDetailsOpen = !browserDetailsOpen" />
               </div>
-              <osx-icon-button label="New tab" icon="plus" size="small" :disabled="!browserIsLive" @click="requestBrowserAction('new-tab')" />
-            </nav>
+            </header>
 
             <form class="browser-address" @submit.prevent="requestBrowserAction('navigate')">
               <div class="browser-history-actions">
                 <osx-icon-button label="Back" icon="chevron-left" size="small" :disabled="!browserIsLive || !state.browser?.url" @click="requestBrowserAction('back')" />
                 <osx-icon-button label="Reload" icon="refresh" size="small" :disabled="!browserIsLive || !state.browser?.url" @click="requestBrowserAction('reload')" />
               </div>
-              <osx-text-field
-                label="Address"
-                name="browser-address"
-                type="url"
-                icon="eye"
-                :value="browserUrl"
-                :disabled="!session"
-                :error="browserError"
-                placeholder="http://127.0.0.1:3000/"
-                @input="updateBrowserUrl"
-              />
-              <osx-button type="submit" variant="primary" size="small" :disabled="!session || !browserUrl.trim()">Open</osx-button>
-            </form>
-
-            <div v-if="state.browser?.url" class="browser-page-meta">
-              <span><strong>{{ state.browser.title || "Untitled page" }}</strong><small>{{ state.browser.url }}</small></span>
-              <div class="browser-page-actions">
-                <osx-badge
-                  size="small"
-                  :label="browserIsLive ? 'Live browser' : 'Saved evidence'"
-                  :tone="browserIsLive ? 'success' : 'warning'"
-                />
-                <osx-button size="small" icon="refresh" @click="requestBrowserAction('capture')">
-                  {{ browserIsLive ? "Refresh map" : "Restore browser" }}
-                </osx-button>
-                <osx-button
-                  v-if="state.browser.frames?.length"
-                  size="small"
-                  icon="download"
-                  :loading="browserReplayExporting"
-                  :disabled="browserReplayExporting"
-                  @click="exportBrowserReplay"
+              <label class="browser-location">
+                <span class="visually-hidden">Address</span>
+                <osx-icon name="external" :size="14" />
+                <input
+                  name="browser-address"
+                  type="url"
+                  aria-label="Address"
+                  :value="browserUrl"
+                  :disabled="!session"
+                  placeholder="http://127.0.0.1:3000/"
+                  @input="updateBrowserUrl"
                 >
-                  Export replay
-                </osx-button>
-              </div>
-            </div>
+              </label>
+              <osx-icon-button label="Open address" icon="corner-down-left" size="small" :disabled="!session || !browserUrl.trim()" @click="requestBrowserAction('navigate')" />
+            </form>
+            <p v-if="browserError" class="browser-error" role="alert"><osx-icon name="warning" :size="13" /> {{ browserError }}</p>
 
-            <figure v-if="browserScreenshot" class="browser-frame">
+            <section v-if="selectedBrowserControl" class="browser-control-action" aria-label="Selected page control">
+              <span>
+                <code>{{ selectedBrowserControl.ref }}</code>
+                <span><strong>{{ selectedBrowserControl.label }}</strong><small>{{ selectedBrowserControl.kind }}</small></span>
+              </span>
+              <template v-if="selectedBrowserControl.action === 'type'">
+                <osx-text-field
+                  :label="selectedBrowserControl.kind === 'combobox' ? 'Option value' : 'Text to type'"
+                  name="browser-text"
+                  :type="selectedBrowserControl.sensitive ? 'password' : 'text'"
+                  :placeholder="selectedBrowserControl.sensitive ? 'Value stays out of receipts' : 'Enter text'"
+                  :value="browserText"
+                  :disabled="!browserIsLive"
+                  @input="updateBrowserText"
+                />
+                <osx-button variant="primary" size="small" :disabled="!browserIsLive || !browserText" @click="requestBrowserAction('type')">
+                  {{ selectedBrowserControl.kind === "combobox" ? "Choose" : "Type" }}
+                </osx-button>
+              </template>
+              <osx-button v-else variant="primary" size="small" :disabled="!browserIsLive" @click="requestBrowserAction('click')">Click</osx-button>
+              <osx-icon-button label="Clear selected control" icon="close" size="small" @click="selectedBrowserControlRef = ''" />
+            </section>
+
+            <section v-if="desktopBrowserAvailable && session && (!state.browser || browserIsLive)" class="browser-live-frame" aria-label="Live embedded browser">
+              <div ref="browserLiveSurface" class="browser-live-surface" />
+              <footer>
+                <span><strong>{{ state.browser?.title || "Live browser" }}</strong><small>Native interactive page</small></span>
+                <span>{{ state.browser?.controls.length ?? 0 }} mapped controls · agent context stays synchronized</span>
+              </footer>
+            </section>
+
+            <figure v-else-if="browserScreenshot" class="browser-frame">
               <div class="browser-stage">
                 <img :src="browserScreenshot" :alt="`Captured page ${state.browser?.title || state.browser?.url}`">
                 <button
@@ -3046,125 +3042,113 @@ onBeforeUnmount(() => {
                 </button>
               </div>
               <figcaption>
-                <span>{{ browserIsLive ? "Shared viewport" : "Retained viewport" }}</span>
-                <span>{{ state.browser?.controls.length ?? 0 }} controls · captured {{ state.browser?.updatedAt ? new Date(state.browser.updatedAt).toLocaleTimeString() : "now" }}</span>
+                <span><strong>{{ state.browser?.title || "Untitled page" }}</strong><small>{{ browserIsLive ? "Connected" : "Retained after restart" }}</small></span>
+                <span>{{ state.browser?.controls.length ?? 0 }} controls · synced {{ state.browser?.updatedAt ? new Date(state.browser.updatedAt).toLocaleTimeString() : "now" }}</span>
               </figcaption>
             </figure>
 
-            <section v-if="state.browser?.url" class="browser-control-map" aria-labelledby="browser-control-map-heading">
-              <header>
-                <span>
-                  <strong id="browser-control-map-heading">Page controls</strong>
-                  <small>{{ browserIsLive ? "Pick a numbered control. The agent sees the same refs." : "Saved control map. Restore the browser before acting." }}</small>
-                </span>
-                <osx-badge :label="`${state.browser.controls.length} found`" tone="info" size="small" />
-              </header>
-              <div v-if="state.browser.controls.length" class="browser-control-list" role="listbox" aria-label="Visible page controls">
-                <button
-                  v-for="control in state.browser.controls"
-                  :key="control.ref"
-                  type="button"
-                  role="option"
-                  class="browser-control-row"
-                  :class="{ selected: selectedBrowserControlRef === control.ref }"
-                  :aria-selected="selectedBrowserControlRef === control.ref"
-                  :disabled="control.disabled"
-                  @click="selectBrowserControl(control)"
-                >
-                  <code>{{ control.ref }}</code>
-                  <osx-icon :name="browserControlIcon(control)" :size="14" />
-                  <span><strong>{{ control.label }}</strong><small>{{ control.kind }} · {{ control.action }}</small></span>
-                  <osx-icon name="chevron-right" :size="14" />
-                </button>
-              </div>
-              <div v-else class="browser-control-empty" role="status">No visible controls on this page.</div>
-
-              <div v-if="selectedBrowserControl" class="browser-selected-control" aria-label="Selected page control">
-                <span>
-                  <code>{{ selectedBrowserControl.ref }}</code>
-                  <strong>{{ selectedBrowserControl.label }}</strong>
-                </span>
-                <template v-if="selectedBrowserControl.action === 'type'">
-                  <osx-text-field
-                    :label="selectedBrowserControl.kind === 'combobox' ? 'Option value' : 'Text to type'"
-                    name="browser-text"
-                    :type="selectedBrowserControl.sensitive ? 'password' : 'text'"
-                    :placeholder="selectedBrowserControl.sensitive ? 'Value stays out of receipts' : 'Enter text'"
-                    :value="browserText"
-                    :disabled="!browserIsLive"
-                    @input="updateBrowserText"
-                  />
-                  <osx-button variant="primary" size="small" :disabled="!browserIsLive || !browserText" @click="requestBrowserAction('type')">
-                    {{ selectedBrowserControl.kind === "combobox" ? "Choose option" : "Type into control" }}
-                  </osx-button>
-                </template>
-                <osx-button v-else variant="primary" size="small" :disabled="!browserIsLive" @click="requestBrowserAction('click')">Click control</osx-button>
-              </div>
-            </section>
-
-            <details v-if="state.browser?.snapshot" class="browser-evidence-details">
-              <summary>Visible page context</summary>
-              <pre>{{ state.browser.snapshot }}</pre>
-            </details>
-            <details v-if="state.browser?.console.length" class="browser-evidence-details">
-              <summary>Console · {{ state.browser.console.length }}</summary>
-              <ul>
-                <li v-for="entry in state.browser.console" :key="entry.id" :class="entry.level">
-                  <span>{{ entry.level }}</span>{{ entry.text }}
-                </li>
-              </ul>
-            </details>
-            <details v-if="state.browser?.network.length" class="browser-evidence-details browser-network-history">
-              <summary>Network · {{ state.browser.network.length }}</summary>
-              <ol>
-                <li v-for="entry in state.browser.network" :key="entry.id" :class="entry.state">
-                  <code>{{ entry.status ?? entry.state }}</code>
-                  <span><strong>{{ entry.method }} · {{ entry.resourceType }}</strong><small>{{ entry.url }}</small></span>
-                  <small>{{ entry.durationMs !== undefined ? `${entry.durationMs}ms` : '' }}</small>
-                </li>
-              </ol>
-            </details>
-            <section v-if="selectedBrowserAction && (selectedBrowserAction.beforeFrameId || selectedBrowserAction.afterFrameId)" class="browser-action-replay" aria-label="Browser action replay">
-              <header>
-                <span><strong>{{ selectedBrowserAction.action }} comparison</strong><small>{{ selectedBrowserAction.target }}</small></span>
-                <osx-badge size="small" :label="selectedBrowserAction.actor === 'agent' ? 'Agent action' : 'Your action'" tone="info" />
-              </header>
-              <div class="browser-action-frames">
-                <figure v-if="selectedBrowserAction.beforeFrameId">
-                  <img :src="browserFrameUrl(selectedBrowserAction.beforeFrameId)" alt="Page immediately before the browser action">
-                  <figcaption>Before</figcaption>
-                </figure>
-                <figure v-if="selectedBrowserAction.afterFrameId">
-                  <img :src="browserFrameUrl(selectedBrowserAction.afterFrameId)" alt="Page immediately after the browser action">
-                  <figcaption>After</figcaption>
-                </figure>
-              </div>
-            </section>
-            <details
-              v-if="state.browser?.actions.length"
-              class="browser-evidence-details browser-action-history"
-              :open="focusedEvidence?.kind === 'browser'"
-            >
-              <summary>Action receipts · {{ state.browser.actions.length }}</summary>
-              <ol>
-                <li
-                  v-for="action in state.browser.actions"
-                  :id="evidenceDomId('browser', action.id)"
-                  :key="action.id"
-                  :class="[action.status, { selected: selectedBrowserAction?.id === action.id }]"
-                >
-                  <button type="button" :disabled="!action.beforeFrameId && !action.afterFrameId" @click="selectedBrowserActionId = action.id">
-                    <osx-icon :name="action.status === 'success' ? 'check' : 'warning'" :size="13" />
-                    <span><strong>{{ action.action }}</strong><small>{{ action.actor === 'agent' ? 'Agent' : 'You' }} · {{ action.target }} · {{ new Date(action.timestamp).toLocaleTimeString() }}</small></span>
-                    <small>{{ action.beforeFrameId || action.afterFrameId ? "Compare" : "No frame" }}</small>
+            <section v-if="browserDetailsOpen && state.browser?.url" class="browser-details-panel" aria-label="Browser activity and evidence">
+              <section class="browser-control-map" aria-labelledby="browser-control-map-heading">
+                <header>
+                  <span>
+                    <strong id="browser-control-map-heading">Interactive controls</strong>
+                    <small>{{ browserIsLive ? "Select a control here or directly on the page." : "Restore the browser before acting on retained controls." }}</small>
+                  </span>
+                  <osx-badge :label="`${state.browser.controls.length} found`" tone="info" size="small" />
+                </header>
+                <div v-if="state.browser.controls.length" class="browser-control-list" role="listbox" aria-label="Visible page controls">
+                  <button
+                    v-for="control in state.browser.controls"
+                    :key="control.ref"
+                    type="button"
+                    role="option"
+                    class="browser-control-row"
+                    :class="{ selected: selectedBrowserControlRef === control.ref }"
+                    :aria-selected="selectedBrowserControlRef === control.ref"
+                    :disabled="control.disabled"
+                    @click="selectBrowserControl(control)"
+                  >
+                    <code>{{ control.ref }}</code>
+                    <osx-icon :name="browserControlIcon(control)" :size="14" />
+                    <span><strong>{{ control.label }}</strong><small>{{ control.kind }} · {{ control.action }}</small></span>
+                    <osx-icon name="chevron-right" :size="14" />
                   </button>
-                </li>
-              </ol>
-            </details>
+                </div>
+                <div v-else class="browser-control-empty" role="status">No visible controls on this page.</div>
+              </section>
 
-            <div v-if="!state.browser?.url" class="evidence-empty" role="status">
+              <details v-if="state.browser?.snapshot" class="browser-evidence-details">
+                <summary>Agent-visible page context</summary>
+                <pre>{{ state.browser.snapshot }}</pre>
+              </details>
+              <details v-if="state.browser?.console.length" class="browser-evidence-details">
+                <summary>Console · {{ state.browser.console.length }}</summary>
+                <ul>
+                  <li v-for="entry in state.browser.console" :key="entry.id" :class="entry.level">
+                    <span>{{ entry.level }}</span>{{ entry.text }}
+                  </li>
+                </ul>
+              </details>
+              <details v-if="state.browser?.network.length" class="browser-evidence-details browser-network-history">
+                <summary>Network · {{ state.browser.network.length }}</summary>
+                <ol>
+                  <li v-for="entry in state.browser.network" :key="entry.id" :class="entry.state">
+                    <code>{{ entry.status ?? entry.state }}</code>
+                    <span><strong>{{ entry.method }} · {{ entry.resourceType }}</strong><small>{{ entry.url }}</small></span>
+                    <small>{{ entry.durationMs !== undefined ? `${entry.durationMs}ms` : '' }}</small>
+                  </li>
+                </ol>
+              </details>
+              <section v-if="selectedBrowserAction && (selectedBrowserAction.beforeFrameId || selectedBrowserAction.afterFrameId)" class="browser-action-replay" aria-label="Browser action replay">
+                <header>
+                  <span><strong>{{ selectedBrowserAction.action }} comparison</strong><small>{{ selectedBrowserAction.target }}</small></span>
+                  <osx-badge size="small" :label="selectedBrowserAction.actor === 'agent' ? 'Agent action' : 'Your action'" tone="info" />
+                </header>
+                <div class="browser-action-frames">
+                  <figure v-if="selectedBrowserAction.beforeFrameId">
+                    <img :src="browserFrameUrl(selectedBrowserAction.beforeFrameId)" alt="Page immediately before the browser action">
+                    <figcaption>Before</figcaption>
+                  </figure>
+                  <figure v-if="selectedBrowserAction.afterFrameId">
+                    <img :src="browserFrameUrl(selectedBrowserAction.afterFrameId)" alt="Page immediately after the browser action">
+                    <figcaption>After</figcaption>
+                  </figure>
+                </div>
+              </section>
+              <details
+                v-if="state.browser?.actions.length"
+                class="browser-evidence-details browser-action-history"
+                :open="focusedEvidence?.kind === 'browser'"
+              >
+                <summary>Action receipts · {{ state.browser.actions.length }}</summary>
+                <ol>
+                  <li
+                    v-for="action in state.browser.actions"
+                    :id="evidenceDomId('browser', action.id)"
+                    :key="action.id"
+                    :class="[action.status, { selected: selectedBrowserAction?.id === action.id }]"
+                  >
+                    <button type="button" :disabled="!action.beforeFrameId && !action.afterFrameId" @click="selectedBrowserActionId = action.id">
+                      <osx-icon :name="action.status === 'success' ? 'check' : 'warning'" :size="13" />
+                      <span><strong>{{ action.action }}</strong><small>{{ action.actor === 'agent' ? 'Agent' : 'You' }} · {{ action.target }} · {{ new Date(action.timestamp).toLocaleTimeString() }}</small></span>
+                      <small>{{ action.beforeFrameId || action.afterFrameId ? "Compare" : "No frame" }}</small>
+                    </button>
+                  </li>
+                </ol>
+              </details>
+            </section>
+
+            <footer v-if="state.browser?.url" class="browser-context-status">
+              <span>
+                <osx-icon name="sparkle" :size="14" />
+                <span><strong>Shared with the agent</strong><small>The current page, visible text, and mapped controls are included with your next message.</small></span>
+              </span>
+              <osx-badge size="small" :label="browserIsLive ? 'Connected' : 'Retained'" :tone="browserIsLive ? 'success' : 'warning'" />
+            </footer>
+
+            <div v-if="!state.browser?.url && !desktopBrowserAvailable" class="evidence-empty" role="status">
               <span><osx-icon name="eye" :size="18" /></span>
-              <div><strong>Open a page</strong><small>Vraxis maps the visible controls so you and the agent can act on the same page without writing selectors.</small></div>
+              <div><strong>Preview your app</strong><small>Open a local URL to browse with the agent. Vraxis shares visible context, requests approval before actions, and retains what happened.</small></div>
             </div>
           </div>
         </section>

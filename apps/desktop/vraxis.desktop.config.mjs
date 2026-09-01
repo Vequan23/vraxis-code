@@ -46,6 +46,7 @@ export default defineDesktopApp({
       buttonLabel: "Add project",
     },
     protocols: [{ scheme: "vraxis-code", name: "Vraxis Code task" }],
+    browserView: true,
   },
   updates: {
     provider: "github",

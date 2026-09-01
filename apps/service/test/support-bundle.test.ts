@@ -5,7 +5,7 @@ import { createSupportBundle } from "../src/diagnostics/support-bundle.js";
 test("creates useful recovery diagnostics without project content or credentials", () => {
   const bundle = createSupportBundle({
     applicationVersion: "0.1.0",
-    contractVersion: 24,
+    contractVersion: 26,
     desktopSessionProtected: true,
     projects: [{ id: "project-secret", name: "private-customer", path: "/Users/customer/secret", branch: "main", status: "ready" }],
     sessions: [{ id: "session-secret", projectId: "project-secret", title: "Fix API_KEY=secret-value", mode: "build", runtimeId: "codex", updatedAt: new Date().toISOString(), status: "interrupted", worktree: { id: "worktree-secret", path: "/tmp/secret", branch: "vraxis/secret", baseBranch: "main", baseCommit: "abc", status: "conflicted" } }],
