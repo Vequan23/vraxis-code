@@ -513,7 +513,7 @@ test("local Build harnesses receive governed file and terminal tools with native
       sessionId: `session-${runtimeId}`,
       metadata: { mode: "build" },
       scope: localExecutionScope("project-local"),
-      input: { prompt: "Build it." },
+      input: { prompt: "Build it and fetch https://example.com/docs for the current API contract." },
       output,
     });
     const names = local.captured?.tools?.map((tool) => tool.name) ?? [];
@@ -526,6 +526,7 @@ test("local Build harnesses receive governed file and terminal tools with native
     assert.ok(names.includes("browser-network"), `${runtimeId} must receive browser evidence`);
     assert.ok(names.includes("browser-screenshot"), `${runtimeId} must receive screenshot evidence`);
     assert.ok(names.includes("browser-wait"), `${runtimeId} must receive bounded browser waits`);
+    assert.ok(names.includes("http-fetch"), `${runtimeId} must receive bounded web access for the host named in this turn`);
     assert.ok(names.includes("create-text"), `${runtimeId} must receive governed file creation`);
     assert.ok(names.includes("apply-workspace-patch"), `${runtimeId} must receive governed patch application`);
     assert.equal(names.includes("run-command"), false, `${runtimeId} must not receive the native command bypass`);
@@ -552,6 +553,7 @@ test("local Build harnesses receive governed file and terminal tools with native
   assert.ok(cursorNames.includes("browser-type"));
   assert.ok(cursorNames.includes("evidence-status"));
   assert.ok(cursorNames.includes("request-verification"));
+  assert.equal(cursorNames.includes("http-fetch"), false, "historical or absent URLs must not grant network access to a later turn");
   assert.ok(local.captured?.approvalPolicy);
 });
 

@@ -24,6 +24,7 @@ import type { TerminalRegistry } from "../terminal/terminal-registry.js";
 import { createAgentEvidenceTool } from "../sessions/agent-evidence-tool.js";
 import { createAgentVerificationHandoffTool } from "../sessions/agent-verification-handoff-tool.js";
 import type { VerificationRegistry } from "../verification/verification-registry.js";
+import { createPromptWebFetchTool } from "../web/prompt-web-access.js";
 
 const developmentCommands = ["bun", "cargo", "git", "go", "node", "npm", "npx", "pnpm", "python3", "pytest", "rg", "yarn"] as const;
 
@@ -219,6 +220,8 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
       ? createBrowserTools({ controller: this.browserController(sessionId), allowedOrigins, allowNavigationRequests: true })
       : [];
     const tools: AgentTool[] = [...browserTools];
+    const webFetch = createPromptWebFetchTool(request.input.prompt, this.approvals);
+    if (webFetch) tools.push(webFetch);
     if (this.approvals && this.terminal && this.verifications) {
       tools.push(createAgentEvidenceTool({
         sessionId,

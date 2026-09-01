@@ -46,7 +46,7 @@ export const modeAgentProfiles: Readonly<Record<SessionMode, ModeAgentProfile>> 
     access: "read-only",
     skillNames: ["Repository comprehension", "General utilities"],
     toolIds: ["calculate", "date-time", "evidence-status", "request-verification", ...repositoryReadTools, ...browserEvidenceTools],
-    guardedToolIds: browserControlTools,
+    guardedToolIds: ["http-fetch", ...browserControlTools],
   },
   plan: {
     mode: "plan",
@@ -55,7 +55,7 @@ export const modeAgentProfiles: Readonly<Record<SessionMode, ModeAgentProfile>> 
     access: "read-only",
     skillNames: ["Repository comprehension", "Project architecture", "General utilities"],
     toolIds: ["calculate", "date-time", "evidence-status", "request-verification", ...repositoryReadTools, ...browserEvidenceTools],
-    guardedToolIds: browserControlTools,
+    guardedToolIds: ["http-fetch", ...browserControlTools],
   },
   build: {
     mode: "build",
@@ -92,7 +92,7 @@ export const modeAgentProfiles: Readonly<Record<SessionMode, ModeAgentProfile>> 
     access: "read-only",
     skillNames: ["Repository comprehension", "Code review", "Security review", "General utilities"],
     toolIds: ["calculate", "date-time", "evidence-status", "request-verification", ...repositoryReadTools, ...browserEvidenceTools],
-    guardedToolIds: browserControlTools,
+    guardedToolIds: ["http-fetch", ...browserControlTools],
   },
 };
 
