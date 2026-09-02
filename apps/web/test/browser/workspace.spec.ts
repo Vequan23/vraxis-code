@@ -930,9 +930,12 @@ test("turns discovered project checks into approved, retained verification proof
   await page.getByRole("button", { name: "Allow once" }).click();
   await expect(page.locator(".verification-workflow strong").filter({ hasText: /^Passed$/ })).toBeVisible();
   await expect(page.getByLabel("Task evidence ledger")).toContainText("1 verified");
-  await expect(page.getByRole("button", { name: "Understand", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Download proof", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Signed JSON", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Understand", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Download proof", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Signed JSON", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Understand", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Task understanding" })).toBeVisible();
+  await expect(page.getByText("All 1 changed path is covered by passed governed verification.", { exact: true })).toBeVisible();
   await expect(page.getByText(
     `Recipe ${recipeFingerprint.slice(0, 12)} · 0 services · 1 command receipt · 0 browser assertions`,
     { exact: true },

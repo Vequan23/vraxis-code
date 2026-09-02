@@ -40,6 +40,8 @@ import {
   type TeamPolicyState,
   type TaskProofEnvelopeV1,
   type TaskEvidenceKindV1,
+  type UnderstandArtifactEnvelopeV1,
+  type UnderstandEvidenceLinkV1,
   type UpdateSettingsRequest,
   type UserSettings,
   type WorkspaceDiff,
@@ -75,6 +77,7 @@ import {
   type WorkspaceStateSnapshot,
 } from "./workspace/workspace-cache.js";
 import WorkspaceFileTree from "./workspace/WorkspaceFileTree.vue";
+import UnderstandArtifactPanel from "./understand/UnderstandArtifactPanel.vue";
 import { createActivityPresenter } from "./activity/activity-presenter.js";
 import type { DisplayActivityEvent } from "./activity/session-activity.js";
 
@@ -165,6 +168,11 @@ const focusedEvidence = ref<{ kind: TaskEvidenceKindV1; target: string }>();
 const approvalActionId = ref("");
 const verificationAction = ref("");
 const receiptExporting = ref<"html" | "json" | "">("");
+const understandArtifact = ref<UnderstandArtifactEnvelopeV1>();
+const understandLoading = ref(false);
+const understandError = ref("");
+const understandOpen = ref(false);
+const understandExporting = ref(false);
 const browserReplayExporting = ref(false);
 const firstRunJourneyClosed = ref(false);
 let runPollTimer: ReturnType<typeof setTimeout> | undefined;
@@ -353,6 +361,9 @@ const activityPresenter = createActivityPresenter((events) => {
   displayedSessionEvents.value = events;
 });
 watch(sessionEvents, (events) => activityPresenter.update(events), { deep: true, immediate: true });
+watch(() => session.value?.id, () => {
+  resetUnderstandArtifact();
+});
 const changedFiles = computed(() => state.changes);
 const availableChangeHunks = computed(() => {
   if (!changeDiff.value || !selectedChange.value) return [];
@@ -551,6 +562,15 @@ const evidenceLedger = computed(() => {
     hasEvidence: taskTerminalRuns.value.length > 0 || Boolean(state.browser?.actions.length) || state.approvals.length > 0 || verificationRuns.value.length > 0,
   };
 });
+const taskProofExportable = computed(() => Boolean(
+  session.value
+  && !sessionIsRunning.value
+  && (
+    verificationRuns.value.some((run) => run.state === "passed")
+    || evidenceLedger.value.hasEvidence
+    || displayedSessionEvents.value.some((event) => event.kind === "message" && event.actor === "agent")
+  ),
+));
 const highlightedFile = computed(() => filePreview.value
   ? highlightCode(filePreview.value.content, filePreview.value.language)
   : undefined);
@@ -2105,6 +2125,69 @@ async function exportTaskReceipt(format: "html" | "json"): Promise<void> {
   }
 }
 
+function resetUnderstandArtifact(): void {
+  understandArtifact.value = undefined;
+  understandError.value = "";
+  understandOpen.value = false;
+  understandExporting.value = false;
+}
+
+async function openUnderstandArtifact(): Promise<void> {
+  if (!session.value || understandLoading.value) return;
+  understandError.value = "";
+  understandLoading.value = true;
+  understandOpen.value = true;
+  try {
+    const response = await fetch(`/api/sessions/${session.value.id}/understand.json`);
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(failure.error ?? "The understanding artifact could not be generated.");
+    }
+    understandArtifact.value = await response.json() as UnderstandArtifactEnvelopeV1;
+  } catch (error) {
+    understandError.value = error instanceof Error ? error.message : "The understanding artifact could not be generated.";
+    understandOpen.value = false;
+  } finally {
+    understandLoading.value = false;
+  }
+}
+
+async function exportUnderstandArtifact(): Promise<void> {
+  if (!session.value || understandExporting.value) return;
+  understandExporting.value = true;
+  taskError.value = "";
+  try {
+    const response = await fetch(`/api/sessions/${session.value.id}/understand.json`);
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(failure.error ?? "The understanding artifact could not be exported.");
+    }
+    const blob = new Blob([`${JSON.stringify(await response.json() as UnderstandArtifactEnvelopeV1, null, 2)}\n`], { type: "application/vnd.vraxis.understand+json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${project.value?.name ?? "vraxis"}-${session.value.id.slice(0, 8)}-understand.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    taskError.value = error instanceof Error ? error.message : "The understanding artifact could not be exported.";
+  } finally {
+    understandExporting.value = false;
+  }
+}
+
+async function exploreUnderstandEvidence(link: UnderstandEvidenceLinkV1): Promise<void> {
+  if (link.kind === "verification") {
+    inspector.value = "verify";
+    return;
+  }
+  if (link.kind === "worktree") {
+    inspector.value = "changes";
+    return;
+  }
+  await focusLinkedEvidence({ kind: link.kind, target: link.target });
+}
+
 async function exportBrowserReplay(): Promise<void> {
   if (!session.value || browserReplayExporting.value) return;
   browserReplayExporting.value = true;
@@ -3289,6 +3372,23 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
             <span v-if="evidenceLedger.browserActions"><osx-icon name="eye" :size="13" />{{ evidenceLedger.browserActions }} browser {{ evidenceLedger.browserActions === 1 ? 'action' : 'actions' }}</span>
             <span v-if="evidenceLedger.pendingApprovals" class="warning"><osx-icon name="lock" :size="13" />{{ evidenceLedger.pendingApprovals }} waiting</span>
           </section>
+          <section v-if="taskProofExportable" class="proof-export-actions" aria-label="Portable task proof">
+            <span class="proof-export-title"><osx-icon name="shield-check" :size="14" /><strong>Portable proof</strong></span>
+            <span class="proof-export-buttons">
+              <osx-button size="small" variant="secondary" icon="sparkle" :loading="understandLoading" @click="openUnderstandArtifact">Understand</osx-button>
+              <osx-button size="small" variant="secondary" icon="download" :loading="receiptExporting === 'html'" @click="exportTaskReceipt('html')">Download proof</osx-button>
+              <osx-button size="small" variant="secondary" icon="file-code" :loading="receiptExporting === 'json'" @click="exportTaskReceipt('json')">Signed JSON</osx-button>
+            </span>
+          </section>
+          <div v-if="understandLoading" class="understand-loading"><osx-spinner size="small" label="Generating understanding" show-label /></div>
+          <UnderstandArtifactPanel
+            v-if="understandOpen && understandArtifact"
+            :artifact="understandArtifact"
+            @close="resetUnderstandArtifact"
+            @download="exportUnderstandArtifact"
+            @explore="exploreUnderstandEvidence"
+          />
+          <osx-alert v-else-if="understandError" tone="error" title="Understanding unavailable" :description="understandError" />
           <div v-if="inspector === 'files'" class="evidence-view file-inspector">
             <div
               v-if="state.files.length"

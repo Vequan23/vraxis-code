@@ -1190,6 +1190,21 @@ osx-app-shell {
 .evidence-ledger-title { color: var(--osx-text, #eef1f2); }
 .evidence-ledger .warning { color: var(--osx-warning, #d79a42); }
 
+.proof-export-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--osx-accent, #4aa9dc) 28%, var(--osx-border-soft, #2c3338));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--osx-accent, #4aa9dc) 6%, var(--osx-surface-raised, #22282c));
+}
+.proof-export-title { display: inline-flex; align-items: center; gap: 7px; color: var(--osx-text, #eef1f2); font-size: 13px; font-weight: 620; }
+.proof-export-buttons { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.understand-loading { display: grid; place-items: center; min-height: 72px; margin-bottom: 10px; }
+
 .understand-artifact {
   display: grid;
   gap: 14px;
