@@ -1,4 +1,4 @@
-export const contractVersion = 29 as const;
+export const contractVersion = 30 as const;
 
 export const sessionModes = ["ask", "plan", "build", "review"] as const;
 export type SessionMode = (typeof sessionModes)[number];
@@ -1102,6 +1102,7 @@ export interface CreateSessionRequest {
   runtimeId: string;
   modelId?: string;
   prompt: string;
+  branchSlug?: string;
   attachments?: PromptAttachment[];
   skillIds?: string[];
   attachmentConsent?: AttachmentHandoffConsent;
@@ -1113,6 +1114,7 @@ export interface AppendMessageRequest {
   mode?: SessionMode;
   runtimeId?: string;
   modelId?: string | null;
+  branchSlug?: string;
   attachments?: PromptAttachment[];
   skillIds?: string[];
   attachmentConsent?: AttachmentHandoffConsent;
@@ -1206,6 +1208,25 @@ function boundedString(value: unknown, label: string, maximumLength: number, all
   const result = allowEmpty ? value : value.trim();
   if (result.length > maximumLength) throw new TypeError(`${label} is too long.`);
   return result;
+}
+
+/** Normalizes a user-provided Build branch slug for host-managed vraxis/* branches. */
+export function normalizeBranchSlug(value: string): string {
+  const slug = value.trim().toLowerCase()
+    .replace(/[^a-z0-9/._-]+/g, "-")
+    .replace(/\/+/g, "/")
+    .replace(/^\/+|\/+$/g, "")
+    .replace(/\.lock$/i, "")
+    .slice(0, 48);
+  if (!slug || slug === "." || slug === ".." || slug.includes("..")) {
+    throw new TypeError("Branch slug is invalid.");
+  }
+  return slug;
+}
+
+export function parseBranchSlug(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  return normalizeBranchSlug(boundedString(value, "Branch slug", 64));
 }
 
 function approvalCapability(value: unknown, label: string): ApprovalCapability {
@@ -1420,6 +1441,11 @@ export function parseCreateSessionRequest(value: unknown): CreateSessionRequest 
   };
   const modelId = optionalString(input.modelId, "Model ID");
   if (modelId) result.modelId = modelId;
+  const branchSlug = parseBranchSlug(input.branchSlug);
+  if (branchSlug) {
+    if (result.mode !== "build") throw new TypeError("Branch slug applies only to Build mode.");
+    result.branchSlug = branchSlug;
+  }
   const attachments = promptAttachments(input.attachments);
   if (attachments?.length) result.attachments = attachments;
   const skillIds = promptSkillIds(input.skillIds);
@@ -1448,6 +1474,13 @@ export function parseAppendMessageRequest(value: unknown): AppendMessageRequest 
   if (attachments?.length) result.attachments = attachments;
   const skillIds = promptSkillIds(input.skillIds);
   if (skillIds) result.skillIds = skillIds;
+  const branchSlug = parseBranchSlug(input.branchSlug);
+  if (branchSlug) {
+    if (input.mode !== undefined && input.mode !== "build") {
+      throw new TypeError("Branch slug applies only to Build mode.");
+    }
+    result.branchSlug = branchSlug;
+  }
   const attachmentConsent = attachmentHandoffConsent(input.attachmentConsent);
   if (attachmentConsent) result.attachmentConsent = attachmentConsent;
   return result;

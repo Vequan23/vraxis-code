@@ -59,6 +59,24 @@ osx-app-shell {
   white-space: nowrap;
 }
 
+.workspace-branch-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: min(42vw, 420px);
+  color: var(--osx-accent, #71b9e6);
+}
+
+.workspace-branch-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .workspace-sync-status {
   display: inline-flex !important;
   align-items: center;
@@ -745,7 +763,7 @@ osx-app-shell {
 
 .task-jump-latest {
   position: absolute;
-  z-index: 3;
+  z-index: 0;
   bottom: calc(100% + 12px);
   left: 50%;
   transform: translateX(-50%);
@@ -826,6 +844,19 @@ osx-app-shell {
 
 .composer-runtime-control:focus-within { outline: 2px solid var(--osx-focus, #71b9e6); outline-offset: 2px; }
 .composer-runtime-control select:disabled { cursor: default; opacity: 0.7; }
+
+.composer-branch-control input {
+  width: min(22vw, 180px);
+  min-width: 120px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  outline: none;
+}
+
+.composer-branch-control input::placeholder { color: var(--osx-muted, #98a0a5); opacity: 0.85; }
+.composer-branch-control input:disabled { cursor: default; opacity: 0.7; }
 
 .message-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
 .message-attachments > span { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 4px 8px; border: 1px solid var(--osx-border-soft, #384148); border-radius: 999px; color: var(--osx-muted, #a5adb2); font-size: 12px; }

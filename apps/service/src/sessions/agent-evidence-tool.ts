@@ -3,9 +3,11 @@ import type {
   ApprovalSummary,
   BrowserSessionSummary,
   TerminalRunSummary,
-  VerificationRunSummary,
   VerificationHandoffSummary,
+  VerificationRunSummary,
+  WorktreeSummary,
 } from "@vraxis/code-contracts";
+import { summarizeWorktreeForEvidence } from "./build-workspace-context.js";
 
 interface SessionEvidenceSources {
   sessionId: string;
@@ -16,6 +18,7 @@ interface SessionEvidenceSources {
     listHandoffs?(sessionId?: string): Promise<VerificationHandoffSummary[]>;
   };
   browser?: { state(sessionId: string): Promise<BrowserSessionSummary | undefined> };
+  worktree?: WorktreeSummary;
 }
 
 const emptyInput = defineOutput<Record<string, never>>({
@@ -44,8 +47,9 @@ const evidenceOutput = defineOutput<JsonObject>({
       verifications: { type: "array", items: { type: "object" } },
       verificationHandoffs: { type: "array", items: { type: "object" } },
       browser: { type: ["object", "null"] },
+      worktree: { type: ["object", "null"] },
     },
-    required: ["kind", "sessionId", "generatedAt", "summary", "approvals", "terminalRuns", "verifications", "verificationHandoffs", "browser"],
+    required: ["kind", "sessionId", "generatedAt", "summary", "approvals", "terminalRuns", "verifications", "verificationHandoffs", "browser", "worktree"],
     additionalProperties: false,
   },
   parse(value) {
@@ -127,6 +131,7 @@ export function createAgentEvidenceTool(sources: SessionEvidenceSources): AgentT
           networkFailureCount: browser.network.filter((item) => item.state === "error" || item.state === "blocked").length,
           screenshotVersion: browser.screenshotVersion,
         } : null,
+        worktree: sources.worktree ? summarizeWorktreeForEvidence(sources.worktree) : null,
       };
     },
   });

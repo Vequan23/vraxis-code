@@ -419,6 +419,33 @@ test("a denied agent terminal command never creates a process receipt", async ()
   assert.equal((await approvals.list("session-deny"))[0]?.state, "denied");
 });
 
+test("build terminal-run rejects host-forbidden git branch commands before approval", async () => {
+  const root = await mkdtemp(join(tmpdir(), "vraxis-agent-terminal-git-block-"));
+  const approvals = new ApprovalRegistry(root);
+  const terminal = new TerminalRegistry(root);
+  const hostBranch = "vraxis/fix-login-a1b2c3d4";
+  const tool = createAgentTerminalTool({
+    sessionId: "session-git-block",
+    workspacePath: root,
+    terminal,
+    approvals,
+    hostBranch,
+  });
+  await assert.rejects(
+    executeAgentTool({
+      tool,
+      input: { command: "git checkout -b feature/foo" },
+      runId: "run-git-block",
+      sessionId: "session-git-block",
+      scope: { ...localExecutionScope("project-git-block"), permissions: ["command:execute"] },
+      approvalPolicy: approvals.policy("session-git-block"),
+    }),
+    /host-managed branch \(vraxis\/fix-login-a1b2c3d4\)/,
+  );
+  assert.deepEqual(await terminal.list("session-git-block"), []);
+  assert.deepEqual(await approvals.list("session-git-block"), []);
+});
+
 test("cancelling while terminal approval is pending interrupts the approval and runs nothing", async () => {
   const root = await mkdtemp(join(tmpdir(), "vraxis-agent-terminal-cancel-"));
   const approvals = new ApprovalRegistry(root);

@@ -984,7 +984,7 @@ test("executes an Ask task and restores its ordered agent-v events", async (cont
   assert.equal(continued.sessions[0]?.mode, "review");
   assert.equal(continued.sessions[0]?.modelId, "gpt-5.6-terra");
   assert.equal(runtime.requests[1]?.runtimeModel, "gpt-5.6-terra");
-  assert.match(runtime.requests[1]?.input.instructions ?? "", /Review the engineer's requested area/);
+  assert.match(runtime.requests[1]?.trajectory?.currentPlan?.join("\n") ?? "", /Review the engineer's requested area/);
   assert.deepEqual(runtime.requests[1]?.input.messages?.map((message) => message.role), ["user", "assistant"]);
 
   const newTask = await fetch(`${app.baseUrl}/api/projects/${project.id}/new-task`, { method: "POST" });
@@ -1187,7 +1187,7 @@ test("discovers, attaches, persists, and applies agent-v skills", async (context
     skills?: Array<{ id: string; name: string; version: string }>;
   };
   assert.deepEqual(userEvent.skills, [{ id: skillId, name: "ux-fundamentals", version: "1.2.0" }]);
-  assert.match(runtime.requests[0]?.input.instructions ?? "", /Start with the user's goal and preserve visible system status/);
+  assert.match(runtime.requests[0]?.input.instructions ?? "", /available as artifacts/);
   assert.match(runtime.requests[0]?.input.instructions ?? "", /cannot grant tools, permissions, workspace writes, network access/);
   assert.deepEqual(runtime.requests[0]?.input.artifacts, [{
     id: `attached-skill:${skillId}`,
@@ -1313,7 +1313,7 @@ test("runs Plan read-only and rejects Build when the runtime cannot write worksp
   assert.equal(planMutation.status, "running");
   assert.ok(planMutation.events.length >= 2);
   await waitForIdle(app.baseUrl);
-  assert.match(runtime.requests[0]?.input.instructions ?? "", /produce a concrete implementation plan/);
+  assert.match(runtime.requests[0]?.trajectory?.currentPlan?.join("\n") ?? "", /produce a concrete implementation plan/);
   assert.match(runtime.requests[0]?.input.instructions ?? "", /Repository comprehension, Project architecture/);
   assert.match(runtime.requests[0]?.input.instructions ?? "", /Default tool requests for this mode: calculate, date-time, evidence-status, request-verification, list-directory/);
   assert.match(runtime.requests[0]?.input.instructions ?? "", /This mode is read-only/);

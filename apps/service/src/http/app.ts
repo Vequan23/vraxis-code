@@ -108,6 +108,10 @@ export interface AppOptions {
 }
 
 function json(response: ServerResponse, status: number, value: unknown): void {
+  if (response.headersSent) {
+    response.end();
+    return;
+  }
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
   response.end(`${JSON.stringify(value)}\n`);
 }
@@ -547,12 +551,13 @@ export function createApp(options: AppOptions) {
     projectPath: string,
     projectId: string,
     title: string,
+    branchSlug?: string,
   ): Promise<WorktreeSummary> {
     if (session?.worktree?.status === "active") return session.worktree;
     if (session?.worktree && !["applied", "reverted", "archived", "cleaned"].includes(session.worktree.status)) {
       throw new TypeError("Finish or recover the current Build worktree before continuing.");
     }
-    const worktree = await worktrees.create(projectPath, projectId, title);
+    const worktree = await worktrees.create(projectPath, projectId, title, branchSlug);
     if (session?.worktree) await sessions.continueBuild(session.id, worktree);
     else if (session) await sessions.attachWorktree(session.id, worktree);
     return worktree;
@@ -1071,7 +1076,7 @@ export function createApp(options: AppOptions) {
         let worktree: WorktreeSummary | undefined;
         if (input.mode === "build") {
           await validateBuildRuntime(input.runtimeId);
-          worktree = await prepareWorktree(undefined, projectPath, input.projectId, input.prompt);
+          worktree = await prepareWorktree(undefined, projectPath, input.projectId, input.prompt, input.branchSlug);
         }
         const executionPath = worktree ? await worktrees.resolveInside(worktree) : projectPath;
         const selectedSkills = await skills.resolve(projectPath, input.skillIds);
@@ -1104,7 +1109,7 @@ export function createApp(options: AppOptions) {
           await validateBuildRuntime(runtimeId);
           if (!session.worktree || session.worktree.status !== "active") {
             await validateAttachmentFiles((path) => registry.resolveInside(session.projectId, path), input.attachments);
-            await prepareWorktree(session, projectPath, session.projectId, input.prompt);
+            await prepareWorktree(session, projectPath, session.projectId, input.prompt, input.branchSlug);
             session = await sessions.get(session.id);
           }
         }
@@ -1156,16 +1161,33 @@ export function createApp(options: AppOptions) {
         let ready = false;
         let closed = false;
         let delivery = Promise.resolve();
+        const liveEvidenceTtlMs = 200;
+        let cachedLiveEvidence: SessionLiveEvidenceResponse | undefined;
+        let cachedLiveEvidenceAt = 0;
+        const liveEvidence = async (): Promise<SessionLiveEvidenceResponse> => {
+          const now = Date.now();
+          if (!cachedLiveEvidence || now - cachedLiveEvidenceAt >= liveEvidenceTtlMs) {
+            cachedLiveEvidence = await sessionLiveEvidence(sessionId);
+            cachedLiveEvidenceAt = now;
+          }
+          return cachedLiveEvidence;
+        };
         const send = (event: "snapshot" | "update", payload: SessionStreamPayload) => {
-          if (closed) return;
-          response.write(`id: ${payload.cursor}\nevent: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+          if (closed || response.writableEnded) return;
+          try {
+            response.write(`id: ${payload.cursor}\nevent: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+          } catch {
+            closed = true;
+          }
         };
         const deliver = (update: Parameters<Parameters<typeof sessions.subscribe>[1]>[0]) => {
           delivery = delivery.then(async () => {
-            if (closed) return;
-            send("update", { ...update, evidence: await sessionLiveEvidence(sessionId) });
+            if (closed || response.writableEnded) return;
+            send("update", { ...update, evidence: await liveEvidence() });
           }).catch(() => {
-            if (!closed) response.write("event: refresh\ndata: {}\n\n");
+            if (!closed && !response.writableEnded) {
+              try { response.write("event: refresh\ndata: {}\n\n"); } catch { closed = true; }
+            }
           });
         };
         const unsubscribe = sessions.subscribe(sessionId, (update) => {
@@ -1195,11 +1217,18 @@ export function createApp(options: AppOptions) {
             }
           }
           heartbeat = setInterval(() => {
-            if (!closed) response.write(": keep-alive\n\n");
+            if (closed || response.writableEnded) return;
+            try { response.write(": keep-alive\n\n"); } catch { closed = true; }
           }, 15_000);
           heartbeat.unref();
         } catch (error) {
           unsubscribe();
+          if (response.headersSent) {
+            if (!closed && !response.writableEnded) {
+              try { response.end(); } catch { /* The client already left the stream. */ }
+            }
+            return;
+          }
           throw error;
         }
         request.once("close", () => {
@@ -1916,6 +1945,12 @@ export function createApp(options: AppOptions) {
 
       json(response, 404, { error: "Route was not found." });
     } catch (error) {
+      if (response.headersSent) {
+        if (!response.writableEnded) {
+          try { response.end(); } catch { /* Response already closed. */ }
+        }
+        return;
+      }
       const message = error instanceof Error ? error.message : "Request failed.";
       json(response, error instanceof TypeError ? 400 : 500, { error: message });
     }

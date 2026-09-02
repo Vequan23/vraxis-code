@@ -100,9 +100,11 @@ interface PreparedPrompt {
   mode: SessionMode;
   runtimeId: string;
   modelId: string;
+  branchSlug?: string;
   delivery?: SteeringDelivery;
 }
 const pendingAttachmentHandoff = ref<PreparedPrompt>();
+const composerBranchSlug = ref("");
 const steeringDelivery = ref<SteeringDelivery>("queue");
 const initialRuntimeId = state.settings.defaultRuntimeId
   ?? state.runtimes.find((item) => item.availability === "installed")?.id
@@ -211,6 +213,34 @@ const project = computed(() => selectedProject(state));
 const session = computed(() => selectedSession(state));
 const projectSessions = computed(() => state.sessions.filter((item) => item.projectId === project.value?.id));
 const showFirstRunJourney = computed(() => !firstRunJourneyClosed.value && projectSessions.value.length <= 1);
+const STARTUP_RECOVERY_DISMISS_KEY = "vraxis-code:dismissed-startup-recovery";
+
+function readDismissedStartupRecoveryCheckedAt(): string {
+  try {
+    return sessionStorage.getItem(STARTUP_RECOVERY_DISMISS_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+const dismissedStartupRecoveryCheckedAt = ref(readDismissedStartupRecoveryCheckedAt());
+const showStartupRecoveryAlert = computed(() => {
+  const recovery = state.startupRecovery;
+  if (!recovery?.previousUnexpectedExit) return false;
+  return recovery.checkedAt !== dismissedStartupRecoveryCheckedAt.value;
+});
+
+function dismissStartupRecoveryAlert(): void {
+  const checkedAt = state.startupRecovery?.checkedAt;
+  if (!checkedAt) return;
+  dismissedStartupRecoveryCheckedAt.value = checkedAt;
+  try {
+    sessionStorage.setItem(STARTUP_RECOVERY_DISMISS_KEY, checkedAt);
+  } catch {
+    // sessionStorage may be unavailable in embedded previews
+  }
+}
+
 const runtimeIsEnabled = (runtimeId: string): boolean => !state.settings.disabledRuntimeIds?.includes(runtimeId);
 const localRuntimes = computed(() => state.runtimes.filter((item) => item.kind !== "hosted-provider"));
 const defaultRuntime = computed(() => state.runtimes.find((item) =>
@@ -477,6 +507,14 @@ const inspectorWidth = computed(() =>
 const workspaceBranch = computed(() => session.value?.worktree?.status === "active"
   ? session.value.worktree.branch
   : project.value?.branch ?? "");
+const activeBuildBranch = computed(() => session.value?.worktree?.status === "active" ? session.value.worktree.branch : "");
+const buildNeedsNewWorktree = computed(() => {
+  if (mode.value !== "build") return false;
+  const worktree = session.value?.worktree;
+  if (!worktree) return true;
+  if (worktree.status === "active") return false;
+  return ["applied", "reverted", "archived", "cleaned"].includes(worktree.status);
+});
 const sourceItems = computed(() => state.projects.map((item) => item.name).join(","));
 const sourceIcons = computed(() => JSON.stringify(Object.fromEntries(state.projects.map((item) => [item.name, "folder"]))));
 const modeLabel = computed(() => mode.value.charAt(0).toUpperCase() + mode.value.slice(1));
@@ -526,9 +564,13 @@ const composerStatus = computed(() => sessionIsRunning.value
       ? `Agent working · ${session.value.steering.pendingCount} ${session.value.steering.pendingCount === 1 ? "message" : "messages"} queued`
       : "Agent working · Send another message without stopping the task"
   : `${modeLabel.value} · ${runtime.value?.name ?? "Choose runtime"} · ${mode.value === "build"
-  ? session.value?.worktree && ["applied", "reverted", "archived", "cleaned"].includes(session.value.worktree.status)
-    ? "New isolated worktree on send"
-    : "Isolated worktree"
+  ? activeBuildBranch.value
+    ? `Branch ${activeBuildBranch.value}`
+    : buildNeedsNewWorktree.value && composerBranchSlug.value.trim()
+      ? `Branch vraxis/${composerBranchSlug.value.trim()}`
+      : session.value?.worktree && ["applied", "reverted", "archived", "cleaned"].includes(session.value.worktree.status)
+        ? "New isolated worktree on send"
+        : "Isolated worktree"
   : "Read only"} · ${authorityModeLabel.value}`);
 const pendingImportedAttachments = computed(() => pendingAttachmentHandoff.value?.attachments.filter((item) => item.source === "imported") ?? []);
 const pendingHandoffDestination = computed(() => {
@@ -1328,6 +1370,9 @@ function submitPrompt(event: Event): void {
     mode: mode.value,
     runtimeId: runtime.value.id,
     modelId: submittedModelId,
+    ...(mode.value === "build" && buildNeedsNewWorktree.value && composerBranchSlug.value.trim()
+      ? { branchSlug: composerBranchSlug.value.trim() }
+      : {}),
     ...(sessionIsRunning.value ? { delivery: steeringDelivery.value } : {}),
   };
   if (attachments.some((item) => item.source === "imported")) {
@@ -1367,6 +1412,7 @@ async function sendPreparedPrompt(prepared: PreparedPrompt): Promise<void> {
         runtimeId: prepared.runtimeId,
         modelId: prepared.modelId || null,
         ...(prepared.delivery ? { delivery: prepared.delivery } : {}),
+        ...(prepared.branchSlug ? { branchSlug: prepared.branchSlug } : {}),
         ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}),
         ...(prepared.skillIds.length ? { skillIds: prepared.skillIds } : {}),
         ...(attachmentConsent ? { attachmentConsent } : {}),
@@ -1378,6 +1424,7 @@ async function sendPreparedPrompt(prepared: PreparedPrompt): Promise<void> {
         runtimeId: prepared.runtimeId,
         ...(prepared.modelId ? { modelId: prepared.modelId } : {}),
         prompt: prepared.prompt,
+        ...(prepared.branchSlug ? { branchSlug: prepared.branchSlug } : {}),
         ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}),
         ...(prepared.skillIds.length ? { skillIds: prepared.skillIds } : {}),
         ...(attachmentConsent ? { attachmentConsent } : {}),
@@ -1385,6 +1432,7 @@ async function sendPreparedPrompt(prepared: PreparedPrompt): Promise<void> {
     }
     applySessionMutation(update);
     composer.value = "";
+    composerBranchSlug.value = "";
     composerAttachments.value = [];
     composerContextItems.value = [];
     attachmentReferences.clear();
@@ -2618,7 +2666,14 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
       <div v-if="activeView === 'workspace' && project" slot="toolbar" class="workspace-identity" aria-label="Current project">
         <osx-icon name="folder" :size="15" />
         <span>{{ project.name }}</span>
-        <osx-badge size="small" :label="workspaceBranch" />
+        <template v-if="activeBuildBranch">
+          <span class="workspace-branch-group" :title="`Build branch ${activeBuildBranch}`">
+            <osx-icon name="git-branch" :size="14" />
+            <span class="workspace-branch-label">{{ activeBuildBranch }}</span>
+          </span>
+          <osx-badge size="small" tone="info" label="Build" />
+        </template>
+        <osx-badge v-else size="small" :label="`Source · ${workspaceBranch}`" />
         <osx-badge
           v-if="session?.worktree"
           size="small"
@@ -2839,10 +2894,12 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
           </header>
 
           <osx-alert
-            v-if="state.startupRecovery?.previousUnexpectedExit"
+            v-if="showStartupRecoveryAlert"
             tone="warning"
             title="Recovered after an unexpected exit"
             description="Active approvals, terminal runs, verification, and worktree application were reconciled before this workspace opened. Review retained evidence before continuing unfinished work."
+            dismissible
+            @dismiss="dismissStartupRecoveryAlert"
           />
 
           <osx-alert
@@ -3019,12 +3076,12 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
       </section>
 
       <div v-if="activeView === 'workspace' && project" slot="composer" class="task-composer-shell">
-        <div v-if="latestMessagesHidden" class="task-jump-latest">
-          <osx-tooltip text="Jump to latest" placement="top">
-            <osx-icon-button label="Jump to latest" icon="chevron-down" @click="jumpToLatest" />
-          </osx-tooltip>
-        </div>
         <div :class="['task-composer-frame', { 'is-pending': composerPending }]">
+          <div v-if="latestMessagesHidden" class="task-jump-latest">
+            <osx-tooltip text="Jump to latest" placement="top">
+              <osx-icon-button label="Jump to latest" icon="chevron-down" @click="jumpToLatest" />
+            </osx-tooltip>
+          </div>
           <osx-agent-composer
             :value="composer"
             :placeholder="sessionIsRunning ? 'Steer the agent or queue the next instruction…' : session ? 'Send a follow-up. @ adds files. $ adds skills.' : 'Describe the task. @ adds files. $ adds skills.'"
@@ -3065,6 +3122,18 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                 <option value="redirect">Interrupt and send</option>
               </select>
               <osx-icon name="chevron-down" :size="12" />
+            </label>
+            <label v-if="buildNeedsNewWorktree" slot="controls" class="composer-runtime-control composer-branch-control">
+              <osx-icon name="git-branch" :size="14" />
+              <span class="visually-hidden">Branch slug</span>
+              <input
+                v-model="composerBranchSlug"
+                type="text"
+                aria-label="Branch slug"
+                placeholder="fix/login-bug"
+                spellcheck="false"
+                :disabled="submitting || composerPending"
+              />
             </label>
             <label slot="controls" class="composer-runtime-control">
               <osx-icon name="terminal" :size="14" />

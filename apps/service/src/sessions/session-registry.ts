@@ -42,10 +42,15 @@ function titleFrom(prompt: string): string {
   return firstLine.length > 64 ? `${firstLine.slice(0, 61)}...` : firstLine;
 }
 
+const deferredPersistMs = 250;
+
 export class SessionRegistry {
   readonly file: string;
   private mutations: Promise<void> = Promise.resolve();
   private readonly streamListeners = new Map<string, Set<(update: SessionStreamUpdate) => void>>();
+  private cache: SessionData | null = null;
+  private persistTimer: ReturnType<typeof setTimeout> | undefined;
+  private persistQueue: Promise<void> = Promise.resolve();
 
   constructor(dataDirectory: string) {
     this.file = join(dataDirectory, "sessions.json");
@@ -53,7 +58,7 @@ export class SessionRegistry {
 
   async read(): Promise<SessionData> {
     await this.mutations;
-    return this.readSnapshot();
+    return structuredClone(await this.loadedSnapshot());
   }
 
   subscribe(sessionId: string, listener: (update: SessionStreamUpdate) => void): () => void {
@@ -395,10 +400,23 @@ export class SessionRegistry {
     });
   }
 
-  async begin(sessionId: string): Promise<void> {
+  async begin(sessionId: string, continuation = false): Promise<void> {
     await this.mutate((data) => {
       const session = this.session(data, sessionId);
-      if (session.status === "running") throw new TypeError("This task is already running.");
+      if (session.status === "running") {
+        if (!continuation) throw new TypeError("This task is already running.");
+        session.updatedAt = new Date().toISOString();
+        this.pushEvent(data, session, {
+          kind: "lifecycle",
+          title: "Agent continuing",
+          detail: session.mode === "build"
+            ? "Connecting to the selected runtime for the queued follow-up inside the isolated Build worktree."
+            : "Connecting to the selected runtime for the queued follow-up.",
+          state: "running",
+          actor: "system",
+        });
+        return;
+      }
       session.status = "running";
       session.updatedAt = new Date().toISOString();
       session.settlement = {
@@ -427,7 +445,7 @@ export class SessionRegistry {
       if (session.status !== "running") return;
       this.settleRunningProgress(data, session.id, "complete");
       this.pushEvent(data, session, { kind: "progress", title, detail, state, actor: "system" });
-    });
+    }, { persist: "deferred" });
   }
 
   async activity(
@@ -453,7 +471,7 @@ export class SessionRegistry {
         this.pushEvent(data, session, { kind, title, detail, state, actor: "system" });
       }
       session.updatedAt = new Date().toISOString();
-    });
+    }, { persist: "deferred" });
   }
 
   async verification(sessionId: string, title: string, detail: string, state: "running" | "complete" | "failed" | "interrupted"): Promise<void> {
@@ -469,7 +487,7 @@ export class SessionRegistry {
       const session = this.session(data, sessionId);
       this.pushEvent(data, session, { kind: "telemetry", title, detail, state: "complete", actor: "system" });
       session.updatedAt = new Date().toISOString();
-    });
+    }, { persist: "deferred" });
   }
 
   async lifecycle(sessionId: string, title: string, detail: string, state: "running" | "complete" | "failed" | "interrupted"): Promise<void> {
@@ -509,6 +527,30 @@ export class SessionRegistry {
         reason: detail,
         resumable: false,
       };
+    });
+  }
+
+  /** Records one agent answer while keeping the task running for queued follow-ups. */
+  async completeTurn(sessionId: string, answer: string, detail: string): Promise<void> {
+    await this.mutate((data) => {
+      const session = this.session(data, sessionId);
+      if (session.status !== "running") return;
+      this.settleOpenEvents(data, session.id, "complete");
+      this.pushEvent(data, session, {
+        kind: "message",
+        title: answer,
+        detail: "",
+        state: "complete",
+        actor: "agent",
+      });
+      this.pushEvent(data, session, {
+        kind: "lifecycle",
+        title: "Turn complete",
+        detail,
+        state: "complete",
+        actor: "system",
+      });
+      session.updatedAt = new Date().toISOString();
     });
   }
 
@@ -585,7 +627,7 @@ export class SessionRegistry {
           resumable: true,
         };
       }
-    }, false);
+    }, { persist: "immediate" });
   }
 
   async events(sessionId: string, after = 0): Promise<SessionEventsResponse> {
@@ -786,41 +828,83 @@ export class SessionRegistry {
     }
   }
 
-  private async mutate<T>(change: (data: SessionData) => T, alwaysWrite = true): Promise<T> {
+  private async loadedSnapshot(): Promise<SessionData> {
+    if (this.cache) return this.cache;
+    this.cache = await this.readSnapshot();
+    return this.cache;
+  }
+
+  private scheduleDeferredPersist(): void {
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = undefined;
+      void this.flushDeferredPersist().catch(() => undefined);
+    }, deferredPersistMs);
+    this.persistTimer.unref?.();
+  }
+
+  private async flushDeferredPersist(): Promise<void> {
+    if (!this.cache) return;
+    const snapshot = this.cache;
+    this.persistQueue = this.persistQueue.then(() => this.write(snapshot));
+    await this.persistQueue;
+  }
+
+  private async persistImmediate(data: SessionData): Promise<void> {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = undefined;
+    }
+    this.cache = data;
+    await this.flushDeferredPersist();
+  }
+
+  private publishStreamUpdates(
+    data: SessionData,
+    previousSessions: Map<string, string>,
+    previousEvents: Map<string, string>,
+  ): void {
+    const changedSessionIds = new Set<string>();
+    for (const session of data.sessions) {
+      if (previousSessions.get(session.id) !== JSON.stringify(session)) changedSessionIds.add(session.id);
+    }
+    for (const event of data.events) {
+      if (previousEvents.get(event.id) !== JSON.stringify(event)) changedSessionIds.add(event.sessionId);
+    }
+    for (const sessionId of changedSessionIds) {
+      const session = data.sessions.find((item) => item.id === sessionId);
+      if (!session) continue;
+      const events = data.events
+        .filter((event) => event.sessionId === sessionId && previousEvents.get(event.id) !== JSON.stringify(event))
+        .sort((left, right) => left.sequence - right.sequence);
+      const cursor = data.events.reduce(
+        (highest, event) => event.sessionId === sessionId ? Math.max(highest, event.sequence) : highest,
+        0,
+      );
+      const update: SessionStreamUpdate = { session: structuredClone(session), events: structuredClone(events), cursor };
+      for (const listener of this.streamListeners.get(sessionId) ?? []) {
+        try { listener(update); } catch { /* A disconnected stream cannot fail persisted session state. */ }
+      }
+    }
+  }
+
+  private async mutate<T>(
+    change: (data: SessionData) => T,
+    options: { persist?: "immediate" | "deferred" } = {},
+  ): Promise<T> {
+    const persist = options.persist ?? "immediate";
     let result!: T;
     const mutation = this.mutations.then(async () => {
-      const data = await this.readSnapshot();
-      const before = alwaysWrite ? "" : JSON.stringify(data);
+      const data = structuredClone(await this.loadedSnapshot());
+      const unchangedSnapshot = JSON.stringify(data);
       const previousSessions = new Map(data.sessions.map((session) => [session.id, JSON.stringify(session)]));
       const previousEvents = new Map(data.events.map((event) => [event.id, JSON.stringify(event)]));
       result = change(data);
-      const changed = alwaysWrite || JSON.stringify(data) !== before;
-      if (!changed) return;
-      await this.write(data);
-      const changedSessionIds = new Set<string>();
-      for (const session of data.sessions) {
-        if (previousSessions.get(session.id) !== JSON.stringify(session)) changedSessionIds.add(session.id);
-      }
-      for (const event of data.events) {
-        if (previousEvents.get(event.id) !== JSON.stringify(event)) changedSessionIds.add(event.sessionId);
-      }
-      const notifications = [...changedSessionIds].flatMap((sessionId) => {
-        const session = data.sessions.find((item) => item.id === sessionId);
-        if (!session) return [];
-        const events = data.events
-          .filter((event) => event.sessionId === sessionId && previousEvents.get(event.id) !== JSON.stringify(event))
-          .sort((left, right) => left.sequence - right.sequence);
-        const cursor = data.events.reduce(
-          (highest, event) => event.sessionId === sessionId ? Math.max(highest, event.sequence) : highest,
-          0,
-        );
-        return [{ session: structuredClone(session), events: structuredClone(events), cursor }];
-      });
-      for (const update of notifications) {
-        for (const listener of this.streamListeners.get(update.session.id) ?? []) {
-          try { listener(update); } catch { /* A disconnected stream cannot fail persisted session state. */ }
-        }
-      }
+      if (JSON.stringify(data) === unchangedSnapshot) return;
+      this.cache = data;
+      this.publishStreamUpdates(data, previousSessions, previousEvents);
+      if (persist === "deferred") this.scheduleDeferredPersist();
+      else await this.persistImmediate(data);
     });
     this.mutations = mutation.catch(() => undefined);
     await mutation;
