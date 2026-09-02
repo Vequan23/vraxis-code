@@ -243,6 +243,55 @@ test("registers and reopens a project with indexed files", async (context) => {
   assert.deepEqual(state.files, [{ path: "src/index.ts" }]);
 });
 
+test("serves staged bootstrap scopes and caches local runtime discovery", async (context) => {
+  let discoveries = 0;
+  const app = await fixture(undefined, new DeterministicCodingRuntimeEngine(), {
+    discover: async () => {
+      discoveries += 1;
+      return [{
+        id: "codex",
+        name: "Codex",
+        availability: "installed",
+        detail: "Available",
+        acceptsCustomModel: true,
+        models: [],
+        kind: "local-cli",
+        authentication: "authenticated",
+        authenticationDetail: "Ready",
+        checkedAt: new Date().toISOString(),
+        modelDiscovery: "automatic",
+        update: { status: "unknown", detail: "Ready" },
+        maintenanceActions: [],
+      }];
+    },
+  });
+  context.after(() => app.close());
+  await fetch(`${app.baseUrl}/api/projects`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path: app.project }),
+  });
+  const shell = await (await fetch(`${app.baseUrl}/api/bootstrap?scope=shell`)).json() as {
+    projects: unknown[];
+    runtimes: unknown[];
+    files: unknown[];
+    skills: unknown[];
+  };
+  assert.equal(shell.projects.length, 1);
+  assert.deepEqual(shell.runtimes, []);
+  assert.deepEqual(shell.files, []);
+  assert.deepEqual(shell.skills, []);
+  const catalog = await (await fetch(`${app.baseUrl}/api/bootstrap?scope=catalog`)).json() as {
+    runtimes: Array<{ id: string }>;
+    skills: unknown[];
+  };
+  assert.equal(catalog.runtimes[0]?.id, "codex");
+  assert.ok(catalog.skills.length >= 0);
+  assert.equal(discoveries, 1);
+  await fetch(`${app.baseUrl}/api/bootstrap?scope=catalog`);
+  assert.equal(discoveries, 1);
+});
+
 test("previews text files inside the approved project and rejects escaping symlinks", async (context) => {
   const app = await fixture();
   context.after(() => app.close());

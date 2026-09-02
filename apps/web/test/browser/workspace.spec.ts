@@ -413,14 +413,14 @@ test("switches projects immediately from cache while workspace data revalidates"
 
   await selectProject("Beta");
   await expect(page.getByRole("heading", { name: "Beta task" })).toBeVisible();
-  await expect(page.getByText("Loading workspace", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("status", { name: "Loading workspace" })).toHaveCount(0);
   pendingSelections.shift()!();
   await expect(page.getByText("Beta retained context", { exact: true })).toBeVisible();
 
   await selectProject("Alpha");
   await expect(page.getByRole("heading", { name: "Alpha task" })).toBeVisible();
   await expect(page.getByText("Alpha retained context", { exact: true })).toBeVisible();
-  await expect(page.getByText("Loading workspace", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("status", { name: "Loading workspace" })).toHaveCount(0);
   pendingSelections.shift()!();
   await expectBasicAccessibility(page);
   expect(browserErrors).toEqual([]);
@@ -941,7 +941,7 @@ test("turns discovered project checks into approved, retained verification proof
   await expect.poll(() => rerunRequests).toBe(1);
   await expect(page.getByText("Verify · Project check", { exact: true })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("verified-delivery-loop.png"), fullPage: true });
-  expect(bootstrapRequests).toBe(1);
+  expect(bootstrapRequests).toBe(3);
   expect(browserErrors).toEqual([]);
 });
 
@@ -1421,7 +1421,7 @@ test("runs the selected mode and model without reloading the workspace", async (
   await expectTaskPaneAtBottom(page);
   expect(submittedMode).toBe("plan");
   expect(session.modelId).toBe("gpt-5.6-terra");
-  expect(bootstrapRequests).toBe(1);
+  expect(bootstrapRequests).toBe(3);
   expect(submittedAttachments).toHaveLength(2);
   expect(submittedAttachments.map((item) => item.name)).toEqual(["index.ts", "index.ts"]);
   expect(new Set(submittedAttachments.map((item) => item.id)).size).toBe(2);
@@ -1781,7 +1781,7 @@ test("starts Build in an isolated worktree and opens a closable exact diff", asy
   await expect(page.getByText("vraxis/refine-health-check-87654321", { exact: true })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Message to agent" })).toBeEnabled();
   await page.screenshot({ path: testInfo.outputPath("applied-build.png"), fullPage: true });
-  expect(bootstrapRequests).toBe(1);
+  expect(bootstrapRequests).toBe(3);
   expect(browserErrors).toEqual([]);
 });
 
@@ -1924,7 +1924,7 @@ test("submits a scheme-less browser address with Enter without reloading the wor
   await page.getByRole("button", { name: "Export replay" }).click();
   expect((await replayDownload).suggestedFilename()).toMatch(/browser-replay\.html$/);
   await page.screenshot({ path: testInfo.outputPath("approval-browser-terminal.png"), fullPage: true });
-  expect(bootstrapRequests).toBe(1);
+  expect(bootstrapRequests).toBe(3);
   expect(browserErrors).toEqual([]);
 });
 

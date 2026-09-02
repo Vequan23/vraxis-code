@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Vraxis Code</title>
+  <defs>
+    <linearGradient id="background" x1="48" y1="24" x2="464" y2="488" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#17283A"/>
+      <stop offset="1" stop-color="#08111B"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="116" fill="url(#background)"/>
+  <g transform="translate(74 70) scale(.71)">
+    <path d="M68 94H156L256 282L356 94H444L300 432H212L68 94Z" fill="#173A64"/>
+    <path d="M228 78L256 48L284 78V432L256 464L228 432V78Z" fill="#1687F8"/>
+    <path d="M90 122H148L242 290C255 313 264 337 265 362L266 406C252 386 238 368 220 354C199 338 183 320 170 296L90 122Z" fill="#42D9F0"/>
+    <path d="M422 122H364L270 290C257 313 248 337 247 362L246 406C260 386 274 368 292 354C313 338 329 320 342 296L422 122Z" fill="#1AD592"/>
+  </g>
+</svg>

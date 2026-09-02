@@ -1,4 +1,4 @@
-export const contractVersion = 28 as const;
+export const contractVersion = 29 as const;
 
 export const sessionModes = ["ask", "plan", "build", "review"] as const;
 export type SessionMode = (typeof sessionModes)[number];
@@ -772,6 +772,14 @@ export interface StartupRecoverySummary {
   previousUnexpectedExit: boolean;
   previousStartedAt?: string;
   checkedAt: string;
+}
+
+export const bootstrapScopes = ["shell", "workspace", "catalog", "full"] as const;
+export type BootstrapScope = (typeof bootstrapScopes)[number];
+
+export function parseBootstrapScope(value: string | null | undefined): BootstrapScope {
+  if (value === "shell" || value === "workspace" || value === "catalog") return value;
+  return "full";
 }
 
 export interface BootstrapState {

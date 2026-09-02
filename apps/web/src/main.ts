@@ -8,3 +8,6 @@ import "./styles.css";
 installCsrfFetch();
 registerOsxComponents();
 createApp(App).mount("#app");
+requestAnimationFrame(() => {
+  document.getElementById("boot-splash")?.remove();
+});

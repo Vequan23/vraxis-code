@@ -61,6 +61,7 @@ import TeamPolicySettings from "./settings/TeamPolicySettings.vue";
 import SupportDiagnostics from "./settings/SupportDiagnostics.vue";
 import FirstRunJourney from "./onboarding/FirstRunJourney.vue";
 import TerminalWorkbench from "./terminal/TerminalWorkbench.vue";
+import WorkspaceSplash from "./workspace/WorkspaceSplash.vue";
 import type { FirstRunActionId } from "./onboarding/first-run-readiness.js";
 import { highlightCode } from "./workspace/syntax-highlight.js";
 import { normalizeMode, selectedProject, selectedSession } from "./workspace/workspace-state.js";
@@ -667,6 +668,40 @@ function finishBackgroundRefresh(): void {
   workspaceRefreshing.value = false;
 }
 
+async function fetchBootstrap(scope: "shell" | "workspace" | "catalog" | "full", signal: AbortSignal): Promise<Partial<BootstrapState>> {
+  const response = await fetch(`/api/bootstrap?scope=${scope}`, { signal });
+  if (!response.ok) throw new Error("The local service did not respond.");
+  return await response.json() as Partial<BootstrapState>;
+}
+
+function applyBootstrapPatch(next: Partial<BootstrapState>): void {
+  const patch: Partial<BootstrapState> = {
+    ...next,
+    approvals: next.approvals ?? [],
+    approvalRules: next.approvalRules ?? [],
+    terminalRuns: next.terminalRuns ?? [],
+    verificationRuns: next.verificationRuns ?? [],
+  };
+  if ("selectedSessionId" in patch && !patch.selectedSessionId) delete state.selectedSessionId;
+  if ("browser" in patch) {
+    if (patch.browser) state.browser = patch.browser;
+    else delete state.browser;
+    delete patch.browser;
+  }
+  if ("selectedSessionId" in patch && !patch.selectedSessionId) delete patch.selectedSessionId;
+  Object.assign(state, patch);
+}
+
+function syncBootstrapSelection(projectChanged: boolean): void {
+  if (state.browser?.url) syncBrowserAddress(state.browser.url);
+  const nextSession = state.sessions.find((item) => item.id === state.selectedSessionId);
+  mode.value = modeForSession(nextSession, state.settings.defaultMode);
+  syncTaskSelection();
+  if (projectChanged) firstRunJourneyClosed.value = false;
+  if (projectChanged || (selectedFile.value && !state.files.some((file) => file.path === selectedFile.value))) closeFilePreview();
+  if (projectChanged || (selectedChange.value && !state.changes.some((file) => file.path === selectedChange.value))) closeChangeDiff();
+}
+
 async function loadState(options: { blocking?: boolean } = {}): Promise<void> {
   if (previewMode) return;
   const blocking = options.blocking ?? !hydrated;
@@ -679,26 +714,30 @@ async function loadState(options: { blocking?: boolean } = {}): Promise<void> {
     loadError.value = "";
   } else beginBackgroundRefresh();
   try {
-    const response = await fetch("/api/bootstrap", { signal: controller.signal });
-    if (!response.ok) throw new Error("The local service did not respond.");
-    const next = await response.json() as BootstrapState;
+    const staged = blocking && !hydrated;
+    const shell = await fetchBootstrap(staged ? "shell" : "full", controller.signal);
     if (requestVersion !== bootstrapRequestVersion) return;
-    next.approvals ??= [];
-    next.approvalRules ??= [];
-    next.terminalRuns ??= [];
-    next.verificationRuns ??= [];
-    const projectChanged = state.selectedProjectId !== next.selectedProjectId;
-    if (!next.selectedSessionId) delete state.selectedSessionId;
-    if (!next.browser) delete state.browser;
-    Object.assign(state, next);
-    if (next.browser?.url) syncBrowserAddress(next.browser.url);
+    const projectChanged = state.selectedProjectId !== shell.selectedProjectId;
+    applyBootstrapPatch(shell);
     serviceOnline.value = true;
-    const nextSession = next.sessions.find((item) => item.id === next.selectedSessionId);
-    mode.value = modeForSession(nextSession, next.settings.defaultMode);
-    syncTaskSelection();
-    if (projectChanged) firstRunJourneyClosed.value = false;
-    if (projectChanged || (selectedFile.value && !next.files.some((file) => file.path === selectedFile.value))) closeFilePreview();
-    if (projectChanged || (selectedChange.value && !next.changes.some((file) => file.path === selectedChange.value))) closeChangeDiff();
+    syncBootstrapSelection(projectChanged);
+    if (staged) {
+      hydrated = true;
+      loading.value = false;
+      cacheCurrentWorkspace();
+      scheduleRunPoll();
+      const [workspace, catalog] = await Promise.all([
+        fetchBootstrap("workspace", controller.signal),
+        fetchBootstrap("catalog", controller.signal),
+      ]);
+      if (requestVersion !== bootstrapRequestVersion) return;
+      applyBootstrapPatch(workspace);
+      applyBootstrapPatch(catalog);
+      syncBootstrapSelection(false);
+      cacheCurrentWorkspace();
+      scheduleRunPoll();
+      return;
+    }
     hydrated = true;
     cacheCurrentWorkspace();
     scheduleRunPoll();
@@ -2768,7 +2807,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
         </div>
 
         <div v-else-if="loading" class="center-state">
-          <osx-spinner label="Loading workspace" show-label />
+          <WorkspaceSplash />
         </div>
 
         <div v-else-if="loadError" class="center-state">

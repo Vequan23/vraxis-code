@@ -44,6 +44,7 @@ import {
   type ProjectFolderPicker,
 } from "../projects/system-directory-picker.js";
 import { discoverRuntimes } from "../runtimes/runtime-discovery.js";
+import { RuntimeDiscoveryCache, backgroundDiscoveryTimeoutMs } from "../runtimes/runtime-discovery-cache.js";
 import { withProductCapabilityMatrix } from "../runtimes/runtime-capabilities.js";
 import { RuntimeConformanceRegistry } from "../runtimes/runtime-conformance.js";
 import { SessionRegistry } from "../sessions/session-registry.js";
@@ -76,6 +77,7 @@ import { TeamPolicyRegistry } from "../team-policy/team-policy-registry.js";
 import { createSupportBundle } from "../diagnostics/support-bundle.js";
 import { redactTaskReceipt } from "../receipts/portable-redaction.js";
 import { DesktopSession } from "./desktop-session.js";
+import { buildBootstrapState, parseBootstrapScope, resolveBootstrapContext } from "./bootstrap-state.js";
 
 const loopbackHosts = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const contentTypes: Record<string, string> = {
@@ -91,6 +93,7 @@ export interface AppOptions {
   publicDirectory?: string;
   desktopToken?: string;
   discover?: typeof discoverRuntimes;
+  runtimeDiscoveryCache?: RuntimeDiscoveryCache;
   folderPicker?: ProjectFolderPicker;
   runtimeEngine?: CodingRuntimeEngine;
   runtimeProbeEngine?: Pick<CodingRuntimeEngine, "probe">;
@@ -270,11 +273,13 @@ export function createApp(options: AppOptions) {
   );
   const recovery = storageRecovery.then(() => execution.reconcile());
   const discover = options.discover ?? discoverRuntimes;
+  const runtimeDiscoveryCache = options.runtimeDiscoveryCache ?? new RuntimeDiscoveryCache(options.dataDirectory, discover);
+  void runtimeDiscoveryCache.start();
   const runtimeConformance = new RuntimeConformanceRegistry(
     options.dataDirectory,
     options.runtimeProbeEngine ?? new LocalCliRuntimeEngine(),
   );
-  const discoverLocalRuntimes = async () => runtimeConformance.decorate(await discover());
+  const discoverLocalRuntimes = async () => runtimeConformance.decorate(await runtimeDiscoveryCache.get());
   const folderPicker = options.folderPicker ?? pickProjectFolderWithSystemDialog;
 
   async function validateAttachmentFiles(
@@ -292,7 +297,7 @@ export function createApp(options: AppOptions) {
   }
 
   async function validateBuildRuntime(runtimeId: string): Promise<void> {
-    const runtime = [...await discover(), ...await modelProviders.runtimes()].find((item) => item.id === runtimeId);
+    const runtime = [...await discoverLocalRuntimes(), ...await modelProviders.runtimes()].find((item) => item.id === runtimeId);
     if (!runtime?.capabilities?.includes("workspace-write")) {
       throw new TypeError("Choose a runtime that supports guarded isolated-workspace writes for Build mode.");
     }
@@ -725,83 +730,22 @@ export function createApp(options: AppOptions) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/bootstrap") {
-        const [data, sessionData] = await Promise.all([registry.read(), sessions.read()]);
-        const selected = data.projects.find((project) => project.id === data.selectedProjectId);
-        const selectedSession = sessionData.draftProjectId === selected?.id
-          ? undefined
-          : sessionData.sessions.find((session) => session.id === sessionData.selectedSessionId && session.projectId === selected?.id)
-            ?? sessionData.sessions.find((session) => session.projectId === selected?.id);
-        const projectDoctorPromise = selected ? safeProjectDoctor(selected.id, selected.path) : Promise.resolve(undefined);
-        let files: BootstrapState["files"] = [];
-        let changes: BootstrapState["changes"] = [];
-        if (selectedSession?.worktree) {
-          try {
-            const evidence = await worktrees.evidence(selectedSession.worktree);
-            files = evidence.files;
-            changes = evidence.changes;
-          } catch {
-            selectedSession.worktree.status = "missing";
-            files = [];
-          }
-        } else if (selected) files = await indexProjectFiles(selected.path);
-        const [
-          localRuntimes,
-          providerRuntimes,
-          providerSummaries,
-          mcpServerSummaries,
-          projectSkills,
-          browserState,
-          projectDoctor,
-          sessionApprovals,
-          projectApprovalRules,
-          sessionTerminalRuns,
-          sessionVerificationRuns,
-          sessionVerificationHandoffs,
-          userSettings,
-        ] = await Promise.all([
-          discoverLocalRuntimes(),
-          modelProviders.runtimes(),
-          modelProviders.summaries(),
-          mcpServers.summaries(),
-          selected ? skills.summaries(selected.path) : Promise.resolve([]),
-          selectedSession ? browser.state(selectedSession.id) : Promise.resolve(undefined),
-          projectDoctorPromise,
-          selectedSession ? approvals.list(selectedSession.id) : Promise.resolve([]),
-          selected ? approvals.listRules(selected.id, selectedSession?.id) : Promise.resolve([]),
-          selectedSession ? terminal.list(selectedSession.id) : Promise.resolve([]),
-          selectedSession ? verifications.list(selectedSession.id) : Promise.resolve([]),
-          selectedSession ? verifications.listHandoffs(selectedSession.id) : Promise.resolve([]),
-          settings.read(),
-        ]);
-        const state: BootstrapState = {
-          contractVersion,
-          realtime: {
-            sessionEvents: true,
-            terminalOutput: true,
-            reconnectSnapshots: true,
-          },
-          projects: data.projects,
-          sessions: sessionData.sessions,
-          runtimes: withProductCapabilityMatrix([...localRuntimes, ...providerRuntimes]),
-          modelProviders: providerSummaries,
-          mcpServers: mcpServerSummaries,
-          skills: projectSkills,
-          ...(selected ? { selectedProjectId: selected.id } : {}),
-          ...(selectedSession ? { selectedSessionId: selectedSession.id } : {}),
-          files,
-          changes,
-          events: selectedSession ? sessionData.events.filter((event) => event.sessionId === selectedSession.id) : [],
-          approvals: sessionApprovals,
-          approvalRules: projectApprovalRules,
-          terminalRuns: sessionTerminalRuns,
-          ...(projectDoctor ? { projectDoctor } : {}),
-          verificationRuns: sessionVerificationRuns,
-          verificationHandoffs: sessionVerificationHandoffs,
-          ...(browserState ? { browser: browserState } : {}),
+        const scope = parseBootstrapScope(url.searchParams.get("scope"));
+        const ctx = await resolveBootstrapContext(registry, sessions);
+        json(response, 200, await buildBootstrapState(scope, ctx, {
+          settings,
+          worktrees,
+          discoverLocalRuntimes,
+          modelProviders,
+          mcpServers,
+          skills,
+          browser,
+          approvals,
+          terminal,
+          verifications,
+          safeProjectDoctor,
           ...(options.startupRecovery ? { startupRecovery: options.startupRecovery } : {}),
-          settings: userSettings,
-        };
-        json(response, 200, state);
+        }));
         return;
       }
 
@@ -826,7 +770,15 @@ export function createApp(options: AppOptions) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/runtimes/refresh") {
-        json(response, 200, { runtimes: withProductCapabilityMatrix(await discoverLocalRuntimes()) });
+        json(response, 200, {
+          runtimes: withProductCapabilityMatrix([
+            ...await runtimeConformance.decorate(await runtimeDiscoveryCache.refresh({
+              force: true,
+              timeoutMs: backgroundDiscoveryTimeoutMs,
+            })),
+            ...await modelProviders.runtimes(),
+          ]),
+        });
         return;
       }
 
@@ -1971,6 +1923,9 @@ export function createApp(options: AppOptions) {
   return Object.assign(app, {
     close: async () => {
       await Promise.all([browser.close(), terminal.close()]);
+    },
+    warmupDiscovery: () => {
+      runtimeDiscoveryCache.refreshInBackground();
     },
   });
 }
