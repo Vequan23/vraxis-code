@@ -14,6 +14,7 @@ import { modeAgentProfile, type PromptAttachment, type SessionSummary, type Work
 import type { AttachmentStore } from "../attachments/attachment-store.js";
 import type { ResolvedSkill } from "../skills/skill-registry.js";
 import type { BrowserWorkspace } from "../browser/browser-workspace.js";
+import { activeRuntimeSkillNames, attachedSkillsJsonMetadata, modeRuntimeReceipt } from "../runtimes/mode-agent-runtime.js";
 import { BUILD_GIT_POLICY_INSTRUCTION, buildWorktreeInstructionBlock, summarizeWorktreeForEvidence, worktreeRuntimeMetadata } from "./build-workspace-context.js";
 import { SessionRegistry, type PendingSteeringInput } from "./session-registry.js";
 
@@ -263,11 +264,18 @@ export class AgentExecutionCoordinator {
     let completed = false;
     try {
       const conversation = await this.sessions.conversationBeforeLatestUser(session.id, instructionEventId);
+      const harnessSkills = activeRuntimeSkillNames(session.mode, skills);
+      await this.sessions.progress(
+        session.id,
+        "Harness skills",
+        `${modeRuntimeReceipt(session.mode)} ${harnessSkills.join(", ")}`,
+        "complete",
+      );
       if (skills.length) {
         await this.sessions.progress(
           session.id,
-          skills.length === 1 ? "Skill attached" : `${skills.length} skills attached`,
-          skills.map((item) => item.reference.name).join(", "),
+          skills.length === 1 ? "Attached skill" : "Attached skills",
+          skills.map((item) => `${item.reference.name} (${item.reference.version})`).join(", "),
           "complete",
         );
       }
@@ -293,6 +301,7 @@ export class AgentExecutionCoordinator {
         metadata: {
           mode: session.mode,
           ...(session.worktree ? { worktree: worktreeRuntimeMetadata(session.worktree) } : {}),
+          ...(skills.length ? { attachedSkills: attachedSkillsJsonMetadata(skills) } : {}),
         },
         trajectory: {
           originalTask: conversation.find((message) => message.actor === "user")?.text ?? prompt,

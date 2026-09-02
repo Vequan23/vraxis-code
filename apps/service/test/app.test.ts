@@ -947,7 +947,8 @@ test("executes an Ask task and restores its ordered agent-v events", async (cont
   assert.equal(sessionResponse.status, 201);
   const state = await waitForIdle(app.baseUrl);
   assert.equal(state.sessions.length, 1);
-  assert.deepEqual(state.events.map((event) => event.sequence), [1, 2, 3, 4, 5, 6, 7]);
+  assert.deepEqual(state.events.map((event) => event.sequence), [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.ok(state.events.some((event) => event.kind === "progress" && event.title === "Harness skills"));
   assert.deepEqual(state.events.filter((event) => event.actor === "agent").map((event) => event.title), [
     "The entry point is `src/index.ts`.",
   ]);
@@ -963,9 +964,9 @@ test("executes an Ask task and restores its ordered agent-v events", async (cont
   }]);
   assert.equal(runtime.requests[0]?.input.artifacts?.[0]?.content, undefined);
   assert.deepEqual(state.events.find((event) => event.actor === "user")?.attachments, [{ path: "src/index.ts", id: "project-file:src/index.ts", name: "index.ts" }]);
-  const replay = await fetch(`${app.baseUrl}/api/sessions/${state.sessions[0]?.id}/events?after=5`);
+  const replay = await fetch(`${app.baseUrl}/api/sessions/${state.sessions[0]?.id}/events?after=6`);
   const replayed = await replay.json() as { events: Array<{ sequence: number }> };
-  assert.deepEqual(replayed.events.map((event) => event.sequence), [6, 7]);
+  assert.deepEqual(replayed.events.map((event) => event.sequence), [7, 8]);
 
   const followUp = await fetch(`${app.baseUrl}/api/sessions/${state.sessions[0]?.id}/messages`, {
     method: "POST",

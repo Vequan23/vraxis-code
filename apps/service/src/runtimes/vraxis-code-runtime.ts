@@ -16,6 +16,11 @@ import type { McpConnectionAuthorizer } from "@vraxis/agent-v/mcp";
 import { LocalCliRuntimeEngine, builtInRuntimes } from "@vraxis/agent-v/local-cli";
 import { type ModelProviderId } from "@vraxis/agent-v/providers";
 import { createAgentRuntime } from "@vraxis/agent-v/runtime";
+import {
+  attachedSkillsFromMetadata,
+  modeRuntimeSelection,
+  runtimeAgentSkillsFromMetadata,
+} from "./mode-agent-runtime.js";
 import { createBrowserTools, createPureTools, type BrowserController } from "@vraxis/agent-v/tools";
 import { createWorkspaceTools } from "@vraxis/agent-v/tools/node";
 import { modeAgentProfile, sessionModes, type SessionMode, type WorktreeSummary } from "@vraxis/code-contracts";
@@ -157,6 +162,9 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
       });
     const tools = uniqueTools(request.tools ?? [], this.modeWorkspaceTools(workspaceTools, mode), productTools);
     const worktree = worktreeFromRuntimeMetadata(request.metadata?.worktree);
+    const attachedSkills = attachedSkillsFromMetadata(request.metadata?.attachedSkills);
+    const runtimeSkills = runtimeAgentSkillsFromMetadata(mode, attachedSkills);
+    const { recipe, extraSkillIds } = modeRuntimeSelection(mode);
     const runtime = createAgentRuntime({
       execution: {
         type: "provider",
@@ -176,11 +184,13 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
         instructions: request.workspaceAccess === "workspace-write"
           ? builderInstructions(worktree)
           : "Inspect only the approved repository and browser evidence. Use read tools for evidence and never claim files you did not inspect.",
+        recipe,
+        skills: extraSkillIds,
         tools: tools.map((tool) => tool.name),
         requiredCapabilities: ["tools", "streaming"],
-        maxSteps: 24,
       },
       tools,
+      skills: runtimeSkills,
       ...(events ? { events } : {}),
     });
     const scope = {

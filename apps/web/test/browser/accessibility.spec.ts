@@ -23,7 +23,7 @@ test("meets automated WCAG checks in the empty workspace", async ({ page }) => {
 test("meets automated WCAG checks in the active project workspace", async ({ page }) => {
   await page.goto("/?preview=project");
   await expect(page.getByRole("textbox", { name: "Message to agent" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Verify", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Verify", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Understand", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Download proof", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Signed JSON", exact: true })).toHaveCount(0);

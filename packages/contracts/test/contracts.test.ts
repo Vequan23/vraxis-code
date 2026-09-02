@@ -24,6 +24,9 @@ test("publishes safe mode-specific default agent profiles", () => {
   assert.deepEqual(Object.keys(modeAgentProfiles), ["ask", "plan", "build", "review"]);
   assert.equal(modeAgentProfile("plan").access, "read-only");
   assert.ok(modeAgentProfile("plan").skillNames.includes("Project architecture"));
+  assert.ok(modeAgentProfile("ask").skillNames.includes("Web research"));
+  assert.ok(modeAgentProfile("plan").skillNames.includes("Web research"));
+  assert.ok(modeAgentProfile("build").skillNames.includes("Workspace files"));
   assert.ok(!modeAgentProfile("plan").toolIds.includes("create-text"));
   assert.equal(modeAgentProfile("build").access, "isolated-worktree");
   assert.ok(modeAgentProfile("ask").toolIds.includes("evidence-status"));

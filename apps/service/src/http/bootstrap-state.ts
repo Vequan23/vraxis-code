@@ -96,7 +96,12 @@ export async function resolveBootstrapContext(
     ? undefined
     : sessionData.sessions.find((session) => session.id === sessionData.selectedSessionId && session.projectId === selected?.id)
       ?? sessionData.sessions.find((session) => session.projectId === selected?.id);
-  return { data, sessionData, selected, selectedSession };
+  return {
+    data,
+    sessionData,
+    ...(selected ? { selected } : {}),
+    ...(selectedSession ? { selectedSession } : {}),
+  };
 }
 
 async function loadWorkspaceFiles(

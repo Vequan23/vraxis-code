@@ -19,7 +19,6 @@ import {
   parseRegisterProjectRequest,
   parseUpdateSettingsRequest,
   parseUpdateMcpServerProjectsRequest,
-  type BootstrapState,
   type AttachmentHandoffConsent,
   type ApprovalSummary,
   type PromptAttachment,

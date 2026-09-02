@@ -168,6 +168,7 @@ const receiptExporting = ref<"html" | "json" | "">("");
 const browserReplayExporting = ref(false);
 const firstRunJourneyClosed = ref(false);
 let runPollTimer: ReturnType<typeof setTimeout> | undefined;
+let verificationRefreshTimer: ReturnType<typeof setInterval> | undefined;
 let taskStream: EventSource | undefined;
 let taskStreamSessionId = "";
 let taskStreamConnected = false;
@@ -374,7 +375,36 @@ const verificationRuns = computed(() => state.verificationRuns ?? []);
 const verificationHandoffs = computed(() => state.verificationHandoffs ?? []);
 const pendingVerificationHandoff = computed(() => verificationHandoffs.value.find((item) => item.state === "requested"));
 const latestVerification = computed(() => verificationRuns.value[0]);
-const verificationIsActive = computed(() => latestVerification.value?.state === "ready" || latestVerification.value?.state === "running");
+const verificationInProgress = computed(() => Boolean(latestVerification.value
+  && ["ready", "running", "needs-browser"].includes(latestVerification.value.state)));
+const verificationIsActive = computed(() => latestVerification.value?.state === "ready"
+  || latestVerification.value?.state === "running");
+const verificationAwaitingStep = computed(() => {
+  const run = latestVerification.value;
+  if (!run) return undefined;
+  const check = run.checks.find((item) => item.state === "awaiting-approval" || item.state === "running");
+  if (check) return { kind: "check" as const, step: check };
+  const service = run.services.find((item) => item.state === "awaiting-approval" || item.state === "starting");
+  if (service) return { kind: "service" as const, step: service };
+  return undefined;
+});
+const verificationPendingApproval = computed(() => {
+  const approvalId = verificationAwaitingStep.value?.step.approvalId;
+  if (!approvalId) return undefined;
+  return state.approvals.find((item) => item.id === approvalId && item.state === "pending");
+});
+const verificationProgressLabel = computed(() => {
+  if (verificationPendingApproval.value) return "Waiting for approval";
+  const current = verificationAwaitingStep.value;
+  if (current?.kind === "check" && current.step.state === "running") return `Running ${current.step.title}`;
+  if (current?.kind === "service" && current.step.state === "starting") {
+    return `Starting ${current.step.title}`;
+  }
+  if (latestVerification.value?.state === "needs-browser") return "Browser proof needed";
+  if (latestVerification.value?.state === "ready") return "Preparing checks";
+  if (verificationIsActive.value) return "Checks running";
+  return "";
+});
 const verificationCanStop = computed(() => Boolean(latestVerification.value
   && ["ready", "running", "needs-browser"].includes(latestVerification.value.state)));
 const verificationHasRecipe = computed(() => Boolean(
@@ -395,6 +425,32 @@ const browserMatchesVerificationTarget = computed(() => {
   } catch {
     return state.browser.url === verificationBrowserTarget.value;
   }
+});
+const verificationViewingWrongPage = computed(() => Boolean(
+  verificationBrowserTarget.value && state.browser?.url && !browserMatchesVerificationTarget.value,
+));
+const verificationStudioTitle = computed(() => (
+  verificationViewingWrongPage.value ? "Verification" : "Verify this page"
+));
+const verificationStudioBadge = computed(() => {
+  if (verificationViewingWrongPage.value) return { label: "Wrong page", tone: "warning" as const };
+  if (latestVerification.value) {
+    return { label: verificationLabel(latestVerification.value), tone: verificationTone(latestVerification.value) };
+  }
+  return { label: "Ready", tone: "neutral" as const };
+});
+const verificationStudioFailure = computed(() => {
+  const run = latestVerification.value;
+  if (!run || run.state !== "failed") return "";
+  return verificationFailureSummary(run);
+});
+const browserUsesLiveSurface = computed(() => desktopBrowserAvailable
+  && Boolean(session.value)
+  && (!state.browser || browserIsLive.value));
+const browserControlSelectionHint = computed(() => {
+  if (!browserIsLive.value) return "Restore the browser before acting on retained controls.";
+  if (browserUsesLiveSurface.value) return "Select a control from the list below.";
+  return "Select a control here or directly on the page.";
 });
 const verificationSteps = computed<OsxPlanStep[]>(() => {
   const services = latestVerification.value?.services ?? state.projectDoctor?.verificationServices ?? [];
@@ -445,7 +501,7 @@ const taskTerminalRuns = computed(() => state.terminalRuns.filter((run) => run.p
 const liveEvidenceActive = computed(() => pendingApprovals.value.length > 0
   || state.approvals.some((item) => item.state === "executing")
   || state.terminalRuns.some((item) => item.status === "pending" || item.status === "running")
-  || verificationIsActive.value);
+  || verificationInProgress.value);
 const browserScreenshot = computed(() => state.browser?.url && state.browser?.screenshotVersion
   ? `/api/browser/${state.browser.sessionId}/screenshot?v=${state.browser.screenshotVersion}`
   : "");
@@ -590,6 +646,7 @@ const inspectorOptions = [
   { value: "changes" as const, label: "Changes", icon: "git-branch" as const },
   { value: "terminal" as const, label: "Terminal", icon: "terminal" as const },
   { value: "browser" as const, label: "Browser", icon: "eye" as const },
+  { value: "verify" as const, label: "Verify", icon: "list-checks" as const },
 ];
 const inspectorUsesTab = computed(() => inspectorOptions.some((item) => item.value === inspector.value));
 function syncTaskSelection(): void {
@@ -812,6 +869,7 @@ function attachmentSizeLabel(size = 0): string {
 function chooseInspectorView(view: InspectorView): void {
   inspector.value = view;
   if (view === "terminal") void ensureUserTerminal();
+  if (view === "verify" && !state.projectDoctor && project.value) void refreshProjectDoctor();
 }
 
 function handleWorkspaceShortcut(event: KeyboardEvent): void {
@@ -840,6 +898,25 @@ function handleWorkspaceShortcut(event: KeyboardEvent): void {
   }
 }
 
+function clearVerificationRefresh(): void {
+  if (verificationRefreshTimer) clearInterval(verificationRefreshTimer);
+  verificationRefreshTimer = undefined;
+}
+
+function scheduleVerificationRefresh(active: boolean): void {
+  clearVerificationRefresh();
+  if (!active || previewMode || !session.value) return;
+  verificationRefreshTimer = setInterval(() => {
+    if (!session.value) return;
+    void refreshLiveEvidence(session.value.id).catch(() => undefined);
+  }, 2_000);
+}
+
+async function focusVerificationApproval(): Promise<void> {
+  await nextTick();
+  document.querySelector<HTMLElement>(".verification-approval")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
 function verificationLabel(run: VerificationRunSummary): string {
   if (run.state === "needs-browser") return "Browser proof needed";
   if (run.state === "passed") return "Passed";
@@ -853,6 +930,15 @@ function verificationTone(run: VerificationRunSummary): "neutral" | "info" | "su
   if (run.state === "failed") return "error";
   if (run.state === "needs-browser" || run.state === "interrupted") return "warning";
   return run.state === "running" ? "info" : "neutral";
+}
+
+function verificationFailureSummary(run: VerificationRunSummary): string {
+  return run.services.find((item) => item.state === "failed")?.failure
+    ?? run.checks.find((item) => item.state === "failed")?.failure
+    ?? run.browserAssertions?.find((item) => item.state === "failed")?.failure
+    ?? run.visual?.failure
+    ?? run.browserFailure
+    ?? "Open the related terminal receipt for details.";
 }
 
 function approvalDescription(approval: ApprovalSummary): string {
@@ -1568,7 +1654,7 @@ async function refreshProjectDoctor(): Promise<void> {
 }
 
 async function startVerification(handoffId = pendingVerificationHandoff.value?.id): Promise<void> {
-  if (!session.value || verificationIsActive.value || !verificationHasRecipe.value) return;
+  if (!session.value || verificationInProgress.value || !verificationHasRecipe.value) return;
   verificationAction.value = "start";
   taskError.value = "";
   try {
@@ -1587,6 +1673,7 @@ async function startVerification(handoffId = pendingVerificationHandoff.value?.i
     if (result.approval && !state.approvals.some((item) => item.id === result.approval!.id)) state.approvals.unshift(result.approval);
     inspector.value = "verify";
     scheduleRunPoll(true);
+    if (result.approval?.state === "pending") await focusVerificationApproval();
   } catch (error) {
     taskError.value = error instanceof Error ? error.message : "Verification could not be started.";
   } finally {
@@ -2622,6 +2709,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   activityPresenter.dispose();
   clearRunPoll();
+  clearVerificationRefresh();
   closeTaskStream();
   bootstrapAbortController?.abort();
   if (workspaceRefreshTimer) clearTimeout(workspaceRefreshTimer);
@@ -2644,6 +2732,11 @@ watch([browserLiveSurface, desktopBrowserVisible, () => session.value?.id, brows
   observeDesktopBrowserSurface();
   await syncDesktopBrowserLayout();
 });
+
+watch(verificationInProgress, (active) => {
+  scheduleVerificationRefresh(active);
+  if (active) scheduleRunPoll(true);
+}, { immediate: true });
 
 watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () => {
   connectTaskStream();
@@ -3032,7 +3125,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
             <header>
               <div>
                 <strong>{{ pendingApprovals.length === 1 ? "Action needs your approval" : `${pendingApprovals.length} actions need your approval` }}</strong>
-                <span>Review the exact authority and scope before the agent continues.</span>
+                <span>{{ pendingApprovals.some((item) => item.title.startsWith('Verify ·') || item.title.startsWith('Start service ·')) ? 'Verification and other governed actions wait here until you allow them.' : 'Review the exact authority and scope before the agent continues.' }}</span>
               </div>
               <osx-badge size="small" :label="String(pendingApprovals.length)" tone="warning" />
             </header>
@@ -3489,6 +3582,12 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                   :title="issue.message"
                   :description="issue.remediation"
                 />
+                <osx-alert
+                  v-if="!verificationHasRecipe"
+                  tone="warning"
+                  title="No verification recipe yet"
+                  description="Add checks to .vraxis/verify.json or ensure the project manifest exposes test, lint, or build scripts Project Doctor can discover."
+                />
               </template>
               <div v-else class="doctor-loading"><osx-spinner size="small" label="Inspecting project" show-label /></div>
             </section>
@@ -3512,6 +3611,29 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                   <osx-button size="small" variant="primary" icon="play" :loading="verificationAction === 'start'" :disabled="!verificationHasRecipe" @click="startVerification(pendingVerificationHandoff.id)">Start governed verification</osx-button>
                 </div>
               </section>
+              <section v-if="verificationPendingApproval" class="verification-approval" aria-label="Verification approval required">
+                <header>
+                  <strong>Approve the next project check</strong>
+                  <small>Verification uses the project-owned recipe. Each command waits for your approval before it runs.</small>
+                </header>
+                <osx-agent-approval
+                  :title="verificationPendingApproval.title"
+                  :description="approvalDescription(verificationPendingApproval)"
+                  :risk="verificationPendingApproval.risk"
+                  :scope="verificationPendingApproval.scope"
+                  approve-label="Allow once"
+                  reject-label="Deny"
+                  :disabled="approvalActionId === verificationPendingApproval.id"
+                  @approve="decideApproval(verificationPendingApproval, 'approve')"
+                  @reject="decideApproval(verificationPendingApproval, 'deny')"
+                />
+              </section>
+              <osx-alert
+                v-else-if="verificationProgressLabel && verificationIsActive"
+                tone="info"
+                title="Verification in progress"
+                :description="verificationProgressLabel"
+              />
               <div v-if="latestVerification?.services.length" class="verification-services" aria-label="Governed service health">
                 <article v-for="service in latestVerification.services" :key="service.id">
                   <span>
@@ -3574,7 +3696,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                 v-else-if="latestVerification?.state === 'failed'"
                 tone="error"
                 title="Verification needs attention"
-                :description="latestVerification.services.find(item => item.state === 'failed')?.failure ?? latestVerification.checks.find(item => item.state === 'failed')?.failure ?? latestVerification.browserAssertions?.find(item => item.state === 'failed')?.failure ?? latestVerification.visual?.failure ?? latestVerification.browserFailure ?? 'Open the related terminal receipt for details.'"
+                :description="verificationFailureSummary(latestVerification)"
               />
               <osx-alert v-if="browserError && inspector === 'verify'" tone="error" title="Browser proof not captured" :description="browserError" />
               <div class="verification-actions">
@@ -3594,10 +3716,10 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                   size="small"
                   icon="play"
                   :loading="verificationAction === 'start' || verificationAction === 'rerun'"
-                  :disabled="!session || verificationIsActive || (!verificationCanRerun && !verificationHasRecipe)"
+                  :disabled="!session || Boolean(verificationAction) || (!verificationCanRerun && (verificationInProgress || !verificationHasRecipe))"
                   @click="verificationCanRerun ? rerunVerification() : startVerification()"
                 >
-                  {{ verificationCanRerun ? 'Rerun exact recipe' : verificationIsActive ? 'Verification running' : 'Run verification' }}
+                  {{ verificationCanRerun ? 'Rerun exact recipe' : verificationProgressLabel || (verificationInProgress ? 'Verification active' : 'Run verification') }}
                 </osx-button>
                 <osx-button
                   v-if="verificationCanStop"
@@ -3702,27 +3824,68 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
               <header>
                 <span class="browser-verification-icon"><osx-icon name="shield-check" :size="16" /></span>
                 <span>
-                  <h3 id="browser-verification-heading">Verify this page</h3>
-                  <small v-if="latestVerification?.browserEvidence">
+                  <h3 id="browser-verification-heading">{{ verificationStudioTitle }}</h3>
+                  <small v-if="verificationViewingWrongPage">
+                    Viewing {{ state.browser?.url }} · target {{ verificationBrowserTarget }}
+                  </small>
+                  <small v-else-if="latestVerification?.browserEvidence">
                     Captured {{ new Date(latestVerification.browserEvidence.capturedAt).toLocaleTimeString() }} · {{ latestVerification.browserEvidence.consoleErrors }} console · {{ latestVerification.browserEvidence.networkErrors }} network errors
                   </small>
                   <small v-else-if="latestVerification?.state === 'needs-browser'">Command checks passed. Capture the visible page and browser diagnostics.</small>
-                  <small v-else>{{ verificationBrowserTarget ?? 'Use the current page as retained verification evidence.' }}</small>
+                  <small v-else-if="verificationBrowserTarget">Target · {{ verificationBrowserTarget }}</small>
+                  <small v-else>Use the current page as retained verification evidence.</small>
                 </span>
                 <osx-badge
                   size="small"
-                  :label="latestVerification ? verificationLabel(latestVerification) : 'Ready'"
-                  :tone="latestVerification ? verificationTone(latestVerification) : 'neutral'"
+                  :label="verificationStudioBadge.label"
+                  :tone="verificationStudioBadge.tone"
                 />
               </header>
+              <osx-alert
+                v-if="verificationPendingApproval"
+                tone="warning"
+                title="Approval required to continue"
+                :description="`${verificationPendingApproval.title} is waiting in Verify before the recipe can continue.`"
+              />
+              <osx-alert
+                v-if="verificationViewingWrongPage"
+                tone="warning"
+                title="Verification target is on another page"
+                :description="`Open ${verificationBrowserTarget} before capturing proof or rerunning checks against the recipe.`"
+              />
+              <p v-if="verificationStudioFailure" class="browser-verification-failure" role="status">
+                {{ verificationStudioFailure }}
+              </p>
               <div class="browser-verification-progress">
                 <span><strong>{{ latestVerification?.checks.filter(item => item.state === 'passed').length ?? 0 }}/{{ latestVerification?.checks.length ?? state.projectDoctor?.verificationChecks.length ?? 0 }}</strong><small>checks passed</small></span>
                 <span><strong>{{ latestVerification?.browserAssertions.filter(item => item.state === 'passed').length ?? 0 }}/{{ latestVerification?.browserAssertions.length ?? state.projectDoctor?.verificationBrowserAssertions?.length ?? 0 }}</strong><small>page assertions</small></span>
                 <span><strong>{{ latestVerification?.browserEvidence?.actionCount ?? state.browser?.actions.length ?? 0 }}</strong><small>retained actions</small></span>
               </div>
               <footer>
+                <template v-if="verificationViewingWrongPage && verificationBrowserTarget">
+                  <osx-button
+                    variant="primary"
+                    size="small"
+                    icon="external"
+                    :loading="verificationAction === 'browser'"
+                    @click="openVerificationBrowser()"
+                  >
+                    Open target
+                  </osx-button>
+                  <osx-button
+                    v-if="verificationCanRerun"
+                    variant="secondary"
+                    size="small"
+                    icon="play"
+                    :loading="verificationAction === 'rerun'"
+                    :disabled="verificationIsActive"
+                    @click="rerunVerification()"
+                  >
+                    Rerun recipe
+                  </osx-button>
+                </template>
                 <osx-button
-                  v-if="latestVerification?.state === 'needs-browser'"
+                  v-else-if="latestVerification?.state === 'needs-browser'"
                   variant="primary"
                   size="small"
                   icon="camera"
@@ -3737,12 +3900,14 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                   size="small"
                   icon="play"
                   :loading="verificationAction === 'start' || verificationAction === 'rerun'"
-                  :disabled="verificationIsActive || (!verificationCanRerun && !verificationHasRecipe)"
+                  :disabled="Boolean(verificationAction) || (!verificationCanRerun && (verificationInProgress || !verificationHasRecipe))"
                   @click="verificationCanRerun ? rerunVerification() : startVerification()"
                 >
-                  {{ verificationCanRerun ? 'Rerun recipe' : verificationIsActive ? 'Checks running' : 'Run checks' }}
+                  {{ verificationCanRerun ? 'Rerun recipe' : verificationProgressLabel || (verificationInProgress ? 'Verification active' : 'Run checks') }}
                 </osx-button>
+                <osx-button v-if="verificationPendingApproval" size="small" variant="primary" @click="chooseInspectorView('verify')">Review approval</osx-button>
                 <osx-button v-if="verificationCanStop" size="small" variant="secondary" icon="square" :loading="verificationAction === 'stop'" @click="stopVerification">Stop</osx-button>
+                <osx-button size="small" variant="secondary" @click="chooseInspectorView('verify')">Full report</osx-button>
               </footer>
             </section>
 
@@ -3800,7 +3965,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                 <header>
                   <span>
                     <strong id="browser-control-map-heading">Interactive controls</strong>
-                    <small>{{ browserIsLive ? "Select a control here or directly on the page." : "Restore the browser before acting on retained controls." }}</small>
+                    <small>{{ browserControlSelectionHint }}</small>
                   </span>
                   <osx-badge :label="`${state.browser.controls.length} found`" tone="info" size="small" />
                 </header>

@@ -913,7 +913,7 @@ test("turns discovered project checks into approved, retained verification proof
   });
 
   await page.goto("/");
-  await expect(page.getByRole("tab", { name: "Verify", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Verify", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Review and run checks" }).click();
   await expect(page.getByText("Project Doctor", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Project recipe")).toBeVisible();
@@ -1019,7 +1019,7 @@ test("shows governed service health and can stop and tear down an active verific
   }));
 
   await page.goto("/");
-  await expect(page.getByRole("tab", { name: "Verify", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Verify", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Review and run checks" }).click();
   const serviceHealth = page.getByLabel("Governed service health");
   await expect(serviceHealth.getByText("Preview server", { exact: true })).toBeVisible();
