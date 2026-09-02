@@ -28,13 +28,21 @@ button, input, textarea, select { font: inherit; }
 .product-root {
   height: 100%;
   min-height: 0;
+  position: fixed;
+  inset: 0;
+  overflow: clip;
   padding: 0;
   color: var(--osx-text, #eef1f2);
   background: #0d0f10;
   --osx-font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
-osx-app-shell { height: 100%; }
+osx-app-shell {
+  height: 100%;
+  min-height: 0;
+  display: block;
+  overflow: clip;
+}
 
 .workspace-identity {
   min-width: 0;
@@ -725,14 +733,72 @@ osx-app-shell { height: 100%; }
 .task-title span { color: var(--osx-muted, #98a0a5); font-size: 12px; }
 
 .task-composer-shell {
+  position: relative;
   padding: 10px 12px 12px;
   background: color-mix(in srgb, var(--osx-surface, #15191b) 94%, #000 6%);
 }
 
-.task-composer-shell > osx-agent-composer {
+.task-end {
+  flex: 0 0 1px;
+  pointer-events: none;
+}
+
+.task-jump-latest {
+  position: absolute;
+  z-index: 3;
+  bottom: calc(100% + 12px);
+  left: 50%;
+  transform: translateX(-50%);
+  filter: drop-shadow(0 3px 8px #0005);
+}
+
+@media (max-width: 760px) {
+  .task-jump-latest {
+    position: fixed;
+    bottom: 24px;
+  }
+}
+
+.task-composer-frame {
   display: block;
   width: min(100%, 780px);
+  position: relative;
+  isolation: isolate;
   margin: 0 auto;
+}
+
+.task-composer-frame > osx-agent-composer {
+  display: block;
+  position: relative;
+  z-index: 1;
+}
+
+.task-composer-frame::after {
+  position: absolute;
+  z-index: 2;
+  inset: 10px;
+  padding: 1px;
+  border-radius: 15px;
+  opacity: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 18%,
+    color-mix(in srgb, var(--osx-accent, #4aa9dc) 28%, transparent) 38%,
+    color-mix(in srgb, var(--osx-accent-ink, #8fd4f4) 82%, transparent) 50%,
+    color-mix(in srgb, var(--osx-accent, #4aa9dc) 28%, transparent) 62%,
+    transparent 82%
+  );
+  background-size: 240% 100%;
+  content: "";
+  pointer-events: none;
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+
+.task-composer-frame.is-pending::after {
+  opacity: 0.9;
+  animation: composer-border-shimmer 2.6s ease-in-out infinite;
 }
 
 .composer-runtime-control {
@@ -843,10 +909,19 @@ osx-app-shell { height: 100%; }
 
 .conversation > osx-agent-message,
 .conversation > osx-thinking,
+.conversation > .tool-activity-frame,
 .conversation > .session-note {
   content-visibility: auto;
   contain-intrinsic-size: auto 72px;
+  animation: content-settle 180ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
 }
+
+.tool-activity-frame { min-width: 0; }
+.tool-activity-frame > osx-tool-call { display: block; }
+.activity-swap-enter-active,
+.activity-swap-leave-active { transition: opacity 120ms ease, transform 120ms ease; }
+.activity-swap-enter-from { opacity: 0; transform: translateY(3px); }
+.activity-swap-leave-to { opacity: 0; transform: translateY(-3px); }
 
 .runtime-preflight {
   width: min(calc(100% - 36px), 780px);
@@ -910,6 +985,7 @@ osx-app-shell { height: 100%; }
   border: 1px solid color-mix(in srgb, var(--osx-warning, #d79a42) 45%, var(--osx-border-soft, #384148));
   border-radius: 10px;
   background: color-mix(in srgb, var(--osx-warning, #d79a42) 6%, var(--osx-surface-raised, #22282c));
+  animation: attention-arrive 240ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
 }
 
 .approval-queue > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
@@ -1056,7 +1132,10 @@ osx-app-shell { height: 100%; }
 
 .evidence-panel { overflow: hidden; }
 .evidence-panel.has-ledger { display: grid; grid-template-rows: auto minmax(0, 1fr); }
-.evidence-view { overflow: auto; }
+.evidence-view {
+  overflow: auto;
+  animation: panel-reveal 160ms ease-out both;
+}
 
 .evidence-ledger {
   min-width: 0;
@@ -1999,15 +2078,38 @@ button:focus-visible,
   outline-offset: 2px;
 }
 
+@keyframes composer-border-shimmer {
+  0% { background-position: 120% 0; }
+  55%, 100% { background-position: -120% 0; }
+}
+
+@keyframes content-settle {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes attention-arrive {
+  from { opacity: 0; transform: translateY(6px) scale(0.995); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes panel-reveal {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 @media (max-width: 1500px) {
   .task-header { align-items: flex-start; flex-direction: column; gap: 8px; }
 }
 
 @media (max-width: 760px) {
   html, body, #app { overflow: auto; }
+  .product-root { min-height: 100%; position: static; overflow: visible; }
+  osx-app-shell { height: auto; min-height: 100%; overflow: visible; }
   .sidebar { max-height: 150px; }
   .task-header { position: static; }
   .conversation { padding-inline: 14px; }
+  .task-composer-frame::after { inset: 8px; border-radius: 13px; }
   .settings-header { align-items: flex-start; }
   .settings-section { padding: 14px; }
   .runtime-defaults { grid-template-columns: 1fr; }

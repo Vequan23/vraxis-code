@@ -4,6 +4,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import type { TerminalRunSummary } from "@vraxis/code-contracts";
+import { configureTerminalInput } from "./terminal-input.js";
+import { restartInterruptedShellId, terminalTabs } from "./terminal-tabs.js";
 
 const props = defineProps<{
   runs: TerminalRunSummary[];
@@ -32,9 +34,15 @@ let lastRows = 0;
 let stream: EventSource | undefined;
 let streamRunId = "";
 let streamSequence = 0;
+let recoveredRestartRunId = "";
 const inputBuffers = new Map<string, { run: TerminalRunSummary; data: string; timer: ReturnType<typeof setTimeout> }>();
 
-const visibleRuns = computed(() => props.runs.filter((run) => !hiddenRunIds.value.includes(run.id)));
+const visibleRuns = computed(() => terminalTabs(
+  props.runs,
+  selectedRunId.value,
+  props.initialRunId,
+  hiddenRunIds.value,
+));
 const selectedRun = computed(() => visibleRuns.value.find((run) => run.id === selectedRunId.value));
 
 function tabTitle(run: TerminalRunSummary): string {
@@ -184,6 +192,12 @@ watch(visibleRuns, (runs) => {
   selectedRunId.value = runs.find((run) => run.status === "running")?.id ?? runs[0]?.id ?? "";
 }, { immediate: true });
 
+watch([() => restartInterruptedShellId(props.runs), () => props.starting], ([runId, starting]) => {
+  if (!runId || starting || runId === recoveredRestartRunId) return;
+  recoveredRestartRunId = runId;
+  emit("create");
+}, { immediate: true });
+
 watch(selectedRun, (run) => {
   renderRun(run);
   connectStream(run);
@@ -229,7 +243,7 @@ onMounted(() => {
   fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
   if (host.value) terminal.open(host.value);
-  terminal.textarea?.setAttribute("aria-label", "Terminal input");
+  if (terminal.textarea) configureTerminalInput(terminal.textarea);
   terminal.onData((data) => {
     const run = selectedRun.value;
     if (run?.status === "running") bufferInput(run, data);

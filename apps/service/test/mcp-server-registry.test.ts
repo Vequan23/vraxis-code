@@ -93,6 +93,33 @@ test("project access can be revoked without deleting the saved connection", asyn
   assert.equal((await registry.summaries()).length, 1);
 });
 
+test("retains and opens multiple MCP connections for the same project", async () => {
+  const root = await mkdtemp(join(tmpdir(), "vraxis-mcp-multiple-"));
+  const definitions: McpServerDefinition[] = [];
+  const registry = new McpServerRegistry(root, new MemoryCredentialStore(), connector(definitions));
+  const authorize = { async decide() { return "approved" as const; } };
+
+  await registry.connect({
+    name: "Local tools",
+    transport: "stdio",
+    command: "node",
+    args: ["local-server.mjs"],
+    projectIds: ["project-1"],
+  }, async () => "/tmp/project", authorize);
+  await registry.connect({
+    name: "Remote context",
+    transport: "streamable-http",
+    url: "https://mcp.example.com/connect",
+    projectIds: ["project-1"],
+  }, async () => "/tmp/project", authorize);
+
+  const summaries = await registry.summaries();
+  assert.deepEqual(summaries.map((server) => server.name), ["Local tools", "Remote context"]);
+  const connections = await registry.connectProject("project-1", "/tmp/project", authorize);
+  assert.equal(connections.length, 2);
+  await Promise.all(connections.map((connection) => connection.close()));
+});
+
 test("opens only project-enabled task connections and closes partial startup on failure", async () => {
   const root = await mkdtemp(join(tmpdir(), "vraxis-mcp-task-"));
   const definitions: McpServerDefinition[] = [];

@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { BootstrapState } from "@vraxis/code-contracts";
+import { contractVersion, type BootstrapState } from "@vraxis/code-contracts";
 import { captureWorkspaceState, resetWorkspaceState, restoreWorkspaceState, workspaceStateKey } from "./workspace-cache.js";
 
 function state(): BootstrapState {
   return {
-    contractVersion: 27,
+    contractVersion,
     projects: [
       { id: "alpha", name: "Alpha", path: "/alpha", branch: "main", status: "ready" },
       { id: "beta", name: "Beta", path: "/beta", branch: "main", status: "ready" },

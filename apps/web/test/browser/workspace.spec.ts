@@ -160,6 +160,120 @@ test("starts a task from a selected project and keeps evidence truthful", async 
   expect(browserErrors).toEqual([]);
 });
 
+test("jumps to the latest messages and tracks content growth without stealing scroll", async ({ page }) => {
+  const browserErrors = collectBrowserErrors(page);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/?preview=project");
+  await expect(page.getByRole("heading", { name: "Your first trusted task" })).toBeVisible();
+  const pane = page.getByLabel("Agent task");
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await pane.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect(jump).toHaveCount(0);
+
+  // A growing transcript should reveal the control even without a scroll event.
+  await page.addStyleTag({ content: ".session-pane::before { content: ''; display: block; flex: 0 0 1600px; overflow-anchor: none; } .session-pane { overflow-anchor: none; }" });
+  await expect(jump).toBeVisible();
+  await jump.click();
+  await expectTaskPaneAtBottom(page);
+  await expect(jump).toHaveCount(0);
+
+  await pane.evaluate((element) => { element.scrollTop = 0; });
+  await expect(jump).toBeVisible();
+  const before = await pane.evaluate((element) => element.scrollTop);
+  await page.addStyleTag({ content: ".session-pane::before { flex-basis: 2200px; }" });
+  await expect(jump).toBeVisible();
+  expect(await pane.evaluate((element) => element.scrollTop)).toBe(before);
+  await jump.focus();
+  await page.keyboard.press("Enter");
+  await expectTaskPaneAtBottom(page);
+  await expect(jump).toHaveCount(0);
+  await expect(pane).toBeFocused();
+
+  // Off-screen message estimates must settle at the real end, not stop short.
+  await pane.dispatchEvent("wheel");
+  await pane.evaluate((element) => {
+    const history = document.createElement("div");
+    history.style.flexShrink = "0";
+    for (let index = 0; index < 80; index += 1) {
+      const message = document.createElement("div");
+      message.style.cssText = "content-visibility: auto; contain-intrinsic-size: auto 72px";
+      const content = document.createElement("p");
+      content.textContent = `Message ${index}: ${"Long conversation content. ".repeat(50)}`;
+      message.append(content);
+      history.append(message);
+    }
+    element.insertBefore(history, element.querySelector(".task-end"));
+    element.scrollTop = 0;
+  });
+  await expect(jump).toBeVisible();
+  await jump.click();
+  await expectTaskPaneAtBottom(page);
+  await expect(jump).toHaveCount(0);
+
+  // Resizing can hide the end even when no message has arrived.
+  await pane.dispatchEvent("wheel");
+  await page.setViewportSize({ width: 1280, height: 500 });
+  await expect(jump).toBeVisible();
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await jump.click();
+  await expectTaskPaneAtBottom(page);
+  await expect(jump).toHaveCount(0);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await pane.dispatchEvent("wheel");
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await expect(jump).toBeInViewport();
+  await jump.click();
+  await expect(page.locator(".task-end")).toBeInViewport();
+  await expect(jump).toHaveCount(0);
+  expect(browserErrors).toEqual([]);
+});
+
+test("switches MCP connection types without destabilizing settings", async ({ page }) => {
+  const browserErrors = collectBrowserErrors(page);
+  const warnings: string[] = [];
+  await page.setViewportSize({ width: 2048, height: 1100 });
+  page.on("console", (message) => {
+    if (message.type() === "warning") warnings.push(message.text());
+  });
+
+  await page.goto("/?preview=project");
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Add connection", exact: true }).first().click();
+
+  const local = page.getByRole("radio", { name: /Local process/ });
+  const remote = page.getByRole("radio", { name: /Remote server/ });
+  const chooseTransport = async (value: "stdio" | "streamable-http") => {
+    await page.locator(`osx-radio-group[name="mcp-transport"] input[value="${value}"]`).evaluate((input) => {
+      (input as HTMLInputElement).click();
+    });
+  };
+  await expect(local).toBeChecked();
+  await chooseTransport("streamable-http");
+  await expect(remote).toBeChecked();
+  await expect(page.getByRole("textbox", { name: /Server URL/ })).toBeVisible();
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  expect(await page.locator(".product-root").evaluate((root) => root.scrollTop)).toBe(0);
+  expect(await page.getByRole("form", { name: "Add MCP connection" }).evaluate((form) => {
+    const pane = form.closest('[aria-label="Settings"]');
+    if (!pane) return false;
+    const formBounds = form.getBoundingClientRect();
+    const paneBounds = pane.getBoundingClientRect();
+    return formBounds.top >= paneBounds.top && formBounds.top < paneBounds.bottom;
+  })).toBe(true);
+  await chooseTransport("stdio");
+  await expect(local).toBeChecked();
+  await expect(page.getByRole("textbox", { name: /Executable/ })).toBeVisible();
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  await chooseTransport("streamable-http");
+  await expect(remote).toBeChecked();
+  await expect(page.getByRole("form", { name: "Add MCP connection" })).toBeVisible();
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  expect(await page.locator(".product-root").evaluate((root) => root.scrollTop)).toBe(0);
+
+  expect(browserErrors).toEqual([]);
+  expect(warnings).toEqual([]);
+});
+
 test("discloses recovery after an unexpected service exit", async ({ page }) => {
   const browserErrors = collectBrowserErrors(page);
   const project = { id: "recovered-project", name: "recovered-project", path: "/Users/engineer/recovered-project", branch: "main", status: "ready" };

@@ -74,6 +74,8 @@ import {
   type WorkspaceStateSnapshot,
 } from "./workspace/workspace-cache.js";
 import WorkspaceFileTree from "./workspace/WorkspaceFileTree.vue";
+import { createActivityPresenter } from "./activity/activity-presenter.js";
+import type { DisplayActivityEvent } from "./activity/session-activity.js";
 
 const previewVariant = new URLSearchParams(window.location.search).get("preview");
 const previewMode = Boolean(previewVariant);
@@ -83,6 +85,8 @@ const inspector = ref<InspectorView>("files");
 const mode = ref<SessionMode>(state.settings.defaultMode);
 const composer = ref("");
 const sessionPane = ref<HTMLElement>();
+const taskEnd = ref<HTMLElement>();
+const latestMessagesHidden = ref(false);
 const composerAttachments = ref<OsxAgentComposerAttachment[]>([]);
 const composerContextItems = ref<OsxAgentComposerContextItem[]>([]);
 const attachmentReferences = new Map<string, PromptAttachment>();
@@ -312,6 +316,11 @@ const composerDisabled = computed(() =>
 const sessionEvents = computed(() => state.events
   .filter((event) => event.sessionId === session.value?.id)
   .sort((left, right) => left.sequence - right.sequence));
+const displayedSessionEvents = ref<DisplayActivityEvent[]>([]);
+const activityPresenter = createActivityPresenter((events) => {
+  displayedSessionEvents.value = events;
+});
+watch(sessionEvents, (events) => activityPresenter.update(events), { deep: true, immediate: true });
 const changedFiles = computed(() => state.changes);
 const availableChangeHunks = computed(() => {
   if (!changeDiff.value || !selectedChange.value) return [];
@@ -471,6 +480,16 @@ const sourceItems = computed(() => state.projects.map((item) => item.name).join(
 const sourceIcons = computed(() => JSON.stringify(Object.fromEntries(state.projects.map((item) => [item.name, "folder"]))));
 const modeLabel = computed(() => mode.value.charAt(0).toUpperCase() + mode.value.slice(1));
 const sessionIsRunning = computed(() => session.value?.status === "running");
+const composerPending = computed(() => submitting.value || sessionIsRunning.value);
+const activeToolSequence = computed(() => {
+  if (!sessionIsRunning.value) return undefined;
+  const latestUserSequence = [...sessionEvents.value].reverse()
+    .find((event) => event.kind === "message" && event.actor === "user")?.sequence
+    ?? Number.NEGATIVE_INFINITY;
+  const currentTurn = sessionEvents.value.filter((event) => event.sequence > latestUserSequence);
+  if (currentTurn.some((event) => event.kind === "message" && event.actor === "agent")) return undefined;
+  return [...currentTurn].reverse().find((event) => event.kind === "tool")?.sequence;
+});
 const composerModeOptions = computed<OsxAgentComposerOption[]>(() => {
   const locked = sessionIsRunning.value;
   const disabledReason = locked ? "Mode changes apply after the current turn." : undefined;
@@ -847,6 +866,54 @@ function taskPaneIsNearBottom(): boolean {
   const pane = sessionPane.value;
   if (!pane) return true;
   return pane.scrollHeight - pane.scrollTop - pane.clientHeight <= 80;
+}
+
+// Observe the end of the transcript, not individual messages: streamed content,
+// expanded tools, and pane resizes all update visibility without polling.
+watch([sessionPane, taskEnd], ([pane, end], _previous, onCleanup) => {
+  latestMessagesHidden.value = false;
+  if (!pane || !end) return;
+  const observer = new IntersectionObserver(([entry]) => {
+    latestMessagesHidden.value = Boolean(entry && !entry.isIntersecting);
+  }, { rootMargin: "0px 0px 8px 0px" });
+  observer.observe(end);
+  onCleanup(() => observer.disconnect());
+}, { flush: "post" });
+
+async function jumpToLatest(): Promise<void> {
+  const pane = sessionPane.value;
+  const end = taskEnd.value;
+  if (!pane || !end) return;
+  // Keep keyboard focus in the conversation when the jump button disappears.
+  pane.focus({ preventScroll: true });
+  let cancelled = false;
+  const cancel = () => { cancelled = true; };
+  for (const event of ["wheel", "touchstart", "keydown"] as const) {
+    window.addEventListener(event, cancel, { passive: true, capture: true });
+  }
+  try {
+    let stableFrames = 0;
+    let previousHeight = -1;
+    // content-visibility replaces estimated message heights during a jump.
+    // Follow the end through that layout work, but never fight user scrolling.
+    for (let frame = 0; frame < 24 && stableFrames < 4; frame += 1) {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      if (cancelled || sessionPane.value !== pane || taskEnd.value !== end) return;
+      const height = pane.scrollHeight;
+      const bounds = end.getBoundingClientRect();
+      const paneBounds = pane.getBoundingClientRect();
+      const bottom = Math.min(window.innerHeight, paneBounds.bottom);
+      const atEnd = bounds.bottom <= bottom + 2 && bounds.top >= Math.max(0, paneBounds.top);
+      stableFrames = atEnd && height === previousHeight ? stableFrames + 1 : 0;
+      previousHeight = height;
+      // Also handles the narrow layout, where the document itself scrolls.
+      if (!atEnd) end.scrollIntoView({ block: "end", behavior: "instant" });
+    }
+  } finally {
+    for (const event of ["wheel", "touchstart", "keydown"] as const) {
+      window.removeEventListener(event, cancel, true);
+    }
+  }
 }
 
 async function scrollTaskToBottom(): Promise<void> {
@@ -1379,7 +1446,9 @@ async function ensureUserTerminal(force = false): Promise<void> {
   terminalError.value = "";
   try {
     const result = await post(`/api/sessions/${session.value.id}/terminal-shell`, {}) as { run: TerminalRunSummary };
-    state.terminalRuns.unshift(result.run);
+    const existingRun = state.terminalRuns.findIndex((run) => run.id === result.run.id);
+    if (existingRun >= 0) state.terminalRuns[existingRun] = result.run;
+    else state.terminalRuns.unshift(result.run);
     scheduleRunPoll(true);
   } catch (error) {
     terminalError.value = error instanceof Error ? error.message : "The terminal could not be opened.";
@@ -2287,6 +2356,14 @@ function eventStatus(event: ActivityEvent): "complete" | "streaming" | "error" {
   return "complete";
 }
 
+function toolActivityStatus(event: ActivityEvent): "queued" | "running" | "success" | "error" {
+  if (event.sequence === activeToolSequence.value) return "running";
+  if (event.state === "pending") return "queued";
+  if (event.state === "running") return "running";
+  if (event.state === "complete") return "success";
+  return "error";
+}
+
 function eventIcon(event: ActivityEvent): "warning" | "stop" | "loader" | "check" {
   if (event.state === "failed") return "warning";
   if (event.state === "interrupted") return "stop";
@@ -2456,6 +2533,7 @@ onMounted(() => {
   void loadInitialState();
 });
 onBeforeUnmount(() => {
+  activityPresenter.dispose();
   clearRunPoll();
   closeTaskStream();
   bootstrapAbortController?.abort();
@@ -2566,7 +2644,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
         </div>
       </nav>
 
-      <section ref="sessionPane" class="session-pane" :aria-label="activeView === 'settings' ? 'Settings' : 'Agent task'">
+      <section ref="sessionPane" class="session-pane" tabindex="-1" :aria-label="activeView === 'settings' ? 'Settings' : 'Agent task'">
         <div v-if="activeView === 'settings'" class="settings-pane">
           <header class="settings-header">
             <div>
@@ -2782,8 +2860,8 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
             <osx-icon-button label="Close evidence focus" icon="close" size="small" @click="clearEvidenceFocus" />
           </section>
 
-          <div v-if="sessionEvents.length" class="conversation" aria-live="polite">
-            <template v-for="item in sessionEvents" :key="item.id">
+          <div v-if="displayedSessionEvents.length" class="conversation" aria-live="polite">
+            <template v-for="item in displayedSessionEvents" :key="item.id">
               <osx-agent-message
                 v-if="item.kind === 'message'"
                 :message-role="item.actor === 'agent' ? 'assistant' : 'user'"
@@ -2819,8 +2897,18 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                 :status="progressStatus(item)"
                 :open="progressStatus(item) === 'streaming'"
               />
-              <div v-else-if="item.kind === 'lifecycle' || item.kind === 'verification' || item.kind === 'telemetry' || item.kind === 'tool' || item.kind === 'approval'" :class="['session-note', item.kind, item.state]">
-                <osx-icon :name="item.kind === 'tool' ? 'sparkle' : item.kind === 'approval' ? 'lock' : eventIcon(item)" :size="15" />
+              <div v-else-if="item.kind === 'tool'" class="tool-activity-frame" role="status" aria-live="polite">
+                <Transition name="activity-swap" mode="out-in">
+                  <osx-tool-call
+                    :key="`${item.id}:${item.sequence}`"
+                    :name="item.title"
+                    :summary="item.detail"
+                    :status="toolActivityStatus(item)"
+                  />
+                </Transition>
+              </div>
+              <div v-else-if="item.kind === 'lifecycle' || item.kind === 'verification' || item.kind === 'telemetry' || item.kind === 'approval'" :class="['session-note', item.kind, item.state]">
+                <osx-icon :name="item.kind === 'approval' ? 'lock' : eventIcon(item)" :size="15" />
                 <div><strong>{{ item.title }}</strong><span>{{ item.detail }}</span></div>
               </div>
             </template>
@@ -2888,71 +2976,79 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
             </div>
           </section>
         </template>
+        <div v-if="activeView === 'workspace'" ref="taskEnd" class="task-end" aria-hidden="true" />
       </section>
 
       <div v-if="activeView === 'workspace' && project" slot="composer" class="task-composer-shell">
-        <osx-agent-composer
-          :value="composer"
-          :placeholder="sessionIsRunning ? 'Steer the agent or queue the next instruction…' : session ? 'Send a follow-up. @ adds files. $ adds skills.' : 'Describe the task. @ adds files. $ adds skills.'"
-          label="Message to agent"
-          :model="composerModelLabel"
-          :model-id="modelId ?? ''"
-          :models="composerModelOptions"
-          :access-mode="modeLabel"
-          :access-mode-id="mode"
-          :access-modes="composerModeOptions"
-          :suggestions="composerSuggestions"
-          :context-items="visibleComposerContextItems"
-          :attachments="composerAttachments"
-          :state="composerState"
-          :status-text="composerStatus"
-          :error="composerError"
-          :disabled="composerDisabled"
-          :allow-submit-while-running="true"
-          :allow-attachments="true"
-          attachment-accept="*/*"
-          :rows="3"
-          :max-rows="8"
-          submit-shortcut="enter"
-          @input="updateComposerValue"
-          @model-change="chooseTaskModel"
-          @access-mode-change="chooseMode"
-          @attachment-add="acceptNativeAttachments"
-          @attachments-change="syncComposerAttachments"
-          @context-change="syncComposerContext"
-          @submit="submitPrompt"
-          @stop="interruptRun"
-        >
-          <label v-if="sessionIsRunning" slot="controls" class="composer-runtime-control steering-delivery-control">
-            <osx-icon :name="steeringDelivery === 'redirect' ? 'corner-down-left' : 'list-checks'" :size="14" />
-            <span class="visually-hidden">Message delivery</span>
-            <select v-model="steeringDelivery" aria-label="Message delivery" :disabled="submitting">
-              <option value="queue">Send after this turn</option>
-              <option value="redirect">Interrupt and send</option>
-            </select>
-            <osx-icon name="chevron-down" :size="12" />
-          </label>
-          <label slot="controls" class="composer-runtime-control">
-            <osx-icon name="terminal" :size="14" />
-            <span class="visually-hidden">Runtime</span>
-            <select
-              aria-label="Runtime"
-              :value="runtime?.id"
-              :disabled="submitting || sessionIsRunning"
-              @change="chooseTaskRuntime"
-            >
-              <option
-                v-for="item in state.runtimes"
-                :key="item.id"
-                :value="item.id"
-                :disabled="item.availability !== 'installed' || !runtimeIsEnabled(item.id)"
+        <div v-if="latestMessagesHidden" class="task-jump-latest">
+          <osx-tooltip text="Jump to latest" placement="top">
+            <osx-icon-button label="Jump to latest" icon="chevron-down" @click="jumpToLatest" />
+          </osx-tooltip>
+        </div>
+        <div :class="['task-composer-frame', { 'is-pending': composerPending }]">
+          <osx-agent-composer
+            :value="composer"
+            :placeholder="sessionIsRunning ? 'Steer the agent or queue the next instruction…' : session ? 'Send a follow-up. @ adds files. $ adds skills.' : 'Describe the task. @ adds files. $ adds skills.'"
+            label="Message to agent"
+            :model="composerModelLabel"
+            :model-id="modelId ?? ''"
+            :models="composerModelOptions"
+            :access-mode="modeLabel"
+            :access-mode-id="mode"
+            :access-modes="composerModeOptions"
+            :suggestions="composerSuggestions"
+            :context-items="visibleComposerContextItems"
+            :attachments="composerAttachments"
+            :state="composerState"
+            :status-text="composerStatus"
+            :error="composerError"
+            :disabled="composerDisabled"
+            :allow-submit-while-running="true"
+            :allow-attachments="true"
+            attachment-accept="*/*"
+            :rows="3"
+            :max-rows="8"
+            submit-shortcut="enter"
+            @input="updateComposerValue"
+            @model-change="chooseTaskModel"
+            @access-mode-change="chooseMode"
+            @attachment-add="acceptNativeAttachments"
+            @attachments-change="syncComposerAttachments"
+            @context-change="syncComposerContext"
+            @submit="submitPrompt"
+            @stop="interruptRun"
+          >
+            <label v-if="sessionIsRunning" slot="controls" class="composer-runtime-control steering-delivery-control">
+              <osx-icon :name="steeringDelivery === 'redirect' ? 'corner-down-left' : 'list-checks'" :size="14" />
+              <span class="visually-hidden">Message delivery</span>
+              <select v-model="steeringDelivery" aria-label="Message delivery" :disabled="submitting">
+                <option value="queue">Send after this turn</option>
+                <option value="redirect">Interrupt and send</option>
+              </select>
+              <osx-icon name="chevron-down" :size="12" />
+            </label>
+            <label slot="controls" class="composer-runtime-control">
+              <osx-icon name="terminal" :size="14" />
+              <span class="visually-hidden">Runtime</span>
+              <select
+                aria-label="Runtime"
+                :value="runtime?.id"
+                :disabled="submitting || sessionIsRunning"
+                @change="chooseTaskRuntime"
               >
-                {{ item.name }}{{ item.availability !== "installed" ? " (setup needed)" : !runtimeIsEnabled(item.id) ? " (disabled)" : "" }}
-              </option>
-            </select>
-            <osx-icon name="chevron-down" :size="12" />
-          </label>
-        </osx-agent-composer>
+                <option
+                  v-for="item in state.runtimes"
+                  :key="item.id"
+                  :value="item.id"
+                  :disabled="item.availability !== 'installed' || !runtimeIsEnabled(item.id)"
+                >
+                  {{ item.name }}{{ item.availability !== "installed" ? " (setup needed)" : !runtimeIsEnabled(item.id) ? " (disabled)" : "" }}
+                </option>
+              </select>
+              <osx-icon name="chevron-down" :size="12" />
+            </label>
+          </osx-agent-composer>
+        </div>
       </div>
 
       <aside v-if="activeView === 'workspace' && project" slot="inspector" class="inspector" aria-label="Project evidence">

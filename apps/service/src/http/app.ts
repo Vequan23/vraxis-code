@@ -26,6 +26,7 @@ import {
   type SessionLiveEvidenceResponse,
   type SessionStreamPayload,
   type SessionSummary,
+  type TerminalRunSummary,
   type TaskProofEnvelopeV1,
   type TaskReceiptV1,
   type UnderstandArtifactEnvelopeV1,
@@ -158,6 +159,7 @@ export function createApp(options: AppOptions) {
     async () => (await settings.read()).authorityMode ?? "supervised",
   );
   const terminal = new TerminalRegistry(options.dataDirectory);
+  const userTerminalStarts = new Map<string, Promise<{ run: TerminalRunSummary; created: boolean }>>();
   const browser = options.browserWorkspace ?? new BrowserWorkspace(options.dataDirectory, credentials, options.browserRelay);
   const verifications = new VerificationRegistry(options.dataDirectory);
   async function proofTrustState() {
@@ -205,6 +207,37 @@ export function createApp(options: AppOptions) {
     await Promise.all([approvals.reconcile(), terminal.reconcile(), verifications.reconcile()]);
     await reconcileWorktreeApplications();
   })();
+  async function ensureUserTerminalRun(sessionId: string, absoluteCwd: string): Promise<{ run: TerminalRunSummary; created: boolean }> {
+    const active = (await terminal.list(sessionId)).find((run) => run.purpose === "user-shell"
+      && (run.status === "pending" || run.status === "running"));
+    if (active) return { run: active, created: false };
+    const pending = userTerminalStarts.get(sessionId);
+    if (pending) return pending;
+    const start = (async () => {
+      const existing = (await terminal.list(sessionId)).find((run) => run.purpose === "user-shell"
+        && (run.status === "pending" || run.status === "running"));
+      if (existing) return { run: existing, created: false };
+      const shell = process.platform === "win32"
+        ? process.env.COMSPEC ?? process.env.ComSpec ?? "cmd.exe"
+        : process.env.SHELL ?? "/bin/sh";
+      const shellArguments = process.platform === "win32" ? [] : ["-l"];
+      const run = await terminal.prepare(
+        sessionId,
+        `user-terminal:${randomUUID()}`,
+        commandText(shell, shellArguments),
+        ".",
+        { purpose: "user-shell", label: basename(shell).replace(/\.exe$/i, "") },
+      );
+      void terminal.execute(run.id, absoluteCwd).catch(() => undefined);
+      return { run, created: true };
+    })();
+    userTerminalStarts.set(sessionId, start);
+    try {
+      return await start;
+    } finally {
+      if (userTerminalStarts.get(sessionId) === start) userTerminalStarts.delete(sessionId);
+    }
+  }
   interface ManualAction {
     approve: () => void | Promise<void>;
     deny?: () => void | Promise<void>;
@@ -1739,19 +1772,8 @@ export function createApp(options: AppOptions) {
       if (request.method === "POST" && userTerminalMatch?.[1]) {
         const session = await sessions.get(userTerminalMatch[1]);
         const absoluteCwd = await sessionWorkspace(session);
-        const shell = process.platform === "win32"
-          ? process.env.COMSPEC ?? process.env.ComSpec ?? "cmd.exe"
-          : process.env.SHELL ?? "/bin/sh";
-        const shellArguments = process.platform === "win32" ? [] : ["-l"];
-        const run = await terminal.prepare(
-          session.id,
-          `user-terminal:${randomUUID()}`,
-          commandText(shell, shellArguments),
-          ".",
-          { purpose: "user-shell", label: basename(shell).replace(/\.exe$/i, "") },
-        );
-        void terminal.execute(run.id, absoluteCwd).catch(() => undefined);
-        json(response, 201, { run });
+        const result = await ensureUserTerminalRun(session.id, absoluteCwd);
+        json(response, result.created ? 201 : 200, { run: result.run });
         return;
       }
 

@@ -1,7 +1,7 @@
-import type { BootstrapState } from "@vraxis/code-contracts";
+import { contractVersion, type BootstrapState } from "@vraxis/code-contracts";
 
 export const emptyState: BootstrapState = {
-  contractVersion: 27,
+  contractVersion,
   projects: [],
   sessions: [],
   runtimes: [{
@@ -54,7 +54,7 @@ export const emptyState: BootstrapState = {
 };
 
 export const demoState: BootstrapState = {
-  contractVersion: 27,
+  contractVersion,
   projects: [{
     id: "vraxis-code",
     name: "vraxis-code",
