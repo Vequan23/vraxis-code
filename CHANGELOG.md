@@ -6,6 +6,7 @@ All notable changes to Vraxis Code will be documented here. The project follows 
 
 ### Added
 
+- Git status, diff, history, and structured repository-state tools in every agent mode, with explicit approval for refreshing remote-tracking refs. Runtime tool inventories are tested against the capabilities advertised by each mode.
 - Four-mode coding-agent workspace with provider-neutral agent-v runtime discovery and execution.
 - Isolated Build worktrees with exact diffs, selective apply, conflict evidence, rollback, archive, and recovery.
 - Product-owned approvals for filesystem changes, commands, network access, browser actuation, credentials, and destructive actions.

@@ -25,6 +25,8 @@ test("publishes safe mode-specific default agent profiles", () => {
   assert.ok(!modeAgentProfile("plan").toolIds.includes("create-text"));
   assert.equal(modeAgentProfile("build").access, "isolated-worktree");
   assert.ok(modeAgentProfile("ask").toolIds.includes("evidence-status"));
+  assert.ok(modeAgentProfile("ask").toolIds.includes("git-repository-state"));
+  assert.ok(modeAgentProfile("ask").guardedToolIds.includes("git-refresh-remote"));
   assert.ok(modeAgentProfile("ask").toolIds.includes("browser-snapshot"));
   assert.ok(modeAgentProfile("ask").guardedToolIds.includes("browser-navigate"));
   assert.ok(modeAgentProfile("plan").guardedToolIds.includes("browser-type"));

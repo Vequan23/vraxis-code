@@ -16,8 +16,9 @@ import type { McpConnectionAuthorizer } from "@vraxis/agent-v/mcp";
 import { LocalCliRuntimeEngine, builtInRuntimes } from "@vraxis/agent-v/local-cli";
 import { type ModelProviderId } from "@vraxis/agent-v/providers";
 import { createAgentRuntime } from "@vraxis/agent-v/runtime";
-import { createBrowserTools, type BrowserController } from "@vraxis/agent-v/tools";
-import { createFilesystemTools, createWorkspaceTools } from "@vraxis/agent-v/tools/node";
+import { createBrowserTools, createPureTools, type BrowserController } from "@vraxis/agent-v/tools";
+import { createWorkspaceTools } from "@vraxis/agent-v/tools/node";
+import { modeAgentProfile, sessionModes, type SessionMode } from "@vraxis/code-contracts";
 import type { ModelProviderRegistry } from "../model-providers/model-provider-registry.js";
 import type { ApprovalRegistry } from "../approvals/approval-registry.js";
 import type { BrowserWorkspace } from "../browser/browser-workspace.js";
@@ -30,6 +31,15 @@ import { createPromptWebFetchTool } from "../web/prompt-web-access.js";
 import type { McpServerRegistry, McpTaskConnection } from "../mcp/mcp-server-registry.js";
 
 const developmentCommands = ["bun", "cargo", "git", "go", "node", "npm", "npx", "pnpm", "python3", "pytest", "rg", "yarn"] as const;
+
+function uniqueTools(...groups: readonly (readonly AgentTool[])[]): AgentTool[] {
+  const tools = new Map<string, AgentTool>();
+  for (const tool of groups.flat()) {
+    if (tools.has(tool.name)) throw new TypeError(`Duplicate host tool: ${tool.name}.`);
+    tools.set(tool.name, tool);
+  }
+  return [...tools.values()];
+}
 
 export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
   readonly descriptor: EngineDescriptor = {
@@ -67,7 +77,10 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
     const profile = await this.providers.profile(request.runtimeId);
     if (!request.workspacePath) throw new AgentVError("unsupported-capability", "Vraxis Code tasks require an approved workspace.");
     const sessionId = request.sessionId;
-    const mode = typeof request.metadata?.mode === "string" ? request.metadata.mode : "ask";
+    const requestedMode = request.metadata?.mode;
+    const mode: SessionMode = typeof requestedMode === "string" && sessionModes.includes(requestedMode as SessionMode)
+      ? requestedMode as SessionMode
+      : "ask";
     const approvalPolicy = sessionId && this.approvals ? this.approvals.policy(sessionId, request.scope.projectId) : request.approvalPolicy;
     const mcpConnections = this.mcpServers && approvalPolicy
       ? await this.mcpServers.connectProject(
@@ -99,8 +112,7 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
         throw new AgentVError("unsupported-capability", `${definition?.name ?? request.runtimeId} cannot run Build until it supports ephemeral Vraxis tools with native execution disabled.`);
       }
       if (!governedToolsSupported) return this.runLocal(request, request.tools ?? [], events);
-      const workspaceTools = request.workspaceAccess === "workspace-write"
-        ? await createWorkspaceTools({
+      const workspaceTools = await createWorkspaceTools({
           rootPath: request.workspacePath,
           allowedCommands: developmentCommands,
           rejectPotentialSecrets: true,
@@ -110,19 +122,18 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
             args: ["diff", "--check", "--no-ext-diff"],
             blocking: true,
           }],
-        })
-        : await createFilesystemTools({ rootPath: request.workspacePath });
-      const governedWorkspaceTools = workspaceTools.filter((tool) => tool.name !== "run-command" && (mode === "build" || tool.sideEffect === "none"));
+        });
+      const governedWorkspaceTools = this.modeWorkspaceTools(workspaceTools, mode);
+      const hostTools = uniqueTools(request.tools ?? [], createPureTools(), governedWorkspaceTools, productTools);
       return this.runLocal({
         ...request,
-        tools: [...(request.tools ?? []), ...governedWorkspaceTools, ...productTools],
+        tools: hostTools,
         ...(approvalPolicy ? { approvalPolicy } : {}),
-      }, [...(request.tools ?? []), ...governedWorkspaceTools, ...productTools], events);
+      }, hostTools, events);
     }
     const selectedModel = request.runtimeModel ?? profile.model;
     if (!selectedModel) throw new AgentVError("configuration-invalid", "Choose a model before starting this task.");
-    const workspaceTools = request.workspaceAccess === "workspace-write"
-      ? await createWorkspaceTools({
+    const workspaceTools = await createWorkspaceTools({
         rootPath: request.workspacePath,
         allowedCommands: developmentCommands,
         rejectPotentialSecrets: true,
@@ -132,15 +143,8 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
           args: ["diff", "--check", "--no-ext-diff"],
           blocking: true,
         }],
-      })
-      : await createFilesystemTools({ rootPath: request.workspacePath });
-    const fileTools = request.workspaceAccess === "workspace-write"
-      ? workspaceTools
-      : workspaceTools.filter((tool) => tool.sideEffect === "none" && tool.risk === "read");
-    const tools = [
-      ...fileTools.filter((tool) => tool.name !== "run-command"),
-      ...productTools,
-    ];
+      });
+    const tools = uniqueTools(request.tools ?? [], this.modeWorkspaceTools(workspaceTools, mode), productTools);
     const runtime = createAgentRuntime({
       execution: {
         type: "provider",
@@ -327,6 +331,12 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
       tools.push(createAgentTerminalStopTool({ sessionId, terminal: this.terminal }));
     }
     return tools;
+  }
+
+  private modeWorkspaceTools(tools: readonly AgentTool[], mode: SessionMode): AgentTool[] {
+    const profile = modeAgentProfile(mode);
+    const requested = new Set([...profile.toolIds, ...profile.guardedToolIds]);
+    return tools.filter((tool) => requested.has(tool.name));
   }
 
   private browserController(sessionId: string): BrowserController {

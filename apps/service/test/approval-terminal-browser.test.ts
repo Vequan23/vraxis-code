@@ -8,6 +8,7 @@ import { chromium, type BrowserContext } from "playwright";
 import { MemoryCredentialStore, defineOutput, localExecutionScope, type AgentTool, type ApprovalRequest, type CodingRuntimeRequest, type CodingRuntimeResult, type RuntimeReadiness } from "@vraxis/agent-v";
 import { LocalCliRuntimeEngine } from "@vraxis/agent-v/local-cli";
 import { executeAgentTool, type BrowserController } from "@vraxis/agent-v/tools";
+import { modeAgentProfile, sessionModes } from "@vraxis/code-contracts";
 import { ApprovalRegistry } from "../src/approvals/approval-registry.js";
 import { BrowserWorkspace } from "../src/browser/browser-workspace.js";
 import { commandArguments, executableCandidates, TerminalRegistry, terminatePty } from "../src/terminal/terminal-registry.js";
@@ -530,6 +531,10 @@ test("local Build harnesses receive governed file and terminal tools with native
     assert.ok(names.includes("http-fetch"), `${runtimeId} must receive bounded web access for the host named in this turn`);
     assert.ok(names.includes("create-text"), `${runtimeId} must receive governed file creation`);
     assert.ok(names.includes("apply-workspace-patch"), `${runtimeId} must receive governed patch application`);
+    assert.ok(names.includes("git-repository-state"), `${runtimeId} must receive structured repository state`);
+    assert.ok(names.includes("git-refresh-remote"), `${runtimeId} must receive approval-gated remote refresh`);
+    assert.ok(names.includes("calculate"), `${runtimeId} must receive deterministic utilities`);
+    assert.ok(names.includes("date-time"), `${runtimeId} must receive deterministic time`);
     assert.equal(names.includes("run-command"), false, `${runtimeId} must not receive the native command bypass`);
     assert.ok(local.captured?.approvalPolicy, `${runtimeId} must receive the product approval policy`);
   }
@@ -546,6 +551,14 @@ test("local Build harnesses receive governed file and terminal tools with native
   });
   const cursorNames = local.captured?.tools?.map((tool) => tool.name) ?? [];
   assert.ok(cursorNames.includes("read-text"));
+  assert.ok(cursorNames.includes("git-status"));
+  assert.ok(cursorNames.includes("git-diff"));
+  assert.ok(cursorNames.includes("git-log"));
+  assert.ok(cursorNames.includes("git-show"));
+  assert.ok(cursorNames.includes("git-repository-state"));
+  assert.ok(cursorNames.includes("git-refresh-remote"));
+  assert.ok(cursorNames.includes("calculate"));
+  assert.ok(cursorNames.includes("date-time"));
   assert.equal(cursorNames.includes("create-text"), false);
   assert.equal(cursorNames.includes("terminal-run"), false);
   assert.ok(cursorNames.includes("browser-snapshot"));
@@ -556,6 +569,24 @@ test("local Build harnesses receive governed file and terminal tools with native
   assert.ok(cursorNames.includes("request-verification"));
   assert.equal(cursorNames.includes("http-fetch"), false, "historical or absent URLs must not grant network access to a later turn");
   assert.ok(local.captured?.approvalPolicy);
+
+  for (const mode of sessionModes) {
+    await engine.run({
+      runtimeId: "cursor",
+      workspacePath: root,
+      workspaceAccess: mode === "build" ? "workspace-write" : "read-only",
+      sessionId: `session-capability-${mode}`,
+      metadata: { mode },
+      scope: localExecutionScope("project-local"),
+      input: { prompt: "Inspect https://example.com/docs when web evidence is useful." },
+      output,
+    });
+    const mounted = new Set(local.captured?.tools?.map((tool) => tool.name) ?? []);
+    const promised = modeAgentProfile(mode);
+    for (const toolId of [...promised.toolIds, ...promised.guardedToolIds]) {
+      assert.ok(mounted.has(toolId), `${mode} advertises ${toolId}, so a compatible local harness must receive it`);
+    }
+  }
 });
 
 test("project-enabled MCP tools live only for the task and retain independent approval policy", async () => {

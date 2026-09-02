@@ -1,4 +1,4 @@
-export const contractVersion = 27 as const;
+export const contractVersion = 28 as const;
 
 export const sessionModes = ["ask", "plan", "build", "review"] as const;
 export type SessionMode = (typeof sessionModes)[number];
@@ -19,6 +19,7 @@ const repositoryReadTools = [
   "read-text",
   "search-text",
   "git-status",
+  "git-repository-state",
   "git-diff",
   "git-log",
   "git-show",
@@ -46,7 +47,7 @@ export const modeAgentProfiles: Readonly<Record<SessionMode, ModeAgentProfile>> 
     access: "read-only",
     skillNames: ["Repository comprehension", "General utilities"],
     toolIds: ["calculate", "date-time", "evidence-status", "request-verification", ...repositoryReadTools, ...browserEvidenceTools],
-    guardedToolIds: ["http-fetch", ...browserControlTools],
+    guardedToolIds: ["git-refresh-remote", "http-fetch", ...browserControlTools],
   },
   plan: {
     mode: "plan",
@@ -55,7 +56,7 @@ export const modeAgentProfiles: Readonly<Record<SessionMode, ModeAgentProfile>> 
     access: "read-only",
     skillNames: ["Repository comprehension", "Project architecture", "General utilities"],
     toolIds: ["calculate", "date-time", "evidence-status", "request-verification", ...repositoryReadTools, ...browserEvidenceTools],
-    guardedToolIds: ["http-fetch", ...browserControlTools],
+    guardedToolIds: ["git-refresh-remote", "http-fetch", ...browserControlTools],
   },
   build: {
     mode: "build",
@@ -81,6 +82,7 @@ export const modeAgentProfiles: Readonly<Record<SessionMode, ModeAgentProfile>> 
       "terminal-run",
       "terminal-poll",
       "terminal-stop",
+      "git-refresh-remote",
       "http-fetch",
       ...browserControlTools,
     ],
@@ -92,7 +94,7 @@ export const modeAgentProfiles: Readonly<Record<SessionMode, ModeAgentProfile>> 
     access: "read-only",
     skillNames: ["Repository comprehension", "Code review", "Security review", "General utilities"],
     toolIds: ["calculate", "date-time", "evidence-status", "request-verification", ...repositoryReadTools, ...browserEvidenceTools],
-    guardedToolIds: ["http-fetch", ...browserControlTools],
+    guardedToolIds: ["git-refresh-remote", "http-fetch", ...browserControlTools],
   },
 };
 
