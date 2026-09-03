@@ -21,6 +21,7 @@ import {
   type BrowserSessionSummary,
   type BrowserControlSummary,
   type BootstrapState,
+  type BootstrapScope,
   type InspectorView,
   type PromptAttachment,
   type ProjectSummary,
@@ -40,6 +41,8 @@ import {
   type TeamPolicyState,
   type TaskProofEnvelopeV1,
   type TaskEvidenceKindV1,
+  type UnderstandArtifactEnvelopeV1,
+  type UnderstandEvidenceLinkV1,
   type UpdateSettingsRequest,
   type UserSettings,
   type WorkspaceDiff,
@@ -50,6 +53,7 @@ import {
 } from "@vraxis/code-contracts";
 import { demoState, emptyState } from "./workspace/demo-state.js";
 import { chooseProjectFolder } from "./projects/project-picker.js";
+import ProjectSourceList from "./projects/ProjectSourceList.vue";
 import ModelProviderSettings from "./settings/ModelProviderSettings.vue";
 import McpConnectionCenter from "./settings/McpConnectionCenter.vue";
 import AgentHarnessSettings from "./settings/AgentHarnessSettings.vue";
@@ -61,6 +65,7 @@ import TeamPolicySettings from "./settings/TeamPolicySettings.vue";
 import SupportDiagnostics from "./settings/SupportDiagnostics.vue";
 import FirstRunJourney from "./onboarding/FirstRunJourney.vue";
 import TerminalWorkbench from "./terminal/TerminalWorkbench.vue";
+import WorkspaceSplash from "./workspace/WorkspaceSplash.vue";
 import type { FirstRunActionId } from "./onboarding/first-run-readiness.js";
 import { highlightCode } from "./workspace/syntax-highlight.js";
 import { normalizeMode, selectedProject, selectedSession } from "./workspace/workspace-state.js";
@@ -70,10 +75,12 @@ import {
   cloneWorkspaceValue,
   resetWorkspaceState,
   restoreWorkspaceState,
+  workspaceCollectionsEqual,
   workspaceStateKey,
   type WorkspaceStateSnapshot,
 } from "./workspace/workspace-cache.js";
 import WorkspaceFileTree from "./workspace/WorkspaceFileTree.vue";
+import UnderstandArtifactPanel from "./understand/UnderstandArtifactPanel.vue";
 import { createActivityPresenter } from "./activity/activity-presenter.js";
 import type { DisplayActivityEvent } from "./activity/session-activity.js";
 
@@ -82,6 +89,7 @@ const previewMode = Boolean(previewVariant);
 const state = reactive<BootstrapState>(structuredClone(previewVariant === "project" ? demoState : emptyState));
 const activeView = ref<"workspace" | "settings">("workspace");
 const inspector = ref<InspectorView>("files");
+const inspectorPanelWidth = ref(480);
 const mode = ref<SessionMode>(state.settings.defaultMode);
 const composer = ref("");
 const sessionPane = ref<HTMLElement>();
@@ -99,9 +107,11 @@ interface PreparedPrompt {
   mode: SessionMode;
   runtimeId: string;
   modelId: string;
+  branchSlug?: string;
   delivery?: SteeringDelivery;
 }
 const pendingAttachmentHandoff = ref<PreparedPrompt>();
+const composerBranchSlug = ref("");
 const steeringDelivery = ref<SteeringDelivery>("queue");
 const initialRuntimeId = state.settings.defaultRuntimeId
   ?? state.runtimes.find((item) => item.availability === "installed")?.id
@@ -162,9 +172,15 @@ const focusedEvidence = ref<{ kind: TaskEvidenceKindV1; target: string }>();
 const approvalActionId = ref("");
 const verificationAction = ref("");
 const receiptExporting = ref<"html" | "json" | "">("");
+const understandArtifact = ref<UnderstandArtifactEnvelopeV1>();
+const understandLoading = ref(false);
+const understandError = ref("");
+const understandOpen = ref(false);
+const understandExporting = ref(false);
 const browserReplayExporting = ref(false);
 const firstRunJourneyClosed = ref(false);
 let runPollTimer: ReturnType<typeof setTimeout> | undefined;
+let verificationRefreshTimer: ReturnType<typeof setInterval> | undefined;
 let taskStream: EventSource | undefined;
 let taskStreamSessionId = "";
 let taskStreamConnected = false;
@@ -178,10 +194,12 @@ let protocolOpenQueue: Promise<void> = Promise.resolve();
 const terminalInputWrites = new Map<string, Promise<void>>();
 const desktopBrowserAvailable = Boolean(window.vraxisDesktop?.browserView);
 const workspaceRefreshing = ref(false);
+const workspaceNavigating = ref(false);
 const workspaceStateCache = new Map<string, WorkspaceStateSnapshot>();
 const latestWorkspaceKeyByProject = new Map<string, string>();
 interface WorkspaceViewSnapshot {
   inspector: InspectorView;
+  inspectorPanelWidth: number;
   selectedFile: string;
   filePreview?: WorkspaceFileContent;
   selectedChange: string;
@@ -210,6 +228,34 @@ const project = computed(() => selectedProject(state));
 const session = computed(() => selectedSession(state));
 const projectSessions = computed(() => state.sessions.filter((item) => item.projectId === project.value?.id));
 const showFirstRunJourney = computed(() => !firstRunJourneyClosed.value && projectSessions.value.length <= 1);
+const STARTUP_RECOVERY_DISMISS_KEY = "vraxis-code:dismissed-startup-recovery";
+
+function readDismissedStartupRecoveryCheckedAt(): string {
+  try {
+    return sessionStorage.getItem(STARTUP_RECOVERY_DISMISS_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+const dismissedStartupRecoveryCheckedAt = ref(readDismissedStartupRecoveryCheckedAt());
+const showStartupRecoveryAlert = computed(() => {
+  const recovery = state.startupRecovery;
+  if (!recovery?.previousUnexpectedExit) return false;
+  return recovery.checkedAt !== dismissedStartupRecoveryCheckedAt.value;
+});
+
+function dismissStartupRecoveryAlert(): void {
+  const checkedAt = state.startupRecovery?.checkedAt;
+  if (!checkedAt) return;
+  dismissedStartupRecoveryCheckedAt.value = checkedAt;
+  try {
+    sessionStorage.setItem(STARTUP_RECOVERY_DISMISS_KEY, checkedAt);
+  } catch {
+    // sessionStorage may be unavailable in embedded previews
+  }
+}
+
 const runtimeIsEnabled = (runtimeId: string): boolean => !state.settings.disabledRuntimeIds?.includes(runtimeId);
 const localRuntimes = computed(() => state.runtimes.filter((item) => item.kind !== "hosted-provider"));
 const defaultRuntime = computed(() => state.runtimes.find((item) =>
@@ -321,6 +367,9 @@ const activityPresenter = createActivityPresenter((events) => {
   displayedSessionEvents.value = events;
 });
 watch(sessionEvents, (events) => activityPresenter.update(events), { deep: true, immediate: true });
+watch(() => session.value?.id, () => {
+  resetUnderstandArtifact();
+});
 const changedFiles = computed(() => state.changes);
 const availableChangeHunks = computed(() => {
   if (!changeDiff.value || !selectedChange.value) return [];
@@ -343,7 +392,36 @@ const verificationRuns = computed(() => state.verificationRuns ?? []);
 const verificationHandoffs = computed(() => state.verificationHandoffs ?? []);
 const pendingVerificationHandoff = computed(() => verificationHandoffs.value.find((item) => item.state === "requested"));
 const latestVerification = computed(() => verificationRuns.value[0]);
-const verificationIsActive = computed(() => latestVerification.value?.state === "ready" || latestVerification.value?.state === "running");
+const verificationInProgress = computed(() => Boolean(latestVerification.value
+  && ["ready", "running", "needs-browser"].includes(latestVerification.value.state)));
+const verificationIsActive = computed(() => latestVerification.value?.state === "ready"
+  || latestVerification.value?.state === "running");
+const verificationAwaitingStep = computed(() => {
+  const run = latestVerification.value;
+  if (!run) return undefined;
+  const check = run.checks.find((item) => item.state === "awaiting-approval" || item.state === "running");
+  if (check) return { kind: "check" as const, step: check };
+  const service = run.services.find((item) => item.state === "awaiting-approval" || item.state === "starting");
+  if (service) return { kind: "service" as const, step: service };
+  return undefined;
+});
+const verificationPendingApproval = computed(() => {
+  const approvalId = verificationAwaitingStep.value?.step.approvalId;
+  if (!approvalId) return undefined;
+  return state.approvals.find((item) => item.id === approvalId && item.state === "pending");
+});
+const verificationProgressLabel = computed(() => {
+  if (verificationPendingApproval.value) return "Waiting for approval";
+  const current = verificationAwaitingStep.value;
+  if (current?.kind === "check" && current.step.state === "running") return `Running ${current.step.title}`;
+  if (current?.kind === "service" && current.step.state === "starting") {
+    return `Starting ${current.step.title}`;
+  }
+  if (latestVerification.value?.state === "needs-browser") return "Browser proof needed";
+  if (latestVerification.value?.state === "ready") return "Preparing checks";
+  if (verificationIsActive.value) return "Checks running";
+  return "";
+});
 const verificationCanStop = computed(() => Boolean(latestVerification.value
   && ["ready", "running", "needs-browser"].includes(latestVerification.value.state)));
 const verificationHasRecipe = computed(() => Boolean(
@@ -364,6 +442,32 @@ const browserMatchesVerificationTarget = computed(() => {
   } catch {
     return state.browser.url === verificationBrowserTarget.value;
   }
+});
+const verificationViewingWrongPage = computed(() => Boolean(
+  verificationBrowserTarget.value && state.browser?.url && !browserMatchesVerificationTarget.value,
+));
+const verificationStudioTitle = computed(() => (
+  verificationViewingWrongPage.value ? "Verification" : "Verify this page"
+));
+const verificationStudioBadge = computed(() => {
+  if (verificationViewingWrongPage.value) return { label: "Wrong page", tone: "warning" as const };
+  if (latestVerification.value) {
+    return { label: verificationLabel(latestVerification.value), tone: verificationTone(latestVerification.value) };
+  }
+  return { label: "Ready", tone: "neutral" as const };
+});
+const verificationStudioFailure = computed(() => {
+  const run = latestVerification.value;
+  if (!run || run.state !== "failed") return "";
+  return verificationFailureSummary(run);
+});
+const browserUsesLiveSurface = computed(() => desktopBrowserAvailable
+  && Boolean(session.value)
+  && (!state.browser || browserIsLive.value));
+const browserControlSelectionHint = computed(() => {
+  if (!browserIsLive.value) return "Restore the browser before acting on retained controls.";
+  if (browserUsesLiveSurface.value) return "Select a control from the list below.";
+  return "Select a control here or directly on the page.";
 });
 const verificationSteps = computed<OsxPlanStep[]>(() => {
   const services = latestVerification.value?.services ?? state.projectDoctor?.verificationServices ?? [];
@@ -414,7 +518,7 @@ const taskTerminalRuns = computed(() => state.terminalRuns.filter((run) => run.p
 const liveEvidenceActive = computed(() => pendingApprovals.value.length > 0
   || state.approvals.some((item) => item.state === "executing")
   || state.terminalRuns.some((item) => item.status === "pending" || item.status === "running")
-  || verificationIsActive.value);
+  || verificationInProgress.value);
 const browserScreenshot = computed(() => state.browser?.url && state.browser?.screenshotVersion
   ? `/api/browser/${state.browser.sessionId}/screenshot?v=${state.browser.screenshotVersion}`
   : "");
@@ -464,20 +568,39 @@ const evidenceLedger = computed(() => {
     hasEvidence: taskTerminalRuns.value.length > 0 || Boolean(state.browser?.actions.length) || state.approvals.length > 0 || verificationRuns.value.length > 0,
   };
 });
+const taskProofExportable = computed(() => Boolean(
+  session.value
+  && !sessionIsRunning.value
+  && (
+    verificationRuns.value.some((run) => run.state === "passed")
+    || evidenceLedger.value.hasEvidence
+    || displayedSessionEvents.value.some((event) => event.kind === "message" && event.actor === "agent")
+  ),
+));
+const evidenceChromeVisible = computed(() => evidenceLedger.value.hasEvidence
+  || taskProofExportable.value
+  || understandLoading.value
+  || understandOpen.value
+  || Boolean(understandError.value));
 const highlightedFile = computed(() => filePreview.value
   ? highlightCode(filePreview.value.content, filePreview.value.language)
   : undefined);
 const highlightedLines = computed(() => highlightedFile.value?.html.split("\n") ?? []);
-const inspectorWidth = computed(() =>
-  (inspector.value === "files" && selectedFile.value) || (inspector.value === "changes" && selectedChange.value)
-    ? "680px"
-    : inspector.value === "verify" ? "480px"
-    : inspector.value === "browser" ? "620px" : inspector.value === "terminal" ? "clamp(540px, 44vw, 920px)" : "360px");
+const inspectorWidth = computed(() => `${inspectorPanelWidth.value}px`);
 const workspaceBranch = computed(() => session.value?.worktree?.status === "active"
   ? session.value.worktree.branch
   : project.value?.branch ?? "");
-const sourceItems = computed(() => state.projects.map((item) => item.name).join(","));
-const sourceIcons = computed(() => JSON.stringify(Object.fromEntries(state.projects.map((item) => [item.name, "folder"]))));
+const activeBuildBranch = computed(() => session.value?.worktree?.status === "active" ? session.value.worktree.branch : "");
+const buildNeedsNewWorktree = computed(() => {
+  if (mode.value !== "build") return false;
+  const worktree = session.value?.worktree;
+  if (!worktree) return true;
+  if (worktree.status === "active") return false;
+  return ["applied", "reverted", "archived", "cleaned"].includes(worktree.status);
+});
+const runningProjectIds = computed(() => new Set(
+  state.sessions.filter((item) => item.status === "running").map((item) => item.projectId),
+));
 const modeLabel = computed(() => mode.value.charAt(0).toUpperCase() + mode.value.slice(1));
 const sessionIsRunning = computed(() => session.value?.status === "running");
 const composerPending = computed(() => submitting.value || sessionIsRunning.value);
@@ -525,9 +648,13 @@ const composerStatus = computed(() => sessionIsRunning.value
       ? `Agent working · ${session.value.steering.pendingCount} ${session.value.steering.pendingCount === 1 ? "message" : "messages"} queued`
       : "Agent working · Send another message without stopping the task"
   : `${modeLabel.value} · ${runtime.value?.name ?? "Choose runtime"} · ${mode.value === "build"
-  ? session.value?.worktree && ["applied", "reverted", "archived", "cleaned"].includes(session.value.worktree.status)
-    ? "New isolated worktree on send"
-    : "Isolated worktree"
+  ? activeBuildBranch.value
+    ? `Branch ${activeBuildBranch.value}`
+    : buildNeedsNewWorktree.value && composerBranchSlug.value.trim()
+      ? `Branch vraxis/${composerBranchSlug.value.trim()}`
+      : session.value?.worktree && ["applied", "reverted", "archived", "cleaned"].includes(session.value.worktree.status)
+        ? "New isolated worktree on send"
+        : "Isolated worktree"
   : "Read only"} · ${authorityModeLabel.value}`);
 const pendingImportedAttachments = computed(() => pendingAttachmentHandoff.value?.attachments.filter((item) => item.source === "imported") ?? []);
 const pendingHandoffDestination = computed(() => {
@@ -547,6 +674,7 @@ const inspectorOptions = [
   { value: "changes" as const, label: "Changes", icon: "git-branch" as const },
   { value: "terminal" as const, label: "Terminal", icon: "terminal" as const },
   { value: "browser" as const, label: "Browser", icon: "eye" as const },
+  { value: "verify" as const, label: "Verify", icon: "list-checks" as const },
 ];
 const inspectorUsesTab = computed(() => inspectorOptions.some((item) => item.value === inspector.value));
 function syncTaskSelection(): void {
@@ -577,6 +705,7 @@ function cacheCurrentWorkspace(): string | undefined {
   latestWorkspaceKeyByProject.set(snapshot.projectId, key);
   workspaceViewCache.set(key, cloneWorkspaceValue({
     inspector: inspector.value,
+    inspectorPanelWidth: inspectorPanelWidth.value,
     selectedFile: selectedFile.value,
     ...(filePreview.value ? { filePreview: filePreview.value } : {}),
     selectedChange: selectedChange.value,
@@ -595,6 +724,7 @@ function restoreWorkspaceView(key: string): void {
   const view = workspaceViewCache.get(key);
   if (!view) {
     inspector.value = "files";
+    inspectorPanelWidth.value = 480;
     closeFilePreview();
     closeChangeDiff();
     composer.value = "";
@@ -605,6 +735,7 @@ function restoreWorkspaceView(key: string): void {
     return;
   }
   inspector.value = view.inspector;
+  inspectorPanelWidth.value = view.inspectorPanelWidth;
   selectedFile.value = view.selectedFile;
   filePreview.value = view.filePreview ? cloneWorkspaceValue(view.filePreview) : undefined;
   selectedChange.value = view.selectedChange;
@@ -627,14 +758,7 @@ function restoreCachedWorkspace(projectId: string, sessionId?: string): boolean 
     ? workspaceStateKey(projectId, sessionId)
     : latestWorkspaceKeyByProject.get(projectId);
   const snapshot = preferredKey ? workspaceStateCache.get(preferredKey) : undefined;
-  if (!snapshot) {
-    const fallbackSession = sessionId ?? state.sessions.find((item) => item.projectId === projectId)?.id;
-    resetWorkspaceState(state, projectId, fallbackSession);
-    restoreWorkspaceView(workspaceStateKey(projectId, fallbackSession));
-    mode.value = modeForSession(state.sessions.find((item) => item.id === fallbackSession), state.settings.defaultMode);
-    syncTaskSelection();
-    return false;
-  }
+  if (!snapshot) return false;
   restoreWorkspaceState(state, snapshot);
   restoreWorkspaceView(workspaceStateKey(snapshot.projectId, snapshot.sessionId));
   mode.value = modeForSession(state.sessions.find((item) => item.id === snapshot.sessionId), state.settings.defaultMode);
@@ -667,6 +791,71 @@ function finishBackgroundRefresh(): void {
   workspaceRefreshing.value = false;
 }
 
+async function fetchBootstrap(scope: "shell" | "workspace" | "catalog" | "full", signal: AbortSignal): Promise<Partial<BootstrapState>> {
+  const response = await fetch(`/api/bootstrap?scope=${scope}`, { signal });
+  if (!response.ok) throw new Error("The local service did not respond.");
+  return await response.json() as Partial<BootstrapState>;
+}
+
+function assignCollectionIfChanged<T>(current: T[], next: T[] | undefined): void {
+  if (next === undefined || workspaceCollectionsEqual(current, next)) return;
+  current.splice(0, current.length, ...next);
+}
+
+function applyBootstrapPatch(next: Partial<BootstrapState>, scope: BootstrapScope = "full"): void {
+  if (next.contractVersion !== undefined) state.contractVersion = next.contractVersion;
+  if (next.realtime !== undefined) state.realtime = next.realtime;
+  if (next.projects !== undefined) state.projects = next.projects;
+  if (next.sessions !== undefined) state.sessions = next.sessions;
+  if (next.selectedProjectId !== undefined) state.selectedProjectId = next.selectedProjectId;
+  if ("selectedSessionId" in next) {
+    if (next.selectedSessionId) state.selectedSessionId = next.selectedSessionId;
+    else delete state.selectedSessionId;
+  }
+  if (next.settings !== undefined) state.settings = next.settings;
+  if (next.startupRecovery !== undefined) state.startupRecovery = next.startupRecovery;
+  if (scope === "shell") return;
+
+  const includeWorkspace = scope === "workspace" || scope === "full";
+  const includeCatalog = scope === "catalog" || scope === "full";
+
+  if (includeWorkspace) {
+    assignCollectionIfChanged(state.files, next.files);
+    assignCollectionIfChanged(state.changes, next.changes);
+    assignCollectionIfChanged(state.events, next.events);
+    assignCollectionIfChanged(state.approvals, next.approvals);
+    assignCollectionIfChanged(state.approvalRules ??= [], next.approvalRules);
+    assignCollectionIfChanged(state.terminalRuns, next.terminalRuns);
+    assignCollectionIfChanged(state.verificationRuns ??= [], next.verificationRuns);
+    assignCollectionIfChanged(state.verificationHandoffs ??= [], next.verificationHandoffs);
+    if ("browser" in next) {
+      if (next.browser) state.browser = next.browser;
+      else delete state.browser;
+    }
+  }
+
+  if (includeCatalog) {
+    assignCollectionIfChanged(state.skills, next.skills);
+    assignCollectionIfChanged(state.runtimes, next.runtimes);
+    assignCollectionIfChanged(state.modelProviders, next.modelProviders);
+    assignCollectionIfChanged(state.mcpServers, next.mcpServers);
+    if ("projectDoctor" in next) {
+      if (next.projectDoctor) state.projectDoctor = next.projectDoctor;
+      else delete state.projectDoctor;
+    }
+  }
+}
+
+function syncBootstrapSelection(projectChanged: boolean): void {
+  if (state.browser?.url) syncBrowserAddress(state.browser.url);
+  const nextSession = state.sessions.find((item) => item.id === state.selectedSessionId);
+  mode.value = modeForSession(nextSession, state.settings.defaultMode);
+  syncTaskSelection();
+  if (projectChanged) firstRunJourneyClosed.value = false;
+  if (projectChanged || (selectedFile.value && !state.files.some((file) => file.path === selectedFile.value))) closeFilePreview();
+  if (projectChanged || (selectedChange.value && !state.changes.some((file) => file.path === selectedChange.value))) closeChangeDiff();
+}
+
 async function loadState(options: { blocking?: boolean } = {}): Promise<void> {
   if (previewMode) return;
   const blocking = options.blocking ?? !hydrated;
@@ -679,26 +868,28 @@ async function loadState(options: { blocking?: boolean } = {}): Promise<void> {
     loadError.value = "";
   } else beginBackgroundRefresh();
   try {
-    const response = await fetch("/api/bootstrap", { signal: controller.signal });
-    if (!response.ok) throw new Error("The local service did not respond.");
-    const next = await response.json() as BootstrapState;
+    const staged = blocking && !hydrated;
+    const shell = await fetchBootstrap(staged ? "shell" : "full", controller.signal);
     if (requestVersion !== bootstrapRequestVersion) return;
-    next.approvals ??= [];
-    next.approvalRules ??= [];
-    next.terminalRuns ??= [];
-    next.verificationRuns ??= [];
-    const projectChanged = state.selectedProjectId !== next.selectedProjectId;
-    if (!next.selectedSessionId) delete state.selectedSessionId;
-    if (!next.browser) delete state.browser;
-    Object.assign(state, next);
-    if (next.browser?.url) syncBrowserAddress(next.browser.url);
+    const projectChanged = state.selectedProjectId !== shell.selectedProjectId;
+    applyBootstrapPatch(shell, staged ? "shell" : "full");
     serviceOnline.value = true;
-    const nextSession = next.sessions.find((item) => item.id === next.selectedSessionId);
-    mode.value = modeForSession(nextSession, next.settings.defaultMode);
-    syncTaskSelection();
-    if (projectChanged) firstRunJourneyClosed.value = false;
-    if (projectChanged || (selectedFile.value && !next.files.some((file) => file.path === selectedFile.value))) closeFilePreview();
-    if (projectChanged || (selectedChange.value && !next.changes.some((file) => file.path === selectedChange.value))) closeChangeDiff();
+    syncBootstrapSelection(projectChanged);
+    if (staged) {
+      const [workspace, catalog] = await Promise.all([
+        fetchBootstrap("workspace", controller.signal),
+        fetchBootstrap("catalog", controller.signal),
+      ]);
+      if (requestVersion !== bootstrapRequestVersion) return;
+      applyBootstrapPatch(workspace, "workspace");
+      applyBootstrapPatch(catalog, "catalog");
+      syncBootstrapSelection(false);
+      hydrated = true;
+      loading.value = false;
+      cacheCurrentWorkspace();
+      scheduleRunPoll();
+      return;
+    }
     hydrated = true;
     cacheCurrentWorkspace();
     scheduleRunPoll();
@@ -728,9 +919,14 @@ function attachmentSizeLabel(size = 0): string {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function onShellPanelResize(panel: "sidebar" | "inspector", width: number): void {
+  if (panel === "inspector") inspectorPanelWidth.value = width;
+}
+
 function chooseInspectorView(view: InspectorView): void {
   inspector.value = view;
   if (view === "terminal") void ensureUserTerminal();
+  if (view === "verify" && !state.projectDoctor && project.value) void refreshProjectDoctor();
 }
 
 function handleWorkspaceShortcut(event: KeyboardEvent): void {
@@ -759,6 +955,25 @@ function handleWorkspaceShortcut(event: KeyboardEvent): void {
   }
 }
 
+function clearVerificationRefresh(): void {
+  if (verificationRefreshTimer) clearInterval(verificationRefreshTimer);
+  verificationRefreshTimer = undefined;
+}
+
+function scheduleVerificationRefresh(active: boolean): void {
+  clearVerificationRefresh();
+  if (!active || previewMode || !session.value) return;
+  verificationRefreshTimer = setInterval(() => {
+    if (!session.value) return;
+    void refreshLiveEvidence(session.value.id).catch(() => undefined);
+  }, 2_000);
+}
+
+async function focusVerificationApproval(): Promise<void> {
+  await nextTick();
+  document.querySelector<HTMLElement>(".verification-approval")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
 function verificationLabel(run: VerificationRunSummary): string {
   if (run.state === "needs-browser") return "Browser proof needed";
   if (run.state === "passed") return "Passed";
@@ -772,6 +987,15 @@ function verificationTone(run: VerificationRunSummary): "neutral" | "info" | "su
   if (run.state === "failed") return "error";
   if (run.state === "needs-browser" || run.state === "interrupted") return "warning";
   return run.state === "running" ? "info" : "neutral";
+}
+
+function verificationFailureSummary(run: VerificationRunSummary): string {
+  return run.services.find((item) => item.state === "failed")?.failure
+    ?? run.checks.find((item) => item.state === "failed")?.failure
+    ?? run.browserAssertions?.find((item) => item.state === "failed")?.failure
+    ?? run.visual?.failure
+    ?? run.browserFailure
+    ?? "Open the related terminal receipt for details.";
 }
 
 function approvalDescription(approval: ApprovalSummary): string {
@@ -873,19 +1097,17 @@ function taskPaneIsNearBottom(): boolean {
 watch([sessionPane, taskEnd], ([pane, end], _previous, onCleanup) => {
   latestMessagesHidden.value = false;
   if (!pane || !end) return;
+  const root = pane.scrollHeight > pane.clientHeight ? pane : null;
   const observer = new IntersectionObserver(([entry]) => {
     latestMessagesHidden.value = Boolean(entry && !entry.isIntersecting);
-  }, { rootMargin: "0px 0px 8px 0px" });
+  }, { root, rootMargin: "0px 0px 8px 0px" });
   observer.observe(end);
   onCleanup(() => observer.disconnect());
 }, { flush: "post" });
 
 async function jumpToLatest(): Promise<void> {
   const pane = sessionPane.value;
-  const end = taskEnd.value;
-  if (!pane || !end) return;
-  // Keep keyboard focus in the conversation when the jump button disappears.
-  pane.focus({ preventScroll: true });
+  if (!pane) return;
   let cancelled = false;
   const cancel = () => { cancelled = true; };
   for (const event of ["wheel", "touchstart", "keydown"] as const) {
@@ -895,20 +1117,28 @@ async function jumpToLatest(): Promise<void> {
     let stableFrames = 0;
     let previousHeight = -1;
     // content-visibility replaces estimated message heights during a jump.
-    // Follow the end through that layout work, but never fight user scrolling.
+    // Drive the pane directly instead of scrollIntoView, which can scroll
+    // ancestor containers and land at the top of the transcript.
     for (let frame = 0; frame < 24 && stableFrames < 4; frame += 1) {
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
-      if (cancelled || sessionPane.value !== pane || taskEnd.value !== end) return;
+      if (cancelled || sessionPane.value !== pane) return;
+      pane.scrollTop = pane.scrollHeight;
+      const end = taskEnd.value;
+      if (end) {
+        const endRect = end.getBoundingClientRect();
+        if (endRect.bottom > window.innerHeight || endRect.top < pane.getBoundingClientRect().top) {
+          window.scrollTo({
+            top: window.scrollY + endRect.bottom - window.innerHeight + 1,
+            behavior: "auto",
+          });
+        }
+      }
       const height = pane.scrollHeight;
-      const bounds = end.getBoundingClientRect();
-      const paneBounds = pane.getBoundingClientRect();
-      const bottom = Math.min(window.innerHeight, paneBounds.bottom);
-      const atEnd = bounds.bottom <= bottom + 2 && bounds.top >= Math.max(0, paneBounds.top);
-      stableFrames = atEnd && height === previousHeight ? stableFrames + 1 : 0;
+      const atBottom = height - pane.scrollTop - pane.clientHeight <= 2;
+      stableFrames = atBottom && height === previousHeight ? stableFrames + 1 : 0;
       previousHeight = height;
-      // Also handles the narrow layout, where the document itself scrolls.
-      if (!atEnd) end.scrollIntoView({ block: "end", behavior: "instant" });
     }
+    pane.focus({ preventScroll: true });
   } finally {
     for (const event of ["wheel", "touchstart", "keydown"] as const) {
       window.removeEventListener(event, cancel, true);
@@ -1054,15 +1284,21 @@ function submissionSkillIds(submission?: OsxAgentComposerSubmission): string[] {
   return [...new Set(selected)].slice(0, promptSkillLimits.maximumCount);
 }
 
-async function chooseProject(event: Event): Promise<void> {
-  const name = String(eventValue(event));
-  const next = state.projects.find((item) => item.name === name);
+async function chooseProject(next: ProjectSummary): Promise<void> {
   activeView.value = "workspace";
-  if (!next || next.id === state.selectedProjectId) return;
+  if (next.id === state.selectedProjectId) return;
   const previousKey = cacheCurrentWorkspace();
   const requestVersion = ++selectionVersion;
   focusedEvidence.value = undefined;
-  restoreCachedWorkspace(next.id);
+  const cached = restoreCachedWorkspace(next.id);
+  if (!cached) {
+    workspaceNavigating.value = true;
+    const fallbackSession = state.sessions.find((item) => item.projectId === next.id)?.id;
+    resetWorkspaceState(state, next.id, fallbackSession);
+    restoreWorkspaceView(workspaceStateKey(next.id, fallbackSession));
+    mode.value = modeForSession(state.sessions.find((item) => item.id === fallbackSession), state.settings.defaultMode);
+    syncTaskSelection();
+  }
   loadError.value = "";
   try {
     await queueSelection(`/api/projects/${next.id}/select`);
@@ -1078,6 +1314,8 @@ async function chooseProject(event: Event): Promise<void> {
       syncTaskSelection();
     }
     taskError.value = error instanceof Error ? error.message : "The project could not be opened.";
+  } finally {
+    if (requestVersion === selectionVersion) workspaceNavigating.value = false;
   }
 }
 
@@ -1090,8 +1328,16 @@ async function chooseSession(item: SessionSummary): Promise<void> {
   const previousKey = cacheCurrentWorkspace();
   const requestVersion = ++selectionVersion;
   focusedEvidence.value = undefined;
-  restoreCachedWorkspace(item.projectId, item.id);
-  mode.value = item.mode;
+  const cached = restoreCachedWorkspace(item.projectId, item.id);
+  if (!cached) {
+    workspaceNavigating.value = true;
+    resetWorkspaceState(state, item.projectId, item.id);
+    restoreWorkspaceView(workspaceStateKey(item.projectId, item.id));
+    mode.value = item.mode;
+    syncTaskSelection();
+  } else {
+    mode.value = item.mode;
+  }
   try {
     await queueSelection(`/api/sessions/${item.id}/select`);
     if (requestVersion !== selectionVersion) return;
@@ -1107,6 +1353,8 @@ async function chooseSession(item: SessionSummary): Promise<void> {
       syncTaskSelection();
     }
     taskError.value = error instanceof Error ? error.message : "The task could not be opened.";
+  } finally {
+    if (requestVersion === selectionVersion) workspaceNavigating.value = false;
   }
 }
 
@@ -1289,6 +1537,9 @@ function submitPrompt(event: Event): void {
     mode: mode.value,
     runtimeId: runtime.value.id,
     modelId: submittedModelId,
+    ...(mode.value === "build" && buildNeedsNewWorktree.value && composerBranchSlug.value.trim()
+      ? { branchSlug: composerBranchSlug.value.trim() }
+      : {}),
     ...(sessionIsRunning.value ? { delivery: steeringDelivery.value } : {}),
   };
   if (attachments.some((item) => item.source === "imported")) {
@@ -1328,6 +1579,7 @@ async function sendPreparedPrompt(prepared: PreparedPrompt): Promise<void> {
         runtimeId: prepared.runtimeId,
         modelId: prepared.modelId || null,
         ...(prepared.delivery ? { delivery: prepared.delivery } : {}),
+        ...(prepared.branchSlug ? { branchSlug: prepared.branchSlug } : {}),
         ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}),
         ...(prepared.skillIds.length ? { skillIds: prepared.skillIds } : {}),
         ...(attachmentConsent ? { attachmentConsent } : {}),
@@ -1339,6 +1591,7 @@ async function sendPreparedPrompt(prepared: PreparedPrompt): Promise<void> {
         runtimeId: prepared.runtimeId,
         ...(prepared.modelId ? { modelId: prepared.modelId } : {}),
         prompt: prepared.prompt,
+        ...(prepared.branchSlug ? { branchSlug: prepared.branchSlug } : {}),
         ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}),
         ...(prepared.skillIds.length ? { skillIds: prepared.skillIds } : {}),
         ...(attachmentConsent ? { attachmentConsent } : {}),
@@ -1346,6 +1599,7 @@ async function sendPreparedPrompt(prepared: PreparedPrompt): Promise<void> {
     }
     applySessionMutation(update);
     composer.value = "";
+    composerBranchSlug.value = "";
     composerAttachments.value = [];
     composerContextItems.value = [];
     attachmentReferences.clear();
@@ -1445,10 +1699,11 @@ async function ensureUserTerminal(force = false): Promise<void> {
   terminalStarting.value = true;
   terminalError.value = "";
   try {
-    const result = await post(`/api/sessions/${session.value.id}/terminal-shell`, {}) as { run: TerminalRunSummary };
+    const result = await post(`/api/sessions/${session.value.id}/terminal-shell`, force ? { force: true } : {}) as { run: TerminalRunSummary };
     const existingRun = state.terminalRuns.findIndex((run) => run.id === result.run.id);
     if (existingRun >= 0) state.terminalRuns[existingRun] = result.run;
     else state.terminalRuns.unshift(result.run);
+    selectedTerminalRunId.value = result.run.id;
     scheduleRunPoll(true);
   } catch (error) {
     terminalError.value = error instanceof Error ? error.message : "The terminal could not be opened.";
@@ -1481,7 +1736,7 @@ async function refreshProjectDoctor(): Promise<void> {
 }
 
 async function startVerification(handoffId = pendingVerificationHandoff.value?.id): Promise<void> {
-  if (!session.value || verificationIsActive.value || !verificationHasRecipe.value) return;
+  if (!session.value || verificationInProgress.value || !verificationHasRecipe.value) return;
   verificationAction.value = "start";
   taskError.value = "";
   try {
@@ -1500,6 +1755,7 @@ async function startVerification(handoffId = pendingVerificationHandoff.value?.i
     if (result.approval && !state.approvals.some((item) => item.id === result.approval!.id)) state.approvals.unshift(result.approval);
     inspector.value = "verify";
     scheduleRunPoll(true);
+    if (result.approval?.state === "pending") await focusVerificationApproval();
   } catch (error) {
     taskError.value = error instanceof Error ? error.message : "Verification could not be started.";
   } finally {
@@ -1929,6 +2185,69 @@ async function exportTaskReceipt(format: "html" | "json"): Promise<void> {
   } finally {
     receiptExporting.value = "";
   }
+}
+
+function resetUnderstandArtifact(): void {
+  understandArtifact.value = undefined;
+  understandError.value = "";
+  understandOpen.value = false;
+  understandExporting.value = false;
+}
+
+async function openUnderstandArtifact(): Promise<void> {
+  if (!session.value || understandLoading.value) return;
+  understandError.value = "";
+  understandLoading.value = true;
+  understandOpen.value = true;
+  try {
+    const response = await fetch(`/api/sessions/${session.value.id}/understand.json`);
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(failure.error ?? "The understanding artifact could not be generated.");
+    }
+    understandArtifact.value = await response.json() as UnderstandArtifactEnvelopeV1;
+  } catch (error) {
+    understandError.value = error instanceof Error ? error.message : "The understanding artifact could not be generated.";
+    understandOpen.value = false;
+  } finally {
+    understandLoading.value = false;
+  }
+}
+
+async function exportUnderstandArtifact(): Promise<void> {
+  if (!session.value || understandExporting.value) return;
+  understandExporting.value = true;
+  taskError.value = "";
+  try {
+    const response = await fetch(`/api/sessions/${session.value.id}/understand.json`);
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(failure.error ?? "The understanding artifact could not be exported.");
+    }
+    const blob = new Blob([`${JSON.stringify(await response.json() as UnderstandArtifactEnvelopeV1, null, 2)}\n`], { type: "application/vnd.vraxis.understand+json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${project.value?.name ?? "vraxis"}-${session.value.id.slice(0, 8)}-understand.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    taskError.value = error instanceof Error ? error.message : "The understanding artifact could not be exported.";
+  } finally {
+    understandExporting.value = false;
+  }
+}
+
+async function exploreUnderstandEvidence(link: UnderstandEvidenceLinkV1): Promise<void> {
+  if (link.kind === "verification") {
+    inspector.value = "verify";
+    return;
+  }
+  if (link.kind === "worktree") {
+    inspector.value = "changes";
+    return;
+  }
+  await focusLinkedEvidence({ kind: link.kind, target: link.target });
 }
 
 async function exportBrowserReplay(): Promise<void> {
@@ -2535,6 +2854,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   activityPresenter.dispose();
   clearRunPoll();
+  clearVerificationRefresh();
   closeTaskStream();
   bootstrapAbortController?.abort();
   if (workspaceRefreshTimer) clearTimeout(workspaceRefreshTimer);
@@ -2558,6 +2878,11 @@ watch([browserLiveSurface, desktopBrowserVisible, () => session.value?.id, brows
   await syncDesktopBrowserLayout();
 });
 
+watch(verificationInProgress, (active) => {
+  scheduleVerificationRefresh(active);
+  if (active) scheduleRunPoll(true);
+}, { immediate: true });
+
 watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () => {
   connectTaskStream();
 });
@@ -2574,12 +2899,20 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
       :sidebar-min-width="220"
       :sidebar-max-width="340"
       :inspector-min-width="320"
-      :inspector-max-width="inspector === 'terminal' || inspector === 'browser' ? 1200 : 760"
+      :inspector-max-width="1200"
+      @panel-resize="onShellPanelResize"
     >
       <div v-if="activeView === 'workspace' && project" slot="toolbar" class="workspace-identity" aria-label="Current project">
         <osx-icon name="folder" :size="15" />
         <span>{{ project.name }}</span>
-        <osx-badge size="small" :label="workspaceBranch" />
+        <template v-if="activeBuildBranch">
+          <span class="workspace-branch-group" :title="`Build branch ${activeBuildBranch}`">
+            <osx-icon name="git-branch" :size="14" />
+            <span class="workspace-branch-label">{{ activeBuildBranch }}</span>
+          </span>
+          <osx-badge size="small" tone="info" label="Build" />
+        </template>
+        <osx-badge v-else size="small" :label="`Source · ${workspaceBranch}`" />
         <osx-badge
           v-if="session?.worktree"
           size="small"
@@ -2598,15 +2931,12 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
           <osx-icon-button v-if="state.projects.length" label="Choose another project" icon="plus" size="small" :disabled="registering" @click="openProjectPicker" />
         </div>
 
-        <osx-source-list
+        <ProjectSourceList
           v-if="state.projects.length"
-          label="Projects"
-          heading=""
-          :items="sourceItems"
-          :icons="sourceIcons"
-          :value="project?.name"
-          compact
-          @change="chooseProject"
+          :projects="state.projects"
+          :selected-project-id="state.selectedProjectId"
+          :running-project-ids="runningProjectIds"
+          @select="chooseProject"
         />
         <p v-else class="sidebar-empty-copy">No projects yet.</p>
 
@@ -2768,7 +3098,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
         </div>
 
         <div v-else-if="loading" class="center-state">
-          <osx-spinner label="Loading workspace" show-label />
+          <WorkspaceSplash />
         </div>
 
         <div v-else-if="loadError" class="center-state">
@@ -2793,6 +3123,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
         </div>
 
         <template v-else>
+          <div class="workspace-stage" :class="{ 'is-navigating': workspaceNavigating }">
           <header class="task-header">
             <div class="task-title">
               <h1>{{ session?.title ?? "New task" }}</h1>
@@ -2800,10 +3131,12 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
           </header>
 
           <osx-alert
-            v-if="state.startupRecovery?.previousUnexpectedExit"
+            v-if="showStartupRecoveryAlert"
             tone="warning"
             title="Recovered after an unexpected exit"
             description="Active approvals, terminal runs, verification, and worktree application were reconciled before this workspace opened. Review retained evidence before continuing unfinished work."
+            dismissible
+            @dismiss="dismissStartupRecoveryAlert"
           />
 
           <osx-alert
@@ -2936,7 +3269,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
             <header>
               <div>
                 <strong>{{ pendingApprovals.length === 1 ? "Action needs your approval" : `${pendingApprovals.length} actions need your approval` }}</strong>
-                <span>Review the exact authority and scope before the agent continues.</span>
+                <span>{{ pendingApprovals.some((item) => item.title.startsWith('Verify ·') || item.title.startsWith('Start service ·')) ? 'Verification and other governed actions wait here until you allow them.' : 'Review the exact authority and scope before the agent continues.' }}</span>
               </div>
               <osx-badge size="small" :label="String(pendingApprovals.length)" tone="warning" />
             </header>
@@ -2975,17 +3308,21 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
               </div>
             </div>
           </section>
+          <div v-if="workspaceNavigating" class="workspace-navigation-shade" aria-hidden="true">
+            <osx-spinner size="small" label="Opening workspace" />
+          </div>
+          </div>
         </template>
         <div v-if="activeView === 'workspace'" ref="taskEnd" class="task-end" aria-hidden="true" />
       </section>
 
       <div v-if="activeView === 'workspace' && project" slot="composer" class="task-composer-shell">
-        <div v-if="latestMessagesHidden" class="task-jump-latest">
-          <osx-tooltip text="Jump to latest" placement="top">
-            <osx-icon-button label="Jump to latest" icon="chevron-down" @click="jumpToLatest" />
-          </osx-tooltip>
-        </div>
         <div :class="['task-composer-frame', { 'is-pending': composerPending }]">
+          <div v-if="latestMessagesHidden" class="task-jump-latest">
+            <osx-tooltip text="Jump to latest" placement="top">
+              <osx-icon-button label="Jump to latest" icon="chevron-down" @click="jumpToLatest" />
+            </osx-tooltip>
+          </div>
           <osx-agent-composer
             :value="composer"
             :placeholder="sessionIsRunning ? 'Steer the agent or queue the next instruction…' : session ? 'Send a follow-up. @ adds files. $ adds skills.' : 'Describe the task. @ adds files. $ adds skills.'"
@@ -3027,6 +3364,18 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
               </select>
               <osx-icon name="chevron-down" :size="12" />
             </label>
+            <label v-if="buildNeedsNewWorktree" slot="controls" class="composer-runtime-control composer-branch-control">
+              <osx-icon name="git-branch" :size="14" />
+              <span class="visually-hidden">Branch slug</span>
+              <input
+                v-model="composerBranchSlug"
+                type="text"
+                aria-label="Branch slug"
+                placeholder="fix/login-bug"
+                spellcheck="false"
+                :disabled="submitting || composerPending"
+              />
+            </label>
             <label slot="controls" class="composer-runtime-control">
               <osx-icon name="terminal" :size="14" />
               <span class="visually-hidden">Runtime</span>
@@ -3051,7 +3400,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
         </div>
       </div>
 
-      <aside v-if="activeView === 'workspace' && project" slot="inspector" class="inspector" aria-label="Project evidence">
+      <aside v-if="activeView === 'workspace' && project" slot="inspector" class="inspector" :class="{ 'is-navigating': workspaceNavigating }" aria-label="Project evidence">
         <div class="evidence-tabs" role="tablist" aria-label="Project evidence">
           <button
             v-for="(item, index) in inspectorOptions"
@@ -3074,20 +3423,39 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
 
         <section
           id="evidence-panel"
-          :class="['evidence-panel', { 'has-ledger': evidenceLedger.hasEvidence }]"
+          class="evidence-panel"
           :role="inspectorUsesTab ? 'tabpanel' : 'region'"
           :aria-labelledby="inspectorUsesTab ? `evidence-tab-${inspector}` : undefined"
           :aria-label="inspectorUsesTab ? undefined : 'Project verification'"
         >
-          <section v-if="evidenceLedger.hasEvidence" class="evidence-ledger" aria-label="Task evidence ledger">
-            <span class="evidence-ledger-title"><osx-icon name="list-checks" :size="14" /><strong>Evidence</strong></span>
-            <span v-if="evidenceLedger.activeCommands"><osx-icon name="loader" :size="13" />{{ evidenceLedger.activeCommands }} running</span>
-            <span v-if="evidenceLedger.passedCommands"><osx-icon name="check" :size="13" />{{ evidenceLedger.passedCommands }} passed</span>
-            <span v-if="evidenceLedger.verificationPassed"><osx-icon name="shield-check" :size="13" />{{ evidenceLedger.verificationPassed }} verified</span>
-            <span v-if="evidenceLedger.verificationActive" class="warning"><osx-icon name="list-checks" :size="13" />{{ evidenceLedger.verificationActive }} verifying</span>
-            <span v-if="evidenceLedger.browserActions"><osx-icon name="eye" :size="13" />{{ evidenceLedger.browserActions }} browser {{ evidenceLedger.browserActions === 1 ? 'action' : 'actions' }}</span>
-            <span v-if="evidenceLedger.pendingApprovals" class="warning"><osx-icon name="lock" :size="13" />{{ evidenceLedger.pendingApprovals }} waiting</span>
-          </section>
+          <div v-if="evidenceChromeVisible" class="evidence-chrome">
+            <section v-if="evidenceLedger.hasEvidence" class="evidence-ledger" aria-label="Task evidence ledger">
+              <span class="evidence-ledger-title"><osx-icon name="list-checks" :size="14" /><strong>Evidence</strong></span>
+              <span v-if="evidenceLedger.activeCommands"><osx-icon name="loader" :size="13" />{{ evidenceLedger.activeCommands }} running</span>
+              <span v-if="evidenceLedger.passedCommands"><osx-icon name="check" :size="13" />{{ evidenceLedger.passedCommands }} passed</span>
+              <span v-if="evidenceLedger.verificationPassed"><osx-icon name="shield-check" :size="13" />{{ evidenceLedger.verificationPassed }} verified</span>
+              <span v-if="evidenceLedger.verificationActive" class="warning"><osx-icon name="list-checks" :size="13" />{{ evidenceLedger.verificationActive }} verifying</span>
+              <span v-if="evidenceLedger.browserActions"><osx-icon name="eye" :size="13" />{{ evidenceLedger.browserActions }} browser {{ evidenceLedger.browserActions === 1 ? 'action' : 'actions' }}</span>
+              <span v-if="evidenceLedger.pendingApprovals" class="warning"><osx-icon name="lock" :size="13" />{{ evidenceLedger.pendingApprovals }} waiting</span>
+            </section>
+            <section v-if="taskProofExportable" class="proof-export-actions" aria-label="Portable task proof">
+              <span class="proof-export-title"><osx-icon name="shield-check" :size="14" /><strong>Portable proof</strong></span>
+              <span class="proof-export-buttons">
+                <osx-button size="small" variant="secondary" icon="sparkle" :loading="understandLoading" @click="openUnderstandArtifact">Understand</osx-button>
+                <osx-button size="small" variant="secondary" icon="download" :loading="receiptExporting === 'html'" @click="exportTaskReceipt('html')">Download proof</osx-button>
+                <osx-button size="small" variant="secondary" icon="file-code" :loading="receiptExporting === 'json'" @click="exportTaskReceipt('json')">Signed JSON</osx-button>
+              </span>
+            </section>
+            <div v-if="understandLoading" class="understand-loading"><osx-spinner size="small" label="Generating understanding" show-label /></div>
+            <UnderstandArtifactPanel
+              v-if="understandOpen && understandArtifact"
+              :artifact="understandArtifact"
+              @close="resetUnderstandArtifact"
+              @download="exportUnderstandArtifact"
+              @explore="exploreUnderstandEvidence"
+            />
+            <osx-alert v-else-if="understandError" tone="error" title="Understanding unavailable" :description="understandError" />
+          </div>
           <div v-if="inspector === 'files'" class="evidence-view file-inspector">
             <div
               v-if="state.files.length"
@@ -3381,6 +3749,12 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                   :title="issue.message"
                   :description="issue.remediation"
                 />
+                <osx-alert
+                  v-if="!verificationHasRecipe"
+                  tone="warning"
+                  title="No verification recipe yet"
+                  description="Add checks to .vraxis/verify.json or ensure the project manifest exposes test, lint, or build scripts Project Doctor can discover."
+                />
               </template>
               <div v-else class="doctor-loading"><osx-spinner size="small" label="Inspecting project" show-label /></div>
             </section>
@@ -3404,6 +3778,29 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                   <osx-button size="small" variant="primary" icon="play" :loading="verificationAction === 'start'" :disabled="!verificationHasRecipe" @click="startVerification(pendingVerificationHandoff.id)">Start governed verification</osx-button>
                 </div>
               </section>
+              <section v-if="verificationPendingApproval" class="verification-approval" aria-label="Verification approval required">
+                <header>
+                  <strong>Approve the next project check</strong>
+                  <small>Verification uses the project-owned recipe. Each command waits for your approval before it runs.</small>
+                </header>
+                <osx-agent-approval
+                  :title="verificationPendingApproval.title"
+                  :description="approvalDescription(verificationPendingApproval)"
+                  :risk="verificationPendingApproval.risk"
+                  :scope="verificationPendingApproval.scope"
+                  approve-label="Allow once"
+                  reject-label="Deny"
+                  :disabled="approvalActionId === verificationPendingApproval.id"
+                  @approve="decideApproval(verificationPendingApproval, 'approve')"
+                  @reject="decideApproval(verificationPendingApproval, 'deny')"
+                />
+              </section>
+              <osx-alert
+                v-else-if="verificationProgressLabel && verificationIsActive"
+                tone="info"
+                title="Verification in progress"
+                :description="verificationProgressLabel"
+              />
               <div v-if="latestVerification?.services.length" class="verification-services" aria-label="Governed service health">
                 <article v-for="service in latestVerification.services" :key="service.id">
                   <span>
@@ -3466,7 +3863,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                 v-else-if="latestVerification?.state === 'failed'"
                 tone="error"
                 title="Verification needs attention"
-                :description="latestVerification.services.find(item => item.state === 'failed')?.failure ?? latestVerification.checks.find(item => item.state === 'failed')?.failure ?? latestVerification.browserAssertions?.find(item => item.state === 'failed')?.failure ?? latestVerification.visual?.failure ?? latestVerification.browserFailure ?? 'Open the related terminal receipt for details.'"
+                :description="verificationFailureSummary(latestVerification)"
               />
               <osx-alert v-if="browserError && inspector === 'verify'" tone="error" title="Browser proof not captured" :description="browserError" />
               <div class="verification-actions">
@@ -3486,10 +3883,10 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                   size="small"
                   icon="play"
                   :loading="verificationAction === 'start' || verificationAction === 'rerun'"
-                  :disabled="!session || verificationIsActive || (!verificationCanRerun && !verificationHasRecipe)"
+                  :disabled="!session || Boolean(verificationAction) || (!verificationCanRerun && (verificationInProgress || !verificationHasRecipe))"
                   @click="verificationCanRerun ? rerunVerification() : startVerification()"
                 >
-                  {{ verificationCanRerun ? 'Rerun exact recipe' : verificationIsActive ? 'Verification running' : 'Run verification' }}
+                  {{ verificationCanRerun ? 'Rerun exact recipe' : verificationProgressLabel || (verificationInProgress ? 'Verification active' : 'Run verification') }}
                 </osx-button>
                 <osx-button
                   v-if="verificationCanStop"
@@ -3594,27 +3991,68 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
               <header>
                 <span class="browser-verification-icon"><osx-icon name="shield-check" :size="16" /></span>
                 <span>
-                  <h3 id="browser-verification-heading">Verify this page</h3>
-                  <small v-if="latestVerification?.browserEvidence">
+                  <h3 id="browser-verification-heading">{{ verificationStudioTitle }}</h3>
+                  <small v-if="verificationViewingWrongPage">
+                    Viewing {{ state.browser?.url }} · target {{ verificationBrowserTarget }}
+                  </small>
+                  <small v-else-if="latestVerification?.browserEvidence">
                     Captured {{ new Date(latestVerification.browserEvidence.capturedAt).toLocaleTimeString() }} · {{ latestVerification.browserEvidence.consoleErrors }} console · {{ latestVerification.browserEvidence.networkErrors }} network errors
                   </small>
                   <small v-else-if="latestVerification?.state === 'needs-browser'">Command checks passed. Capture the visible page and browser diagnostics.</small>
-                  <small v-else>{{ verificationBrowserTarget ?? 'Use the current page as retained verification evidence.' }}</small>
+                  <small v-else-if="verificationBrowserTarget">Target · {{ verificationBrowserTarget }}</small>
+                  <small v-else>Use the current page as retained verification evidence.</small>
                 </span>
                 <osx-badge
                   size="small"
-                  :label="latestVerification ? verificationLabel(latestVerification) : 'Ready'"
-                  :tone="latestVerification ? verificationTone(latestVerification) : 'neutral'"
+                  :label="verificationStudioBadge.label"
+                  :tone="verificationStudioBadge.tone"
                 />
               </header>
+              <osx-alert
+                v-if="verificationPendingApproval"
+                tone="warning"
+                title="Approval required to continue"
+                :description="`${verificationPendingApproval.title} is waiting in Verify before the recipe can continue.`"
+              />
+              <osx-alert
+                v-if="verificationViewingWrongPage"
+                tone="warning"
+                title="Verification target is on another page"
+                :description="`Open ${verificationBrowserTarget} before capturing proof or rerunning checks against the recipe.`"
+              />
+              <p v-if="verificationStudioFailure" class="browser-verification-failure" role="status">
+                {{ verificationStudioFailure }}
+              </p>
               <div class="browser-verification-progress">
                 <span><strong>{{ latestVerification?.checks.filter(item => item.state === 'passed').length ?? 0 }}/{{ latestVerification?.checks.length ?? state.projectDoctor?.verificationChecks.length ?? 0 }}</strong><small>checks passed</small></span>
                 <span><strong>{{ latestVerification?.browserAssertions.filter(item => item.state === 'passed').length ?? 0 }}/{{ latestVerification?.browserAssertions.length ?? state.projectDoctor?.verificationBrowserAssertions?.length ?? 0 }}</strong><small>page assertions</small></span>
                 <span><strong>{{ latestVerification?.browserEvidence?.actionCount ?? state.browser?.actions.length ?? 0 }}</strong><small>retained actions</small></span>
               </div>
               <footer>
+                <template v-if="verificationViewingWrongPage && verificationBrowserTarget">
+                  <osx-button
+                    variant="primary"
+                    size="small"
+                    icon="external"
+                    :loading="verificationAction === 'browser'"
+                    @click="openVerificationBrowser()"
+                  >
+                    Open target
+                  </osx-button>
+                  <osx-button
+                    v-if="verificationCanRerun"
+                    variant="secondary"
+                    size="small"
+                    icon="play"
+                    :loading="verificationAction === 'rerun'"
+                    :disabled="verificationIsActive"
+                    @click="rerunVerification()"
+                  >
+                    Rerun recipe
+                  </osx-button>
+                </template>
                 <osx-button
-                  v-if="latestVerification?.state === 'needs-browser'"
+                  v-else-if="latestVerification?.state === 'needs-browser'"
                   variant="primary"
                   size="small"
                   icon="camera"
@@ -3629,12 +4067,14 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                   size="small"
                   icon="play"
                   :loading="verificationAction === 'start' || verificationAction === 'rerun'"
-                  :disabled="verificationIsActive || (!verificationCanRerun && !verificationHasRecipe)"
+                  :disabled="Boolean(verificationAction) || (!verificationCanRerun && (verificationInProgress || !verificationHasRecipe))"
                   @click="verificationCanRerun ? rerunVerification() : startVerification()"
                 >
-                  {{ verificationCanRerun ? 'Rerun recipe' : verificationIsActive ? 'Checks running' : 'Run checks' }}
+                  {{ verificationCanRerun ? 'Rerun recipe' : verificationProgressLabel || (verificationInProgress ? 'Verification active' : 'Run checks') }}
                 </osx-button>
+                <osx-button v-if="verificationPendingApproval" size="small" variant="primary" @click="chooseInspectorView('verify')">Review approval</osx-button>
                 <osx-button v-if="verificationCanStop" size="small" variant="secondary" icon="square" :loading="verificationAction === 'stop'" @click="stopVerification">Stop</osx-button>
+                <osx-button size="small" variant="secondary" @click="chooseInspectorView('verify')">Full report</osx-button>
               </footer>
             </section>
 
@@ -3692,7 +4132,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                 <header>
                   <span>
                     <strong id="browser-control-map-heading">Interactive controls</strong>
-                    <small>{{ browserIsLive ? "Select a control here or directly on the page." : "Restore the browser before acting on retained controls." }}</small>
+                    <small>{{ browserControlSelectionHint }}</small>
                   </span>
                   <osx-badge :label="`${state.browser.controls.length} found`" tone="info" size="small" />
                 </header>

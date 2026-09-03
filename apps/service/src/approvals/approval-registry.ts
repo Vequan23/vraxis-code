@@ -286,9 +286,8 @@ export class ApprovalRegistry {
         ? "external-server"
         : request.category === "browser" ? "controlled-browser" : "isolated-worktree",
     }, request.id);
-    const persisted = (await this.list(sessionId)).find((item) => item.id === approval.id);
-    if (persisted?.state === "approved") return "approved";
-    if (persisted?.state !== "pending") return "denied";
+    if (approval.state === "approved") return "approved";
+    if (approval.state !== "pending") return "denied";
     return new Promise((resolve) => this.decisions.set(approval.id, { resolve }));
   }
 

@@ -119,6 +119,7 @@ test("falls back to discovered checks when no project recipe exists", async () =
   assert.deepEqual(report.verificationBrowserAssertions, []);
   assert.equal(report.verificationSource.browserTarget, "http://127.0.0.1:4318/");
   assert.deepEqual(report.verificationChecks.map((check) => check.id), ["javascript:test"]);
+  assert.ok(report.issues.some((issue) => issue.code === "verification-recipe-starter"));
 });
 
 test("rejects ambiguous booleans, unsafe browser targets, and escaping working directories", async () => {

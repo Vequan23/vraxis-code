@@ -309,7 +309,7 @@ export class TerminalRegistry {
       };
       const scheduleOutput = () => {
         if (flushTimer) return;
-        flushTimer = setTimeout(() => void persistOutput(), 75);
+        flushTimer = setTimeout(() => void persistOutput(), 300);
       };
       const append = (chunk: string) => {
         const data = String(chunk);

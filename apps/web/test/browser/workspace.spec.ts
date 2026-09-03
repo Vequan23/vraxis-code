@@ -401,9 +401,7 @@ test("switches projects immediately from cache while workspace data revalidates"
   });
 
   const selectProject = async (name: string) => {
-    await page.locator("osx-source-list").evaluate((element, value) => {
-      element.dispatchEvent(new CustomEvent("change", { detail: [value], bubbles: true, composed: true }));
-    }, name);
+    await page.getByRole("option", { name }).click();
     await expect.poll(() => pendingSelections.length).toBeGreaterThan(0);
   };
 
@@ -413,14 +411,14 @@ test("switches projects immediately from cache while workspace data revalidates"
 
   await selectProject("Beta");
   await expect(page.getByRole("heading", { name: "Beta task" })).toBeVisible();
-  await expect(page.getByText("Loading workspace", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("status", { name: "Loading workspace" })).toHaveCount(0);
   pendingSelections.shift()!();
   await expect(page.getByText("Beta retained context", { exact: true })).toBeVisible();
 
   await selectProject("Alpha");
   await expect(page.getByRole("heading", { name: "Alpha task" })).toBeVisible();
   await expect(page.getByText("Alpha retained context", { exact: true })).toBeVisible();
-  await expect(page.getByText("Loading workspace", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("status", { name: "Loading workspace" })).toHaveCount(0);
   pendingSelections.shift()!();
   await expectBasicAccessibility(page);
   expect(browserErrors).toEqual([]);
@@ -913,7 +911,7 @@ test("turns discovered project checks into approved, retained verification proof
   });
 
   await page.goto("/");
-  await expect(page.getByRole("tab", { name: "Verify", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Verify", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Review and run checks" }).click();
   await expect(page.getByText("Project Doctor", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Project recipe")).toBeVisible();
@@ -930,9 +928,12 @@ test("turns discovered project checks into approved, retained verification proof
   await page.getByRole("button", { name: "Allow once" }).click();
   await expect(page.locator(".verification-workflow strong").filter({ hasText: /^Passed$/ })).toBeVisible();
   await expect(page.getByLabel("Task evidence ledger")).toContainText("1 verified");
-  await expect(page.getByRole("button", { name: "Understand", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Download proof", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Signed JSON", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Understand", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Download proof", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Signed JSON", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Understand", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Task understanding" })).toBeVisible();
+  await expect(page.getByText("All 1 changed path is covered by passed governed verification.", { exact: true })).toBeVisible();
   await expect(page.getByText(
     `Recipe ${recipeFingerprint.slice(0, 12)} · 0 services · 1 command receipt · 0 browser assertions`,
     { exact: true },
@@ -941,7 +942,7 @@ test("turns discovered project checks into approved, retained verification proof
   await expect.poll(() => rerunRequests).toBe(1);
   await expect(page.getByText("Verify · Project check", { exact: true })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("verified-delivery-loop.png"), fullPage: true });
-  expect(bootstrapRequests).toBe(1);
+  expect(bootstrapRequests).toBe(3);
   expect(browserErrors).toEqual([]);
 });
 
@@ -1019,7 +1020,7 @@ test("shows governed service health and can stop and tear down an active verific
   }));
 
   await page.goto("/");
-  await expect(page.getByRole("tab", { name: "Verify", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Verify", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Review and run checks" }).click();
   const serviceHealth = page.getByLabel("Governed service health");
   await expect(serviceHealth.getByText("Preview server", { exact: true })).toBeVisible();
@@ -1421,7 +1422,7 @@ test("runs the selected mode and model without reloading the workspace", async (
   await expectTaskPaneAtBottom(page);
   expect(submittedMode).toBe("plan");
   expect(session.modelId).toBe("gpt-5.6-terra");
-  expect(bootstrapRequests).toBe(1);
+  expect(bootstrapRequests).toBe(3);
   expect(submittedAttachments).toHaveLength(2);
   expect(submittedAttachments.map((item) => item.name)).toEqual(["index.ts", "index.ts"]);
   expect(new Set(submittedAttachments.map((item) => item.id)).size).toBe(2);
@@ -1781,7 +1782,7 @@ test("starts Build in an isolated worktree and opens a closable exact diff", asy
   await expect(page.getByText("vraxis/refine-health-check-87654321", { exact: true })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Message to agent" })).toBeEnabled();
   await page.screenshot({ path: testInfo.outputPath("applied-build.png"), fullPage: true });
-  expect(bootstrapRequests).toBe(1);
+  expect(bootstrapRequests).toBe(3);
   expect(browserErrors).toEqual([]);
 });
 
@@ -1924,7 +1925,7 @@ test("submits a scheme-less browser address with Enter without reloading the wor
   await page.getByRole("button", { name: "Export replay" }).click();
   expect((await replayDownload).suggestedFilename()).toMatch(/browser-replay\.html$/);
   await page.screenshot({ path: testInfo.outputPath("approval-browser-terminal.png"), fullPage: true });
-  expect(bootstrapRequests).toBe(1);
+  expect(bootstrapRequests).toBe(3);
   expect(browserErrors).toEqual([]);
 });
 

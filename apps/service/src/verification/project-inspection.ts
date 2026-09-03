@@ -263,6 +263,14 @@ export async function inspectProductReport(rootPath: string, inspector: ProjectI
       ...report,
       verificationServices: [],
       verificationBrowserAssertions: [],
+      issues: [
+        ...report.issues,
+        {
+          severity: "info",
+          code: "verification-recipe-starter",
+          message: `No ${recipePath} found. Add one to pin services, browser proof, and assertions beyond manifest discovery.`,
+        },
+      ],
       verificationSource: {
         kind: "discovered",
         browserRequired: plan.browserRecommended,

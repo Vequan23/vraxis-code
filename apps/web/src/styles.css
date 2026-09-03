@@ -59,6 +59,24 @@ osx-app-shell {
   white-space: nowrap;
 }
 
+.workspace-branch-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: min(42vw, 420px);
+  color: var(--osx-accent, #71b9e6);
+}
+
+.workspace-branch-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .workspace-sync-status {
   display: inline-flex !important;
   align-items: center;
@@ -94,6 +112,54 @@ osx-app-shell {
 }
 
 .sidebar-section { display: grid; gap: 5px; }
+
+.project-source-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project-source-item {
+  width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--osx-text, #eef1f2);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-source-item > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-source-item osx-icon {
+  flex: 0 0 auto;
+  color: var(--osx-muted, #98a0a5);
+}
+
+.project-source-item:hover { background: color-mix(in srgb, var(--osx-text, #fff) 6%, transparent); }
+.project-source-item.selected {
+  background: color-mix(in srgb, var(--osx-accent, #4aa9dc) 18%, transparent);
+  font-weight: 600;
+}
+
+.project-source-item.selected osx-icon,
+.project-source-item.selected .project-activity-indicator {
+  color: var(--osx-text, #eef1f2);
+}
 
 .new-task-button,
 .session-link,
@@ -176,6 +242,40 @@ osx-app-shell {
   flex-direction: column;
   overflow: auto;
   background: var(--osx-surface, #15191b);
+}
+
+.workspace-stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.workspace-navigation-shade {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--osx-surface, #15191b) 78%, transparent);
+  backdrop-filter: blur(2px);
+  pointer-events: none;
+}
+
+.inspector.is-navigating {
+  position: relative;
+}
+
+.inspector.is-navigating::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  background: color-mix(in srgb, var(--osx-surface-sunken, #101416) 78%, transparent);
+  backdrop-filter: blur(2px);
+  pointer-events: none;
 }
 
 .settings-pane {
@@ -745,7 +845,7 @@ osx-app-shell {
 
 .task-jump-latest {
   position: absolute;
-  z-index: 3;
+  z-index: 0;
   bottom: calc(100% + 12px);
   left: 50%;
   transform: translateX(-50%);
@@ -826,6 +926,19 @@ osx-app-shell {
 
 .composer-runtime-control:focus-within { outline: 2px solid var(--osx-focus, #71b9e6); outline-offset: 2px; }
 .composer-runtime-control select:disabled { cursor: default; opacity: 0.7; }
+
+.composer-branch-control input {
+  width: min(22vw, 180px);
+  min-width: 120px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  outline: none;
+}
+
+.composer-branch-control input::placeholder { color: var(--osx-muted, #98a0a5); opacity: 0.85; }
+.composer-branch-control input:disabled { cursor: default; opacity: 0.7; }
 
 .message-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
 .message-attachments > span { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 4px 8px; border: 1px solid var(--osx-border-soft, #384148); border-radius: 999px; color: var(--osx-muted, #a5adb2); font-size: 12px; }
@@ -1062,7 +1175,7 @@ osx-app-shell {
 
 .evidence-tabs {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   align-items: stretch;
   padding-inline: 4px;
   border-bottom: 1px solid var(--osx-border-soft, #2c3338);
@@ -1127,12 +1240,27 @@ osx-app-shell {
 .evidence-view {
   min-width: 0;
   min-height: 0;
-  height: 100%;
 }
 
-.evidence-panel { overflow: hidden; }
-.evidence-panel.has-ledger { display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.evidence-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.evidence-chrome {
+  flex: 0 0 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--osx-border-soft, #2c3338);
+  background: color-mix(in srgb, var(--osx-surface-raised, #22282c) 55%, transparent);
+}
+
 .evidence-view {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
   animation: panel-reveal 160ms ease-out both;
 }
@@ -1158,6 +1286,36 @@ osx-app-shell {
 }
 .evidence-ledger-title { color: var(--osx-text, #eef1f2); }
 .evidence-ledger .warning { color: var(--osx-warning, #d79a42); }
+
+.proof-export-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--osx-border-soft, #2c3338);
+  background: color-mix(in srgb, var(--osx-accent, #4aa9dc) 6%, var(--osx-surface-raised, #22282c));
+}
+.proof-export-title { min-width: 0; display: inline-flex; align-items: center; gap: 7px; color: var(--osx-text, #eef1f2); font-size: 13px; font-weight: 620; }
+.proof-export-buttons { display: flex; flex: 0 1 auto; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.understand-loading { display: grid; place-items: center; min-height: 72px; padding: 12px; border-top: 1px solid var(--osx-border-soft, #2c3338); }
+.evidence-chrome .understand-artifact {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  border-top: 1px solid var(--osx-border-soft, #2c3338);
+  max-height: min(420px, 45vh);
+  overflow: auto;
+}
+.evidence-chrome > .osx-alert { margin: 0; border-radius: 0; border-top: 1px solid var(--osx-border-soft, #2c3338); }
+
+@container (max-width: 420px) {
+  .proof-export-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .proof-export-buttons { justify-content: stretch; }
+}
 
 .understand-artifact {
   display: grid;
@@ -1282,6 +1440,10 @@ osx-app-shell {
 .verification-handoff > span:nth-child(2) strong { font-size: 12px; font-weight: 650; }
 .verification-handoff > span:nth-child(2) small { color: var(--osx-muted, #98a0a5); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
 .verification-handoff > div { display: flex; align-items: center; gap: 6px; }
+.verification-approval { display: grid; gap: 8px; padding: 10px 11px; border: 1px solid color-mix(in srgb, var(--osx-warning, #d79a42) 35%, var(--osx-border-soft, #384148)); border-radius: 8px; background: color-mix(in srgb, var(--osx-warning, #d79a42) 7%, var(--osx-surface-sunken, #101416)); }
+.verification-approval > header { display: grid; gap: 2px; }
+.verification-approval > header strong { font-size: 12px; font-weight: 650; }
+.verification-approval > header small { color: var(--osx-muted, #98a0a5); font-size: 12px; line-height: 1.35; }
 .project-doctor-actions { display: flex; align-items: center; gap: 5px; }
 .doctor-loading { min-height: 54px; display: grid; place-items: center; }
 
@@ -1405,7 +1567,17 @@ osx-app-shell {
 .browser-verification-progress { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--osx-border-soft, #384148); border-radius: 7px; background: var(--osx-border-soft, #384148); }
 .browser-verification-progress > span { min-width: 0; display: grid; gap: 1px; padding: 7px 8px; background: var(--osx-surface-sunken, #101416); }
 .browser-verification-progress small { font-size: 12px; }
-.browser-verification-studio > footer { display: flex; align-items: center; gap: 6px; }
+.browser-verification-failure {
+  margin: 0;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--osx-danger, #c95b55) 28%, var(--osx-border-soft, #384148));
+  border-radius: 7px;
+  color: color-mix(in srgb, var(--osx-danger, #c95b55) 88%, var(--osx-text, #eef1f2));
+  background: color-mix(in srgb, var(--osx-danger, #c95b55) 8%, var(--osx-surface-sunken, #101416));
+  font-size: 12px;
+  line-height: 1.4;
+}
+.browser-verification-studio > footer { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 
 .terminal-run-list { display: grid; gap: 9px; }
 .terminal-run-receipt { display: grid; gap: 4px; border-radius: 9px; scroll-margin: 18px; }

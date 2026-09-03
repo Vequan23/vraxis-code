@@ -1,4 +1,4 @@
-export const contractVersion = 28 as const;
+export const contractVersion = 30 as const;
 
 export const sessionModes = ["ask", "plan", "build", "review"] as const;
 export type SessionMode = (typeof sessionModes)[number];
@@ -45,7 +45,7 @@ export const modeAgentProfiles: Readonly<Record<SessionMode, ModeAgentProfile>> 
     title: "Repository answers",
     description: "Understand the project and answer with file-backed evidence.",
     access: "read-only",
-    skillNames: ["Repository comprehension", "General utilities"],
+    skillNames: ["Repository comprehension", "Web research", "General utilities"],
     toolIds: ["calculate", "date-time", "evidence-status", "request-verification", ...repositoryReadTools, ...browserEvidenceTools],
     guardedToolIds: ["git-refresh-remote", "http-fetch", ...browserControlTools],
   },
@@ -54,7 +54,7 @@ export const modeAgentProfiles: Readonly<Record<SessionMode, ModeAgentProfile>> 
     title: "Implementation planning",
     description: "Map the architecture and produce an actionable plan without changing files.",
     access: "read-only",
-    skillNames: ["Repository comprehension", "Project architecture", "General utilities"],
+    skillNames: ["Repository comprehension", "Project architecture", "Web research", "General utilities"],
     toolIds: ["calculate", "date-time", "evidence-status", "request-verification", ...repositoryReadTools, ...browserEvidenceTools],
     guardedToolIds: ["git-refresh-remote", "http-fetch", ...browserControlTools],
   },
@@ -63,7 +63,7 @@ export const modeAgentProfiles: Readonly<Record<SessionMode, ModeAgentProfile>> 
     title: "Isolated implementation",
     description: "Implement, debug, and verify changes inside a dedicated worktree.",
     access: "isolated-worktree",
-    skillNames: ["Repository comprehension", "Workspace editing", "Software verification", "Software debugging", "Dependency management", "Frontend verification"],
+    skillNames: ["Repository comprehension", "Workspace files", "Software verification", "Software debugging", "Dependency management", "Frontend verification"],
     toolIds: [
       "calculate",
       "date-time",
@@ -774,6 +774,14 @@ export interface StartupRecoverySummary {
   checkedAt: string;
 }
 
+export const bootstrapScopes = ["shell", "workspace", "catalog", "full"] as const;
+export type BootstrapScope = (typeof bootstrapScopes)[number];
+
+export function parseBootstrapScope(value: string | null | undefined): BootstrapScope {
+  if (value === "shell" || value === "workspace" || value === "catalog") return value;
+  return "full";
+}
+
 export interface BootstrapState {
   contractVersion: typeof contractVersion;
   realtime?: {
@@ -1094,6 +1102,7 @@ export interface CreateSessionRequest {
   runtimeId: string;
   modelId?: string;
   prompt: string;
+  branchSlug?: string;
   attachments?: PromptAttachment[];
   skillIds?: string[];
   attachmentConsent?: AttachmentHandoffConsent;
@@ -1105,6 +1114,7 @@ export interface AppendMessageRequest {
   mode?: SessionMode;
   runtimeId?: string;
   modelId?: string | null;
+  branchSlug?: string;
   attachments?: PromptAttachment[];
   skillIds?: string[];
   attachmentConsent?: AttachmentHandoffConsent;
@@ -1198,6 +1208,25 @@ function boundedString(value: unknown, label: string, maximumLength: number, all
   const result = allowEmpty ? value : value.trim();
   if (result.length > maximumLength) throw new TypeError(`${label} is too long.`);
   return result;
+}
+
+/** Normalizes a user-provided Build branch slug for host-managed vraxis/* branches. */
+export function normalizeBranchSlug(value: string): string {
+  const slug = value.trim().toLowerCase()
+    .replace(/[^a-z0-9/._-]+/g, "-")
+    .replace(/\/+/g, "/")
+    .replace(/^\/+|\/+$/g, "")
+    .replace(/\.lock$/i, "")
+    .slice(0, 48);
+  if (!slug || slug === "." || slug === ".." || slug.includes("..")) {
+    throw new TypeError("Branch slug is invalid.");
+  }
+  return slug;
+}
+
+export function parseBranchSlug(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  return normalizeBranchSlug(boundedString(value, "Branch slug", 64));
 }
 
 function approvalCapability(value: unknown, label: string): ApprovalCapability {
@@ -1412,6 +1441,11 @@ export function parseCreateSessionRequest(value: unknown): CreateSessionRequest 
   };
   const modelId = optionalString(input.modelId, "Model ID");
   if (modelId) result.modelId = modelId;
+  const branchSlug = parseBranchSlug(input.branchSlug);
+  if (branchSlug) {
+    if (result.mode !== "build") throw new TypeError("Branch slug applies only to Build mode.");
+    result.branchSlug = branchSlug;
+  }
   const attachments = promptAttachments(input.attachments);
   if (attachments?.length) result.attachments = attachments;
   const skillIds = promptSkillIds(input.skillIds);
@@ -1440,6 +1474,13 @@ export function parseAppendMessageRequest(value: unknown): AppendMessageRequest 
   if (attachments?.length) result.attachments = attachments;
   const skillIds = promptSkillIds(input.skillIds);
   if (skillIds) result.skillIds = skillIds;
+  const branchSlug = parseBranchSlug(input.branchSlug);
+  if (branchSlug) {
+    if (input.mode !== undefined && input.mode !== "build") {
+      throw new TypeError("Branch slug applies only to Build mode.");
+    }
+    result.branchSlug = branchSlug;
+  }
   const attachmentConsent = attachmentHandoffConsent(input.attachmentConsent);
   if (attachmentConsent) result.attachmentConsent = attachmentConsent;
   return result;

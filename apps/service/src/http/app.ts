@@ -19,7 +19,6 @@ import {
   parseRegisterProjectRequest,
   parseUpdateSettingsRequest,
   parseUpdateMcpServerProjectsRequest,
-  type BootstrapState,
   type AttachmentHandoffConsent,
   type ApprovalSummary,
   type PromptAttachment,
@@ -44,6 +43,7 @@ import {
   type ProjectFolderPicker,
 } from "../projects/system-directory-picker.js";
 import { discoverRuntimes } from "../runtimes/runtime-discovery.js";
+import { RuntimeDiscoveryCache, backgroundDiscoveryTimeoutMs } from "../runtimes/runtime-discovery-cache.js";
 import { withProductCapabilityMatrix } from "../runtimes/runtime-capabilities.js";
 import { RuntimeConformanceRegistry } from "../runtimes/runtime-conformance.js";
 import { SessionRegistry } from "../sessions/session-registry.js";
@@ -76,6 +76,7 @@ import { TeamPolicyRegistry } from "../team-policy/team-policy-registry.js";
 import { createSupportBundle } from "../diagnostics/support-bundle.js";
 import { redactTaskReceipt } from "../receipts/portable-redaction.js";
 import { DesktopSession } from "./desktop-session.js";
+import { buildBootstrapState, parseBootstrapScope, resolveBootstrapContext } from "./bootstrap-state.js";
 
 const loopbackHosts = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const contentTypes: Record<string, string> = {
@@ -91,6 +92,7 @@ export interface AppOptions {
   publicDirectory?: string;
   desktopToken?: string;
   discover?: typeof discoverRuntimes;
+  runtimeDiscoveryCache?: RuntimeDiscoveryCache;
   folderPicker?: ProjectFolderPicker;
   runtimeEngine?: CodingRuntimeEngine;
   runtimeProbeEngine?: Pick<CodingRuntimeEngine, "probe">;
@@ -105,6 +107,10 @@ export interface AppOptions {
 }
 
 function json(response: ServerResponse, status: number, value: unknown): void {
+  if (response.headersSent) {
+    response.end();
+    return;
+  }
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
   response.end(`${JSON.stringify(value)}\n`);
 }
@@ -207,35 +213,47 @@ export function createApp(options: AppOptions) {
     await Promise.all([approvals.reconcile(), terminal.reconcile(), verifications.reconcile()]);
     await reconcileWorktreeApplications();
   })();
-  async function ensureUserTerminalRun(sessionId: string, absoluteCwd: string): Promise<{ run: TerminalRunSummary; created: boolean }> {
-    const active = (await terminal.list(sessionId)).find((run) => run.purpose === "user-shell"
-      && (run.status === "pending" || run.status === "running"));
-    if (active) return { run: active, created: false };
-    const pending = userTerminalStarts.get(sessionId);
-    if (pending) return pending;
-    const start = (async () => {
-      const existing = (await terminal.list(sessionId)).find((run) => run.purpose === "user-shell"
+  async function ensureUserTerminalRun(
+    sessionId: string,
+    absoluteCwd: string,
+    options: { force?: boolean } = {},
+  ): Promise<{ run: TerminalRunSummary; created: boolean }> {
+    if (!options.force) {
+      const active = (await terminal.list(sessionId)).find((run) => run.purpose === "user-shell"
         && (run.status === "pending" || run.status === "running"));
-      if (existing) return { run: existing, created: false };
+      if (active) return { run: active, created: false };
+      const pending = userTerminalStarts.get(sessionId);
+      if (pending) return pending;
+    }
+    const start = (async () => {
+      if (!options.force) {
+        const existing = (await terminal.list(sessionId)).find((run) => run.purpose === "user-shell"
+          && (run.status === "pending" || run.status === "running"));
+        if (existing) return { run: existing, created: false };
+      }
       const shell = process.platform === "win32"
         ? process.env.COMSPEC ?? process.env.ComSpec ?? "cmd.exe"
         : process.env.SHELL ?? "/bin/sh";
       const shellArguments = process.platform === "win32" ? [] : ["-l"];
+      const baseLabel = basename(shell).replace(/\.exe$/i, "");
+      const activeShellCount = (await terminal.list(sessionId)).filter((run) => run.purpose === "user-shell"
+        && (run.status === "pending" || run.status === "running")).length;
+      const label = activeShellCount === 0 ? baseLabel : `${baseLabel} ${activeShellCount + 1}`;
       const run = await terminal.prepare(
         sessionId,
         `user-terminal:${randomUUID()}`,
         commandText(shell, shellArguments),
         ".",
-        { purpose: "user-shell", label: basename(shell).replace(/\.exe$/i, "") },
+        { purpose: "user-shell", label },
       );
       void terminal.execute(run.id, absoluteCwd).catch(() => undefined);
       return { run, created: true };
     })();
-    userTerminalStarts.set(sessionId, start);
+    if (!options.force) userTerminalStarts.set(sessionId, start);
     try {
       return await start;
     } finally {
-      if (userTerminalStarts.get(sessionId) === start) userTerminalStarts.delete(sessionId);
+      if (!options.force && userTerminalStarts.get(sessionId) === start) userTerminalStarts.delete(sessionId);
     }
   }
   interface ManualAction {
@@ -270,11 +288,13 @@ export function createApp(options: AppOptions) {
   );
   const recovery = storageRecovery.then(() => execution.reconcile());
   const discover = options.discover ?? discoverRuntimes;
+  const runtimeDiscoveryCache = options.runtimeDiscoveryCache ?? new RuntimeDiscoveryCache(options.dataDirectory, discover);
+  void runtimeDiscoveryCache.start();
   const runtimeConformance = new RuntimeConformanceRegistry(
     options.dataDirectory,
     options.runtimeProbeEngine ?? new LocalCliRuntimeEngine(),
   );
-  const discoverLocalRuntimes = async () => runtimeConformance.decorate(await discover());
+  const discoverLocalRuntimes = async () => runtimeConformance.decorate(await runtimeDiscoveryCache.get());
   const folderPicker = options.folderPicker ?? pickProjectFolderWithSystemDialog;
 
   async function validateAttachmentFiles(
@@ -292,7 +312,7 @@ export function createApp(options: AppOptions) {
   }
 
   async function validateBuildRuntime(runtimeId: string): Promise<void> {
-    const runtime = [...await discover(), ...await modelProviders.runtimes()].find((item) => item.id === runtimeId);
+    const runtime = [...await discoverLocalRuntimes(), ...await modelProviders.runtimes()].find((item) => item.id === runtimeId);
     if (!runtime?.capabilities?.includes("workspace-write")) {
       throw new TypeError("Choose a runtime that supports guarded isolated-workspace writes for Build mode.");
     }
@@ -542,12 +562,13 @@ export function createApp(options: AppOptions) {
     projectPath: string,
     projectId: string,
     title: string,
+    branchSlug?: string,
   ): Promise<WorktreeSummary> {
     if (session?.worktree?.status === "active") return session.worktree;
     if (session?.worktree && !["applied", "reverted", "archived", "cleaned"].includes(session.worktree.status)) {
       throw new TypeError("Finish or recover the current Build worktree before continuing.");
     }
-    const worktree = await worktrees.create(projectPath, projectId, title);
+    const worktree = await worktrees.create(projectPath, projectId, title, branchSlug);
     if (session?.worktree) await sessions.continueBuild(session.id, worktree);
     else if (session) await sessions.attachWorktree(session.id, worktree);
     return worktree;
@@ -725,83 +746,22 @@ export function createApp(options: AppOptions) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/bootstrap") {
-        const [data, sessionData] = await Promise.all([registry.read(), sessions.read()]);
-        const selected = data.projects.find((project) => project.id === data.selectedProjectId);
-        const selectedSession = sessionData.draftProjectId === selected?.id
-          ? undefined
-          : sessionData.sessions.find((session) => session.id === sessionData.selectedSessionId && session.projectId === selected?.id)
-            ?? sessionData.sessions.find((session) => session.projectId === selected?.id);
-        const projectDoctorPromise = selected ? safeProjectDoctor(selected.id, selected.path) : Promise.resolve(undefined);
-        let files: BootstrapState["files"] = [];
-        let changes: BootstrapState["changes"] = [];
-        if (selectedSession?.worktree) {
-          try {
-            const evidence = await worktrees.evidence(selectedSession.worktree);
-            files = evidence.files;
-            changes = evidence.changes;
-          } catch {
-            selectedSession.worktree.status = "missing";
-            files = [];
-          }
-        } else if (selected) files = await indexProjectFiles(selected.path);
-        const [
-          localRuntimes,
-          providerRuntimes,
-          providerSummaries,
-          mcpServerSummaries,
-          projectSkills,
-          browserState,
-          projectDoctor,
-          sessionApprovals,
-          projectApprovalRules,
-          sessionTerminalRuns,
-          sessionVerificationRuns,
-          sessionVerificationHandoffs,
-          userSettings,
-        ] = await Promise.all([
-          discoverLocalRuntimes(),
-          modelProviders.runtimes(),
-          modelProviders.summaries(),
-          mcpServers.summaries(),
-          selected ? skills.summaries(selected.path) : Promise.resolve([]),
-          selectedSession ? browser.state(selectedSession.id) : Promise.resolve(undefined),
-          projectDoctorPromise,
-          selectedSession ? approvals.list(selectedSession.id) : Promise.resolve([]),
-          selected ? approvals.listRules(selected.id, selectedSession?.id) : Promise.resolve([]),
-          selectedSession ? terminal.list(selectedSession.id) : Promise.resolve([]),
-          selectedSession ? verifications.list(selectedSession.id) : Promise.resolve([]),
-          selectedSession ? verifications.listHandoffs(selectedSession.id) : Promise.resolve([]),
-          settings.read(),
-        ]);
-        const state: BootstrapState = {
-          contractVersion,
-          realtime: {
-            sessionEvents: true,
-            terminalOutput: true,
-            reconnectSnapshots: true,
-          },
-          projects: data.projects,
-          sessions: sessionData.sessions,
-          runtimes: withProductCapabilityMatrix([...localRuntimes, ...providerRuntimes]),
-          modelProviders: providerSummaries,
-          mcpServers: mcpServerSummaries,
-          skills: projectSkills,
-          ...(selected ? { selectedProjectId: selected.id } : {}),
-          ...(selectedSession ? { selectedSessionId: selectedSession.id } : {}),
-          files,
-          changes,
-          events: selectedSession ? sessionData.events.filter((event) => event.sessionId === selectedSession.id) : [],
-          approvals: sessionApprovals,
-          approvalRules: projectApprovalRules,
-          terminalRuns: sessionTerminalRuns,
-          ...(projectDoctor ? { projectDoctor } : {}),
-          verificationRuns: sessionVerificationRuns,
-          verificationHandoffs: sessionVerificationHandoffs,
-          ...(browserState ? { browser: browserState } : {}),
+        const scope = parseBootstrapScope(url.searchParams.get("scope"));
+        const ctx = await resolveBootstrapContext(registry, sessions);
+        json(response, 200, await buildBootstrapState(scope, ctx, {
+          settings,
+          worktrees,
+          discoverLocalRuntimes,
+          modelProviders,
+          mcpServers,
+          skills,
+          browser,
+          approvals,
+          terminal,
+          verifications,
+          safeProjectDoctor,
           ...(options.startupRecovery ? { startupRecovery: options.startupRecovery } : {}),
-          settings: userSettings,
-        };
-        json(response, 200, state);
+        }));
         return;
       }
 
@@ -826,7 +786,15 @@ export function createApp(options: AppOptions) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/runtimes/refresh") {
-        json(response, 200, { runtimes: withProductCapabilityMatrix(await discoverLocalRuntimes()) });
+        json(response, 200, {
+          runtimes: withProductCapabilityMatrix([
+            ...await runtimeConformance.decorate(await runtimeDiscoveryCache.refresh({
+              force: true,
+              timeoutMs: backgroundDiscoveryTimeoutMs,
+            })),
+            ...await modelProviders.runtimes(),
+          ]),
+        });
         return;
       }
 
@@ -1119,7 +1087,7 @@ export function createApp(options: AppOptions) {
         let worktree: WorktreeSummary | undefined;
         if (input.mode === "build") {
           await validateBuildRuntime(input.runtimeId);
-          worktree = await prepareWorktree(undefined, projectPath, input.projectId, input.prompt);
+          worktree = await prepareWorktree(undefined, projectPath, input.projectId, input.prompt, input.branchSlug);
         }
         const executionPath = worktree ? await worktrees.resolveInside(worktree) : projectPath;
         const selectedSkills = await skills.resolve(projectPath, input.skillIds);
@@ -1152,7 +1120,7 @@ export function createApp(options: AppOptions) {
           await validateBuildRuntime(runtimeId);
           if (!session.worktree || session.worktree.status !== "active") {
             await validateAttachmentFiles((path) => registry.resolveInside(session.projectId, path), input.attachments);
-            await prepareWorktree(session, projectPath, session.projectId, input.prompt);
+            await prepareWorktree(session, projectPath, session.projectId, input.prompt, input.branchSlug);
             session = await sessions.get(session.id);
           }
         }
@@ -1204,16 +1172,33 @@ export function createApp(options: AppOptions) {
         let ready = false;
         let closed = false;
         let delivery = Promise.resolve();
+        const liveEvidenceTtlMs = 200;
+        let cachedLiveEvidence: SessionLiveEvidenceResponse | undefined;
+        let cachedLiveEvidenceAt = 0;
+        const liveEvidence = async (): Promise<SessionLiveEvidenceResponse> => {
+          const now = Date.now();
+          if (!cachedLiveEvidence || now - cachedLiveEvidenceAt >= liveEvidenceTtlMs) {
+            cachedLiveEvidence = await sessionLiveEvidence(sessionId);
+            cachedLiveEvidenceAt = now;
+          }
+          return cachedLiveEvidence;
+        };
         const send = (event: "snapshot" | "update", payload: SessionStreamPayload) => {
-          if (closed) return;
-          response.write(`id: ${payload.cursor}\nevent: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+          if (closed || response.writableEnded) return;
+          try {
+            response.write(`id: ${payload.cursor}\nevent: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+          } catch {
+            closed = true;
+          }
         };
         const deliver = (update: Parameters<Parameters<typeof sessions.subscribe>[1]>[0]) => {
           delivery = delivery.then(async () => {
-            if (closed) return;
-            send("update", { ...update, evidence: await sessionLiveEvidence(sessionId) });
+            if (closed || response.writableEnded) return;
+            send("update", { ...update, evidence: await liveEvidence() });
           }).catch(() => {
-            if (!closed) response.write("event: refresh\ndata: {}\n\n");
+            if (!closed && !response.writableEnded) {
+              try { response.write("event: refresh\ndata: {}\n\n"); } catch { closed = true; }
+            }
           });
         };
         const unsubscribe = sessions.subscribe(sessionId, (update) => {
@@ -1243,11 +1228,18 @@ export function createApp(options: AppOptions) {
             }
           }
           heartbeat = setInterval(() => {
-            if (!closed) response.write(": keep-alive\n\n");
+            if (closed || response.writableEnded) return;
+            try { response.write(": keep-alive\n\n"); } catch { closed = true; }
           }, 15_000);
           heartbeat.unref();
         } catch (error) {
           unsubscribe();
+          if (response.headersSent) {
+            if (!closed && !response.writableEnded) {
+              try { response.end(); } catch { /* The client already left the stream. */ }
+            }
+            return;
+          }
           throw error;
         }
         request.once("close", () => {
@@ -1772,7 +1764,12 @@ export function createApp(options: AppOptions) {
       if (request.method === "POST" && userTerminalMatch?.[1]) {
         const session = await sessions.get(userTerminalMatch[1]);
         const absoluteCwd = await sessionWorkspace(session);
-        const result = await ensureUserTerminalRun(session.id, absoluteCwd);
+        const contentType = request.headers["content-type"] ?? "";
+        const input = contentType.includes("json")
+          ? await body(request).catch(() => ({}))
+          : {};
+        const force = Boolean((input as { force?: boolean }).force);
+        const result = await ensureUserTerminalRun(session.id, absoluteCwd, { force });
         json(response, result.created ? 201 : 200, { run: result.run });
         return;
       }
@@ -1964,6 +1961,12 @@ export function createApp(options: AppOptions) {
 
       json(response, 404, { error: "Route was not found." });
     } catch (error) {
+      if (response.headersSent) {
+        if (!response.writableEnded) {
+          try { response.end(); } catch { /* Response already closed. */ }
+        }
+        return;
+      }
       const message = error instanceof Error ? error.message : "Request failed.";
       json(response, error instanceof TypeError ? 400 : 500, { error: message });
     }
@@ -1971,6 +1974,9 @@ export function createApp(options: AppOptions) {
   return Object.assign(app, {
     close: async () => {
       await Promise.all([browser.close(), terminal.close()]);
+    },
+    warmupDiscovery: () => {
+      runtimeDiscoveryCache.refreshInBackground();
     },
   });
 }

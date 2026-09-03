@@ -91,4 +91,34 @@ test("exposes cross-harness evidence status without raw task content or credenti
   assert.match(serialized, /"pendingVerificationHandoffCount":1/);
   assert.match(serialized, /handoff-1/);
   assert.match(serialized, /"status":"success"/);
+  assert.match(serialized, /"worktree":null/);
+});
+
+test("includes host-managed worktree summary without filesystem paths", async () => {
+  const tool = createAgentEvidenceTool({
+    sessionId: "session-1",
+    approvals: { async list() { return []; } },
+    terminal: { async list() { return []; } },
+    verifications: { async list() { return []; } },
+    worktree: {
+      id: "wt-1",
+      path: "/secret/worktree/path",
+      branch: "vraxis/task-abc12345",
+      baseBranch: "main",
+      baseCommit: "deadbeef12345678",
+      status: "active",
+    },
+  });
+
+  const result = await executeAgentTool({
+    tool,
+    input: {},
+    runId: "run-1",
+    sessionId: "session-1",
+    scope: localExecutionScope("project-1"),
+  });
+  const serialized = JSON.stringify(result);
+  assert.match(serialized, /vraxis\/task-abc12345/);
+  assert.match(serialized, /"hostManaged":true/);
+  assert.doesNotMatch(serialized, /secret\/worktree/);
 });

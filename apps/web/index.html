@@ -5,8 +5,70 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
     <title>Vraxis Code</title>
+    <link rel="icon" href="/brand/vraxis-code-mark.svg" type="image/svg+xml" />
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        background: #101212;
+      }
+
+      #boot-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: grid;
+        place-items: center;
+        background: #101212;
+      }
+
+      #boot-splash .boot-splash-mark {
+        width: 54px;
+        height: 54px;
+        display: grid;
+        place-items: center;
+        border: 1px solid #465159;
+        border-radius: 14px;
+        background: #22282c;
+        box-shadow: 0 18px 48px rgb(0 0 0 / 22%);
+        animation: boot-splash-breathe 2.4s ease-in-out infinite;
+      }
+
+      #boot-splash img {
+        width: 40px;
+        height: 40px;
+        display: block;
+      }
+
+      @keyframes boot-splash-breathe {
+        0%, 100% {
+          opacity: 0.92;
+          transform: scale(1);
+        }
+        50% {
+          opacity: 1;
+          transform: scale(1.03);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #boot-splash .boot-splash-mark {
+          animation: none;
+        }
+      }
+    </style>
   </head>
   <body>
+    <div id="boot-splash" aria-hidden="true">
+      <span class="boot-splash-mark">
+        <img src="/brand/vraxis-code-mark.svg" alt="" width="40" height="40" decoding="async" />
+      </span>
+    </div>
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

@@ -12,6 +12,7 @@ import type {
   WorkspaceDiff,
   WorkspaceEvidenceResponse,
 } from "@vraxis/code-contracts";
+import { normalizeBranchSlug } from "@vraxis/code-contracts";
 import { indexProjectFiles } from "../workspace/file-index.js";
 import { readProjectFile } from "../workspace/read-project-file.js";
 
@@ -155,7 +156,7 @@ export class GitWorktrees {
     this.directory = resolve(dataDirectory, "worktrees");
   }
 
-  async create(projectPath: string, projectId: string, title: string): Promise<WorktreeSummary> {
+  async create(projectPath: string, projectId: string, title: string, preferredBranchSlug?: string): Promise<WorktreeSummary> {
     const canonicalProject = await realpath(projectPath);
     const repositoryRoot = await realpath((await runGit(canonicalProject, ["rev-parse", "--show-toplevel"])).stdout.trim());
     if (repositoryRoot !== canonicalProject) {
@@ -165,7 +166,9 @@ export class GitWorktrees {
     const sourceCommit = headResult.code === 0 ? headResult.stdout.trim() : undefined;
     const baseBranch = (await runGit(canonicalProject, ["branch", "--show-current"])).stdout.trim() || "detached HEAD";
     const id = randomUUID();
-    const branch = `vraxis/${branchSlug(title)}-${id.slice(0, 8)}`;
+    const branch = preferredBranchSlug
+      ? `vraxis/${normalizeBranchSlug(preferredBranchSlug)}-${id.slice(0, 8)}`
+      : `vraxis/${branchSlug(title)}-${id.slice(0, 8)}`;
     const path = join(this.directory, projectId, id);
     await mkdir(dirname(path), { recursive: true });
     let worktreeCreated = false;

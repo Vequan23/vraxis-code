@@ -16,21 +16,37 @@ import type { McpConnectionAuthorizer } from "@vraxis/agent-v/mcp";
 import { LocalCliRuntimeEngine, builtInRuntimes } from "@vraxis/agent-v/local-cli";
 import { type ModelProviderId } from "@vraxis/agent-v/providers";
 import { createAgentRuntime } from "@vraxis/agent-v/runtime";
+import {
+  attachedSkillsFromMetadata,
+  modeRuntimeSelection,
+  runtimeAgentSkillsFromMetadata,
+} from "./mode-agent-runtime.js";
 import { createBrowserTools, createPureTools, type BrowserController } from "@vraxis/agent-v/tools";
 import { createWorkspaceTools } from "@vraxis/agent-v/tools/node";
-import { modeAgentProfile, sessionModes, type SessionMode } from "@vraxis/code-contracts";
+import { modeAgentProfile, sessionModes, type SessionMode, type WorktreeSummary } from "@vraxis/code-contracts";
 import type { ModelProviderRegistry } from "../model-providers/model-provider-registry.js";
 import type { ApprovalRegistry } from "../approvals/approval-registry.js";
 import type { BrowserWorkspace } from "../browser/browser-workspace.js";
 import { createAgentTerminalPollTool, createAgentTerminalStopTool, createAgentTerminalTool } from "../terminal/agent-terminal-tool.js";
 import type { TerminalRegistry } from "../terminal/terminal-registry.js";
 import { createAgentEvidenceTool } from "../sessions/agent-evidence-tool.js";
+import { BUILD_GIT_POLICY_INSTRUCTION, buildWorktreeInstructionBlock, worktreeFromRuntimeMetadata } from "../sessions/build-workspace-context.js";
 import { createAgentVerificationHandoffTool } from "../sessions/agent-verification-handoff-tool.js";
 import type { VerificationRegistry } from "../verification/verification-registry.js";
 import { createPromptWebFetchTool } from "../web/prompt-web-access.js";
 import type { McpServerRegistry, McpTaskConnection } from "../mcp/mcp-server-registry.js";
 
 const developmentCommands = ["bun", "cargo", "git", "go", "node", "npm", "npx", "pnpm", "python3", "pytest", "rg", "yarn"] as const;
+
+function builderInstructions(worktree?: WorktreeSummary): string {
+  const parts = [
+    "Work only inside the approved isolated worktree. Request approval for guarded writes, commands, network, or browser actions and verify the result.",
+  ];
+  if (worktree) {
+    parts.push(buildWorktreeInstructionBlock(worktree), BUILD_GIT_POLICY_INSTRUCTION);
+  }
+  return parts.join("\n\n");
+}
 
 function uniqueTools(...groups: readonly (readonly AgentTool[])[]): AgentTool[] {
   const tools = new Map<string, AgentTool>();
@@ -145,6 +161,10 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
         }],
       });
     const tools = uniqueTools(request.tools ?? [], this.modeWorkspaceTools(workspaceTools, mode), productTools);
+    const worktree = worktreeFromRuntimeMetadata(request.metadata?.worktree);
+    const attachedSkills = attachedSkillsFromMetadata(request.metadata?.attachedSkills);
+    const runtimeSkills = runtimeAgentSkillsFromMetadata(mode, attachedSkills);
+    const { recipe, extraSkillIds } = modeRuntimeSelection(mode);
     const runtime = createAgentRuntime({
       execution: {
         type: "provider",
@@ -162,13 +182,15 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
         id: request.workspaceAccess === "workspace-write" ? "vraxis-code-builder" : "vraxis-code-reader",
         name: "Vraxis Code",
         instructions: request.workspaceAccess === "workspace-write"
-          ? "Work only inside the approved isolated worktree. Request approval for guarded writes, commands, network, or browser actions and verify the result."
+          ? builderInstructions(worktree)
           : "Inspect only the approved repository and browser evidence. Use read tools for evidence and never claim files you did not inspect.",
+        recipe,
+        skills: extraSkillIds,
         tools: tools.map((tool) => tool.name),
         requiredCapabilities: ["tools", "streaming"],
-        maxSteps: 24,
       },
       tools,
+      skills: runtimeSkills,
       ...(events ? { events } : {}),
     });
     const scope = {
@@ -298,6 +320,7 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
   private async productTools(request: CodingRuntimeRequest<unknown>, mode: string): Promise<AgentTool[]> {
     const sessionId = request.sessionId;
     if (!sessionId) return [];
+    const worktree = worktreeFromRuntimeMetadata(request.metadata?.worktree);
     const allowedOrigins = this.browser ? await this.browser.allowedOrigins(sessionId) : [];
     const browserTools = this.browser
       ? createBrowserTools({ controller: this.browserController(sessionId), allowedOrigins, allowNavigationRequests: true })
@@ -312,6 +335,7 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
         terminal: this.terminal,
         verifications: this.verifications,
         ...(this.browser ? { browser: this.browser } : {}),
+        ...(worktree ? { worktree } : {}),
       }));
       tools.push(createAgentVerificationHandoffTool({
         sessionId,
@@ -326,6 +350,7 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
         workspacePath: request.workspacePath,
         terminal: this.terminal,
         approvals: this.approvals,
+        ...(worktree?.branch ? { hostBranch: worktree.branch } : {}),
       }));
       tools.push(createAgentTerminalPollTool({ sessionId, terminal: this.terminal }));
       tools.push(createAgentTerminalStopTool({ sessionId, terminal: this.terminal }));

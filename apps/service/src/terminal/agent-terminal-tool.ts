@@ -2,6 +2,7 @@ import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { defineOutput, defineTool, type AgentTool, type JsonObject } from "@vraxis/agent-v";
 import type { ApprovalRegistry } from "../approvals/approval-registry.js";
+import { blockedBuildGitTerminalCommand } from "../sessions/build-workspace-context.js";
 import type { TerminalRegistry } from "./terminal-registry.js";
 
 interface TerminalToolInput {
@@ -21,32 +22,43 @@ interface TerminalToolOutput extends JsonObject {
   durationMs?: number;
 }
 
-const inputContract = defineOutput<TerminalToolInput>({
-  name: "vraxis-terminal-command",
-  description: "One argv command and an optional project-relative working directory.",
-  jsonSchema: {
-    type: "object",
-    properties: {
-      command: { type: "string", minLength: 1, description: "Executable and arguments. Shell operators and expansion are not supported." },
-      cwd: { type: "string", description: "Project-relative working directory. Defaults to the workspace root." },
-      background: { type: "boolean", description: "Return a run handle immediately for a long-running process." },
-      timeoutMs: { type: "number", description: "Command deadline between 1 second and 30 minutes." },
+function parseTerminalInput(value: unknown): TerminalToolInput {
+  const record = value as { command?: unknown; cwd?: unknown; background?: unknown; timeoutMs?: unknown };
+  if (typeof record?.command !== "string" || !record.command.trim()) throw new TypeError("Command must be a non-empty string.");
+  if (record.cwd !== undefined && typeof record.cwd !== "string") throw new TypeError("Command cwd must be a string.");
+  if (record.background !== undefined && typeof record.background !== "boolean") throw new TypeError("Command background must be a boolean.");
+  const timeoutMs = record.timeoutMs === undefined ? 120_000 : Number(record.timeoutMs);
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 30 * 60_000) throw new TypeError("Command timeoutMs must be between 1000 and 1800000.");
+  const cwd = typeof record.cwd === "string" && record.cwd.trim() ? record.cwd.trim() : ".";
+  if (isAbsolute(cwd)) throw new TypeError("Command cwd must be relative to the approved workspace.");
+  return { command: record.command.trim(), cwd, background: record.background === true, timeoutMs };
+}
+
+function createTerminalInputContract(hostBranch?: string) {
+  return defineOutput<TerminalToolInput>({
+    name: "vraxis-terminal-command",
+    description: "One argv command and an optional project-relative working directory.",
+    jsonSchema: {
+      type: "object",
+      properties: {
+        command: { type: "string", minLength: 1, description: "Executable and arguments. Shell operators and expansion are not supported." },
+        cwd: { type: "string", description: "Project-relative working directory. Defaults to the workspace root." },
+        background: { type: "boolean", description: "Return a run handle immediately for a long-running process." },
+        timeoutMs: { type: "number", description: "Command deadline between 1 second and 30 minutes." },
+      },
+      required: ["command"],
+      additionalProperties: false,
     },
-    required: ["command"],
-    additionalProperties: false,
-  },
-  parse(value) {
-    const record = value as { command?: unknown; cwd?: unknown; background?: unknown; timeoutMs?: unknown };
-    if (typeof record?.command !== "string" || !record.command.trim()) throw new TypeError("Command must be a non-empty string.");
-    if (record.cwd !== undefined && typeof record.cwd !== "string") throw new TypeError("Command cwd must be a string.");
-    if (record.background !== undefined && typeof record.background !== "boolean") throw new TypeError("Command background must be a boolean.");
-    const timeoutMs = record.timeoutMs === undefined ? 120_000 : Number(record.timeoutMs);
-    if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 30 * 60_000) throw new TypeError("Command timeoutMs must be between 1000 and 1800000.");
-    const cwd = typeof record.cwd === "string" && record.cwd.trim() ? record.cwd.trim() : ".";
-    if (isAbsolute(cwd)) throw new TypeError("Command cwd must be relative to the approved workspace.");
-    return { command: record.command.trim(), cwd, background: record.background === true, timeoutMs };
-  },
-});
+    parse(value) {
+      const parsed = parseTerminalInput(value);
+      if (hostBranch) {
+        const blocked = blockedBuildGitTerminalCommand(parsed.command, hostBranch);
+        if (blocked) throw new TypeError(blocked);
+      }
+      return parsed;
+    },
+  });
+}
 
 const outputContract = defineOutput<TerminalToolOutput>({
   name: "vraxis-terminal-result",
@@ -87,7 +99,9 @@ export function createAgentTerminalTool(options: {
   workspacePath: string;
   terminal: TerminalRegistry;
   approvals: ApprovalRegistry;
+  hostBranch?: string;
 }): AgentTool<TerminalToolInput, TerminalToolOutput> {
+  const inputContract = createTerminalInputContract(options.hostBranch);
   return defineTool<TerminalToolInput, TerminalToolOutput>({
     name: "terminal-run",
     version: "1.0.0",

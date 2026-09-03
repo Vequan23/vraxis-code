@@ -243,6 +243,55 @@ test("registers and reopens a project with indexed files", async (context) => {
   assert.deepEqual(state.files, [{ path: "src/index.ts" }]);
 });
 
+test("serves staged bootstrap scopes and caches local runtime discovery", async (context) => {
+  let discoveries = 0;
+  const app = await fixture(undefined, new DeterministicCodingRuntimeEngine(), {
+    discover: async () => {
+      discoveries += 1;
+      return [{
+        id: "codex",
+        name: "Codex",
+        availability: "installed",
+        detail: "Available",
+        acceptsCustomModel: true,
+        models: [],
+        kind: "local-cli",
+        authentication: "authenticated",
+        authenticationDetail: "Ready",
+        checkedAt: new Date().toISOString(),
+        modelDiscovery: "automatic",
+        update: { status: "unknown", detail: "Ready" },
+        maintenanceActions: [],
+      }];
+    },
+  });
+  context.after(() => app.close());
+  await fetch(`${app.baseUrl}/api/projects`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path: app.project }),
+  });
+  const shell = await (await fetch(`${app.baseUrl}/api/bootstrap?scope=shell`)).json() as {
+    projects: unknown[];
+    runtimes: unknown[];
+    files: unknown[];
+    skills: unknown[];
+  };
+  assert.equal(shell.projects.length, 1);
+  assert.deepEqual(shell.runtimes, []);
+  assert.deepEqual(shell.files, []);
+  assert.deepEqual(shell.skills, []);
+  const catalog = await (await fetch(`${app.baseUrl}/api/bootstrap?scope=catalog`)).json() as {
+    runtimes: Array<{ id: string }>;
+    skills: unknown[];
+  };
+  assert.equal(catalog.runtimes[0]?.id, "codex");
+  assert.ok(catalog.skills.length >= 0);
+  assert.equal(discoveries, 1);
+  await fetch(`${app.baseUrl}/api/bootstrap?scope=catalog`);
+  assert.equal(discoveries, 1);
+});
+
 test("previews text files inside the approved project and rejects escaping symlinks", async (context) => {
   const app = await fixture();
   context.after(() => app.close());
@@ -898,7 +947,8 @@ test("executes an Ask task and restores its ordered agent-v events", async (cont
   assert.equal(sessionResponse.status, 201);
   const state = await waitForIdle(app.baseUrl);
   assert.equal(state.sessions.length, 1);
-  assert.deepEqual(state.events.map((event) => event.sequence), [1, 2, 3, 4, 5, 6, 7]);
+  assert.deepEqual(state.events.map((event) => event.sequence), [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.ok(state.events.some((event) => event.kind === "progress" && event.title === "Harness skills"));
   assert.deepEqual(state.events.filter((event) => event.actor === "agent").map((event) => event.title), [
     "The entry point is `src/index.ts`.",
   ]);
@@ -914,9 +964,9 @@ test("executes an Ask task and restores its ordered agent-v events", async (cont
   }]);
   assert.equal(runtime.requests[0]?.input.artifacts?.[0]?.content, undefined);
   assert.deepEqual(state.events.find((event) => event.actor === "user")?.attachments, [{ path: "src/index.ts", id: "project-file:src/index.ts", name: "index.ts" }]);
-  const replay = await fetch(`${app.baseUrl}/api/sessions/${state.sessions[0]?.id}/events?after=5`);
+  const replay = await fetch(`${app.baseUrl}/api/sessions/${state.sessions[0]?.id}/events?after=6`);
   const replayed = await replay.json() as { events: Array<{ sequence: number }> };
-  assert.deepEqual(replayed.events.map((event) => event.sequence), [6, 7]);
+  assert.deepEqual(replayed.events.map((event) => event.sequence), [7, 8]);
 
   const followUp = await fetch(`${app.baseUrl}/api/sessions/${state.sessions[0]?.id}/messages`, {
     method: "POST",
@@ -935,7 +985,7 @@ test("executes an Ask task and restores its ordered agent-v events", async (cont
   assert.equal(continued.sessions[0]?.mode, "review");
   assert.equal(continued.sessions[0]?.modelId, "gpt-5.6-terra");
   assert.equal(runtime.requests[1]?.runtimeModel, "gpt-5.6-terra");
-  assert.match(runtime.requests[1]?.input.instructions ?? "", /Review the engineer's requested area/);
+  assert.match(runtime.requests[1]?.trajectory?.currentPlan?.join("\n") ?? "", /Review the engineer's requested area/);
   assert.deepEqual(runtime.requests[1]?.input.messages?.map((message) => message.role), ["user", "assistant"]);
 
   const newTask = await fetch(`${app.baseUrl}/api/projects/${project.id}/new-task`, { method: "POST" });
@@ -998,6 +1048,16 @@ test("opens an interactive user shell in the selected task workspace", async (co
   assert.equal(reopened.status, 200);
   const reused = await reopened.json() as { run: { id: string } };
   assert.equal(reused.run.id, prepared.run.id);
+
+  const forced = await fetch(`${app.baseUrl}/api/sessions/${session.id}/terminal-shell`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ force: true }),
+  });
+  assert.equal(forced.status, 201);
+  const second = await forced.json() as { run: { id: string; label?: string } };
+  assert.notEqual(second.run.id, prepared.run.id);
+  assert.match(second.run.label ?? "", / 2$/);
 
   const streamAbort = new AbortController();
   context.after(() => streamAbort.abort());
@@ -1138,7 +1198,7 @@ test("discovers, attaches, persists, and applies agent-v skills", async (context
     skills?: Array<{ id: string; name: string; version: string }>;
   };
   assert.deepEqual(userEvent.skills, [{ id: skillId, name: "ux-fundamentals", version: "1.2.0" }]);
-  assert.match(runtime.requests[0]?.input.instructions ?? "", /Start with the user's goal and preserve visible system status/);
+  assert.match(runtime.requests[0]?.input.instructions ?? "", /available as artifacts/);
   assert.match(runtime.requests[0]?.input.instructions ?? "", /cannot grant tools, permissions, workspace writes, network access/);
   assert.deepEqual(runtime.requests[0]?.input.artifacts, [{
     id: `attached-skill:${skillId}`,
@@ -1264,7 +1324,7 @@ test("runs Plan read-only and rejects Build when the runtime cannot write worksp
   assert.equal(planMutation.status, "running");
   assert.ok(planMutation.events.length >= 2);
   await waitForIdle(app.baseUrl);
-  assert.match(runtime.requests[0]?.input.instructions ?? "", /produce a concrete implementation plan/);
+  assert.match(runtime.requests[0]?.trajectory?.currentPlan?.join("\n") ?? "", /produce a concrete implementation plan/);
   assert.match(runtime.requests[0]?.input.instructions ?? "", /Repository comprehension, Project architecture/);
   assert.match(runtime.requests[0]?.input.instructions ?? "", /Default tool requests for this mode: calculate, date-time, evidence-status, request-verification, list-directory/);
   assert.match(runtime.requests[0]?.input.instructions ?? "", /This mode is read-only/);

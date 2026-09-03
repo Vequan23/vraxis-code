@@ -16,12 +16,17 @@ import {
   parseTeamPolicyBundle,
   parseUpdateSettingsRequest,
   parseUpdateMcpServerProjectsRequest,
+  normalizeBranchSlug,
+  parseBranchSlug,
 } from "../src/index.js";
 
 test("publishes safe mode-specific default agent profiles", () => {
   assert.deepEqual(Object.keys(modeAgentProfiles), ["ask", "plan", "build", "review"]);
   assert.equal(modeAgentProfile("plan").access, "read-only");
   assert.ok(modeAgentProfile("plan").skillNames.includes("Project architecture"));
+  assert.ok(modeAgentProfile("ask").skillNames.includes("Web research"));
+  assert.ok(modeAgentProfile("plan").skillNames.includes("Web research"));
+  assert.ok(modeAgentProfile("build").skillNames.includes("Workspace files"));
   assert.ok(!modeAgentProfile("plan").toolIds.includes("create-text"));
   assert.equal(modeAgentProfile("build").access, "isolated-worktree");
   assert.ok(modeAgentProfile("ask").toolIds.includes("evidence-status"));
@@ -321,4 +326,38 @@ test("parses bounded team-policy requests and signed bundles", () => {
     rules: [{ capability: "command", effect: "ask" }, { capability: "command", effect: "deny" }],
   }), /duplicated/);
   assert.throws(() => parseTeamPolicyBundle({ kind: "vraxis.team-policy", version: 2 }), /not supported/);
+});
+
+test("normalizes and parses optional Build branch slugs", () => {
+  assert.equal(normalizeBranchSlug(" Fix/Login-Bug "), "fix/login-bug");
+  assert.equal(parseBranchSlug("feature/foo"), "feature/foo");
+  assert.equal(parseBranchSlug(undefined), undefined);
+  assert.deepEqual(parseCreateSessionRequest({
+    projectId: "project-1",
+    mode: "build",
+    runtimeId: "codex",
+    prompt: "Fix login",
+    branchSlug: " fix/login-bug ",
+  }), {
+    projectId: "project-1",
+    mode: "build",
+    runtimeId: "codex",
+    prompt: "Fix login",
+    branchSlug: "fix/login-bug",
+  });
+  assert.throws(() => parseCreateSessionRequest({
+    projectId: "project-1",
+    mode: "ask",
+    runtimeId: "codex",
+    prompt: "Fix login",
+    branchSlug: "fix/login-bug",
+  }), /Build mode/);
+  assert.deepEqual(parseAppendMessageRequest({
+    prompt: "Continue the fix",
+    branchSlug: "fix/login-bug",
+  }), {
+    prompt: "Continue the fix",
+    branchSlug: "fix/login-bug",
+  });
+  assert.throws(() => normalizeBranchSlug(".."), /invalid/);
 });

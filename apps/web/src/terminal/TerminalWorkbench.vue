@@ -53,9 +53,9 @@ function tabTitle(run: TerminalRunSummary): string {
   return parts[parts.length - 1] || "Command";
 }
 
-function statusLabel(run: TerminalRunSummary): string {
+function tabStatus(run: TerminalRunSummary): string {
   if (run.status === "pending") return "Waiting for approval";
-  if (run.status === "running") return run.purpose === "user-shell" ? "Interactive shell" : "Agent command running";
+  if (run.status === "running") return run.purpose === "user-shell" ? "Interactive shell running" : "Agent command running";
   if (run.status === "success") return "Exited successfully";
   if (run.status === "interrupted") return "Stopped";
   return `Exited with code ${run.exitCode ?? 1}`;
@@ -277,7 +277,7 @@ onBeforeUnmount(() => {
           <button
             type="button"
             class="terminal-tab-select"
-            :aria-label="`${tabTitle(run)} terminal`"
+            :aria-label="`${tabTitle(run)} terminal · ${tabStatus(run)}`"
             :aria-current="selectedRunId === run.id ? 'page' : undefined"
             @click="selectRun(run)"
           >
@@ -294,45 +294,43 @@ onBeforeUnmount(() => {
       <span v-if="selectedRun" class="terminal-tab-meta">{{ selectedRun.cwd }}</span>
     </header>
 
-    <div v-if="error || (selectedRun && selectedRun.purpose !== 'user-shell')" class="terminal-context-stack">
-      <div v-if="error" class="terminal-workbench-error" role="alert">
-        <osx-icon name="warning" :size="14" />
-        <span>{{ error }}</span>
+    <div class="terminal-body">
+      <div v-if="error || (selectedRun && selectedRun.purpose !== 'user-shell')" class="terminal-context-stack">
+        <div v-if="error" class="terminal-workbench-error" role="alert">
+          <osx-icon name="warning" :size="14" />
+          <span>{{ error }}</span>
+        </div>
+        <div v-if="selectedRun && selectedRun.purpose !== 'user-shell'" class="terminal-command-context">
+          <span>{{ selectedRun.cwd }}</span>
+          <b aria-hidden="true">$</b>
+          <code>{{ selectedRun.command }}</code>
+        </div>
       </div>
-      <div v-if="selectedRun && selectedRun.purpose !== 'user-shell'" class="terminal-command-context">
-        <span>{{ selectedRun.cwd }}</span>
-        <b aria-hidden="true">$</b>
-        <code>{{ selectedRun.command }}</code>
+
+      <div v-show="selectedRun" ref="host" class="terminal-emulator" @click="terminal?.focus()" />
+      <div v-if="!selectedRun" class="terminal-welcome" role="status">
+        <span><osx-icon name="terminal" :size="22" /></span>
+        <strong>Open a terminal</strong>
+        <small>Start an interactive shell in this task's workspace.</small>
+        <osx-button variant="primary" size="small" icon="plus" :loading="starting" @click="emit('create')">New terminal</osx-button>
       </div>
     </div>
-
-    <div v-show="selectedRun" ref="host" class="terminal-emulator" @click="terminal?.focus()" />
-    <div v-if="!selectedRun" class="terminal-welcome" role="status">
-      <span><osx-icon name="terminal" :size="22" /></span>
-      <strong>Open a terminal</strong>
-      <small>Start an interactive shell in this task's workspace.</small>
-      <osx-button variant="primary" size="small" icon="plus" :loading="starting" @click="emit('create')">New terminal</osx-button>
-    </div>
-
-    <footer v-if="selectedRun">
-      <span><i :data-status="selectedRun.status" />{{ statusLabel(selectedRun) }}</span>
-      <span>{{ selectedRun.columns ?? 100 }} × {{ selectedRun.rows ?? 30 }}</span>
-    </footer>
   </section>
 </template>
 
 <style scoped>
-.terminal-workbench { min-width: 0; min-height: 0; height: 100%; display: grid; grid-template-rows: 38px auto minmax(0, 1fr) 27px; overflow: hidden; color: var(--osx-text); background: #0c0d0e; }
+.terminal-workbench { min-width: 0; min-height: 0; height: 100%; display: grid; grid-template-rows: 38px minmax(0, 1fr); overflow: hidden; color: var(--osx-text); background: #0c0d0e; }
+.terminal-body { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .terminal-tabs-bar { min-width: 0; display: flex; align-items: stretch; justify-content: space-between; border-bottom: 1px solid var(--osx-border-soft); background: var(--osx-surface); }
 .terminal-tabs-bar nav { min-width: 0; flex: 1; display: flex; align-items: stretch; overflow-x: auto; }
 .terminal-tab { min-width: 112px; max-width: 190px; display: flex; align-items: center; border-right: 1px solid var(--osx-border-soft); color: var(--osx-muted); background: transparent; font: 500 12px var(--osx-font); }
 .terminal-tab.selected { color: var(--osx-text); background: #0c0d0e; box-shadow: 0 -2px var(--osx-accent) inset; }
 .terminal-tab-select { min-width: 0; flex: 1; align-self: stretch; display: flex; align-items: center; gap: 6px; padding: 0 4px 0 8px; border: 0; color: inherit; background: transparent; font: inherit; cursor: pointer; }
 .terminal-tab-select > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
-.terminal-tab-select > i, .terminal-workbench > footer i { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--osx-muted); }
-.terminal-tab-select > i[data-status="running"], .terminal-workbench > footer i[data-status="running"] { background: var(--osx-success); }
+.terminal-tab-select > i { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--osx-muted); }
+.terminal-tab-select > i[data-status="running"] { background: var(--osx-success); }
 .terminal-tab-select > i[data-status="pending"] { background: var(--osx-warning); }
-.terminal-tab-select > i[data-status="error"], .terminal-workbench > footer i[data-status="error"] { background: var(--osx-danger); }
+.terminal-tab-select > i[data-status="error"] { background: var(--osx-danger); }
 .terminal-tab-close { width: 24px; height: 24px; flex: 0 0 auto; display: grid; place-items: center; margin-right: 3px; padding: 0; border: 0; border-radius: 4px; color: inherit; background: transparent; opacity: 0; cursor: pointer; }
 .terminal-tab:hover .terminal-tab-close, .terminal-tab:focus-within .terminal-tab-close { opacity: .8; }
 .terminal-tab-close:hover { background: color-mix(in srgb, var(--osx-text) 8%, transparent); opacity: 1; }
@@ -343,14 +341,12 @@ onBeforeUnmount(() => {
 .terminal-command-context span { color: #74b9d5; }
 .terminal-command-context b { color: #75be8a; }
 .terminal-command-context code { min-width: 0; overflow: hidden; color: #e3e5e6; text-overflow: ellipsis; white-space: nowrap; }
-.terminal-emulator { min-width: 0; min-height: 0; padding: 8px 10px; overflow: hidden; }
+.terminal-emulator { min-width: 0; flex: 1 1 auto; min-height: 0; padding: 8px 10px; overflow: hidden; }
 .terminal-emulator :deep(.xterm) { height: 100%; }
 .terminal-emulator :deep(.xterm-viewport) { scrollbar-color: #41474a transparent; scrollbar-width: thin; }
-.terminal-welcome { min-height: 0; display: grid; place-content: center; justify-items: center; gap: 7px; padding: 24px; color: var(--osx-muted); text-align: center; }
+.terminal-welcome { flex: 1 1 auto; min-height: 0; display: grid; place-content: center; justify-items: center; gap: 7px; padding: 24px; color: var(--osx-muted); text-align: center; }
 .terminal-welcome > span { width: 42px; height: 42px; display: grid; place-items: center; border: 1px solid var(--osx-border-soft); border-radius: 10px; }
 .terminal-welcome strong { color: var(--osx-text); font-size: 13px; }
 .terminal-welcome small { margin-bottom: 4px; font-size: 12px; }
-.terminal-workbench > footer { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 9px; border-top: 1px solid #242729; color: #858b8f; background: #111315; font: 12px var(--osx-font-mono); }
-.terminal-workbench > footer span { display: inline-flex; align-items: center; gap: 6px; }
+.terminal-context-stack { flex: 0 0 auto; min-width: 0; }
 </style>
-.terminal-context-stack { min-width: 0; }

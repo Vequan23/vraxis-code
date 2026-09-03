@@ -233,3 +233,21 @@ test("cleans and restores an archived worktree from its checkpoint branch", asyn
   assert.equal(await readFile(join(restoredPath, "value.txt"), "utf8"), "preserved\n");
   assert.equal(await git(restoredPath, "branch", "--show-current"), worktree.branch);
 });
+
+test("uses an optional branch slug when creating a Build worktree", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "vraxis-worktree-slug-test-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const project = join(root, "project");
+  await mkdir(project, { recursive: true });
+  await writeFile(join(project, "value.txt"), "base\n");
+  await git(project, "init", "-b", "main");
+  await git(project, "config", "user.name", "Vraxis Test");
+  await git(project, "config", "user.email", "test@vraxis.local");
+  await git(project, "config", "core.autocrlf", "false");
+  await git(project, "add", ".");
+  await git(project, "commit", "-m", "Initial fixture");
+  const worktrees = new GitWorktrees(join(root, "data"));
+  const worktree = await worktrees.create(project, "project-slug", "Fix login", "fix/login-bug");
+  assert.match(worktree.branch, /^vraxis\/fix\/login-bug-[a-f0-9]{8}$/);
+  assert.equal(await git(worktree.path, "branch", "--show-current"), worktree.branch);
+});

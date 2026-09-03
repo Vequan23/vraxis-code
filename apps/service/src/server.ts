@@ -31,6 +31,7 @@ const app = createApp({
 const server = createServer(app);
 
 await listenLoopback(server, port);
+app.warmupDiscovery();
 console.log(`Vraxis Code service listening on http://127.0.0.1:${port}`);
 
 let shuttingDown = false;
