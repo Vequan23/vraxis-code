@@ -5,9 +5,11 @@ import type {
   SessionSummary,
   VerificationRunSummary,
 } from "@vraxis/code-contracts";
+import { runtimeCanProbe, runtimeIsReady } from "../settings/runtime-conformance.js";
 
 export type FirstRunActionId =
   | "setup-runtime"
+  | "connect-provider"
   | "verify-runtime"
   | "choose-project"
   | "inspect-project"
@@ -38,8 +40,7 @@ export interface FirstRunReadinessInput {
 }
 
 function runtimeReady(runtime?: RuntimeSummary): boolean {
-  if (!runtime || runtime.availability !== "installed" || runtime.authentication === "required") return false;
-  return runtime.kind === "hosted-provider" || runtime.conformance?.state === "ready";
+  return runtimeIsReady(runtime);
 }
 
 function verificationRecipeReady(doctor?: ProjectDoctorSummary): boolean {
@@ -52,10 +53,7 @@ function verificationRecipeReady(doctor?: ProjectDoctorSummary): boolean {
 
 export function firstRunReadiness(input: FirstRunReadinessInput): FirstRunReadiness {
   const runtimeIsReady = runtimeReady(input.runtime);
-  const runtimeCanProbe = Boolean(input.runtime
-    && input.runtime.availability === "installed"
-    && input.runtime.authentication !== "required"
-    && input.runtime.kind !== "hosted-provider");
+  const runtimeCanProbeNow = runtimeCanProbe(input.runtime);
   const projectIsReady = Boolean(input.project && input.projectDoctor?.ok);
   const task = input.sessions[0];
   const taskIsReady = Boolean(task);
@@ -66,14 +64,16 @@ export function firstRunReadiness(input: FirstRunReadinessInput): FirstRunReadin
   const steps: FirstRunStep[] = [
     {
       id: "runtime",
-      label: "Verify an agent harness",
+      label: "Connect a runtime",
       detail: runtimeIsReady
         ? `${input.runtime?.name ?? "Runtime"} is ready for governed work.`
-        : runtimeCanProbe
-          ? `${input.runtime?.name ?? "Runtime"} is installed. Run one bounded live conformance check.`
+        : runtimeCanProbeNow
+          ? input.runtime?.kind === "hosted-provider"
+            ? `${input.runtime?.name ?? "Provider"} is connected. Run Test connection to verify credentials and model access.`
+            : `${input.runtime?.name ?? "Runtime"} is installed. Run one bounded live conformance check.`
           : input.runtime?.authentication === "required"
             ? `${input.runtime.name} needs authentication before it can run.`
-            : "Install or connect a supported coding harness.",
+            : "Install an agent harness or connect a direct model provider.",
       state: runtimeIsReady ? "complete" : "current",
     },
     {
@@ -112,9 +112,9 @@ export function firstRunReadiness(input: FirstRunReadinessInput): FirstRunReadin
 
   let action: FirstRunReadiness["action"];
   if (!runtimeIsReady) {
-    action = runtimeCanProbe
+    action = runtimeCanProbeNow
       ? { id: "verify-runtime", label: `Verify ${input.runtime?.name ?? "runtime"}`, detail: "One bounded request; no project or tool authority." }
-      : { id: "setup-runtime", label: "Set up a harness", detail: "Install, authenticate, update, or connect a provider." };
+      : { id: "setup-runtime", label: "Set up a runtime", detail: "Install an agent harness or connect a direct API provider." };
   } else if (!input.project) {
     action = { id: "choose-project", label: "Choose project", detail: "Only the folder you approve is indexed." };
   } else if (!projectIsReady) {

@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import type { HarnessMetricsSummaryV1, HarnessRuntimeStatsV1 } from "@vraxis/code-contracts";
+import type { HarnessMetricsSummaryV1, HarnessRuntimeStatsV1, RuntimeSummary } from "@vraxis/code-contracts";
 
 const props = defineProps<{
   summary: HarnessMetricsSummaryV1;
+  runtimes?: RuntimeSummary[];
 }>();
+
+const runtimeNames = computed(() => new Map((props.runtimes ?? []).map((runtime) => [runtime.id, runtime.name])));
 
 function weightedAverage(values: Array<{ weight: number; value: number }>): number | undefined {
   const totalWeight = values.reduce((sum, item) => sum + item.weight, 0);
@@ -51,7 +54,7 @@ function modeLabel(mode: HarnessRuntimeStatsV1["mode"]): string {
 }
 
 function runtimeLabel(stat: HarnessRuntimeStatsV1): string {
-  const name = stat.runtimeId;
+  const name = runtimeNames.value.get(stat.runtimeId) ?? stat.runtimeId;
   return stat.runtimeVersion ? `${name} · ${stat.runtimeVersion}` : name;
 }
 </script>
@@ -70,7 +73,7 @@ function runtimeLabel(stat: HarnessRuntimeStatsV1): string {
         <i :style="{ width: barWidth(totals.toolReliability) }" />
       </article>
       <article>
-        <span>Avg tokens / run</span>
+        <span>Avg billed tokens / run</span>
         <strong>{{ formatTokens(totals.avgTokens) }}</strong>
         <i :style="{ width: barWidth(totals.avgTokens ? 1 - Math.min(totals.avgTokens / 120_000, 1) : undefined) }" />
       </article>
@@ -93,9 +96,11 @@ function runtimeLabel(stat: HarnessRuntimeStatsV1): string {
             <th scope="col">Runtime</th>
             <th scope="col">Mode</th>
             <th scope="col">Runs</th>
+            <th scope="col">Avg time</th>
             <th scope="col">Tool reliability</th>
-            <th scope="col">Avg tokens</th>
+            <th scope="col">Avg billed tokens</th>
             <th scope="col">Compaction</th>
+            <th scope="col">Approvals</th>
             <th scope="col">Verify pass</th>
           </tr>
         </thead>
@@ -104,9 +109,11 @@ function runtimeLabel(stat: HarnessRuntimeStatsV1): string {
             <td>{{ runtimeLabel(stat) }}</td>
             <td>{{ modeLabel(stat.mode) }}</td>
             <td>{{ stat.runs }}</td>
+            <td>{{ Math.round(stat.avgDurationMs / 1000) }}s</td>
             <td>{{ percent(1 - stat.toolFailureRate) }}</td>
             <td>{{ formatTokens(stat.avgTokens) }}</td>
             <td>{{ percent(stat.compactionRate) }}</td>
+            <td>{{ percent(stat.approvalRate) }}</td>
             <td>{{ stat.verificationPassRate === undefined ? "—" : percent(stat.verificationPassRate) }}</td>
           </tr>
         </tbody>

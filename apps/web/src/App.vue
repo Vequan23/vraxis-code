@@ -56,9 +56,15 @@ import { demoState, emptyState } from "./workspace/demo-state.js";
 import { chooseProjectFolder } from "./projects/project-picker.js";
 import ProjectSourceList from "./projects/ProjectSourceList.vue";
 import SettingsShell from "./settings/SettingsShell.vue";
+import HarnessRunNudge from "./settings/HarnessRunNudge.vue";
+import {
+  selectPostRunNudgeRecommendation,
+  settingsPatchForRecommendationAction,
+} from "./settings/harness-recommendation-actions.js";
 import { type SettingsSectionId } from "./settings/settings-navigation.js";
 import FirstRunJourney from "./onboarding/FirstRunJourney.vue";
 import TaskRuntimePicker from "./composer/TaskRuntimePicker.vue";
+import { runtimeConformanceLabel, runtimeSubmitBlockMessage } from "./settings/runtime-conformance.js";
 import ComposerMenuPicker from "./composer/ComposerMenuPicker.vue";
 import {
   buildComposerSlashCommandSuggestions,
@@ -101,6 +107,8 @@ const composerAttachments = ref<OsxAgentComposerAttachment[]>([]);
 const composerContextItems = ref<OsxAgentComposerContextItem[]>([]);
 const harnessMetricsSummary = ref<HarnessMetricsSummaryV1 | null>(null);
 const dismissedRoutingHintId = ref("");
+const postRunNudgeSessionId = ref("");
+const dismissedPostRunNudgeIds = ref<string[]>([]);
 const attachmentReferences = new Map<string, PromptAttachment>();
 interface PreparedPrompt {
   prompt: string;
@@ -129,6 +137,8 @@ const loadError = ref("");
 const taskError = ref("");
 const submitting = ref(false);
 const startingNewTask = ref(false);
+const sessionActionId = ref("");
+const confirmDeleteSessionId = ref("");
 const registering = ref(false);
 const registrationError = ref("");
 const selectedFile = ref("");
@@ -236,7 +246,9 @@ let changeRequestVersion = 0;
 const project = computed(() => selectedProject(state));
 const session = computed(() => selectedSession(state));
 const projectSessions = computed(() => state.sessions.filter((item) => item.projectId === project.value?.id));
-const showFirstRunJourney = computed(() => !firstRunJourneyClosed.value && projectSessions.value.length <= 1);
+const activeProjectSessions = computed(() => projectSessions.value.filter((item) => !item.archivedAt));
+const archivedProjectSessions = computed(() => projectSessions.value.filter((item) => item.archivedAt));
+const showFirstRunJourney = computed(() => !firstRunJourneyClosed.value && activeProjectSessions.value.length <= 1);
 const STARTUP_RECOVERY_DISMISS_KEY = "vraxis-code:dismissed-startup-recovery";
 
 function readDismissedStartupRecoveryCheckedAt(): string {
@@ -267,6 +279,7 @@ function dismissStartupRecoveryAlert(): void {
 
 const runtimeIsEnabled = (runtimeId: string): boolean => !state.settings.disabledRuntimeIds?.includes(runtimeId);
 const localRuntimes = computed(() => state.runtimes.filter((item) => item.kind !== "hosted-provider"));
+const hostedRuntimes = computed(() => state.runtimes.filter((item) => item.kind === "hosted-provider"));
 const defaultRuntime = computed(() => state.runtimes.find((item) =>
   item.id === state.settings.defaultRuntimeId && item.availability === "installed" && runtimeIsEnabled(item.id))
   ?? state.runtimes.find((item) => item.availability === "installed" && runtimeIsEnabled(item.id))
@@ -283,7 +296,9 @@ const runtimeCapabilities = computed(() => runtime.value?.productCapabilities ??
 const runtimeCapabilitySummary = computed(() => {
   const available = runtimeCapabilities.value.filter((item) => item.state === "available").length;
   const limited = runtimeCapabilities.value.filter((item) => item.state === "limited").length;
-  return `${available}/${runtimeCapabilities.value.length} ready${limited ? ` · ${limited} limited` : ""}`;
+  const conformance = runtime.value ? runtimeConformanceLabel(runtime.value) : "";
+  const capabilities = `${available}/${runtimeCapabilities.value.length} ready${limited ? ` · ${limited} limited` : ""}`;
+  return conformance ? `${conformance} · ${capabilities}` : capabilities;
 });
 const modelSuggestions = computed(() => runtime.value?.models.filter((item) => item.availability !== "missing") ?? []);
 const composerModelOptions = computed<OsxAgentComposerOption[]>(() => {
@@ -631,11 +646,29 @@ const composerRoutingHint = computed(() => {
   if (runtimeMatches && modeMatches) return null;
   return hint;
 });
+const postRunNudge = computed(() => {
+  if (!state.settings.harnessMetricsEnabled || sessionIsRunning.value) return null;
+  if (!postRunNudgeSessionId.value || postRunNudgeSessionId.value !== session.value?.id) return null;
+  return selectPostRunNudgeRecommendation({
+    recommendations: harnessMetricsSummary.value?.recommendations ?? [],
+    sessionMode: session.value?.mode ?? mode.value,
+    sessionRuntimeId: session.value?.runtimeId ?? runtime.value?.id ?? selectedRuntimeId.value,
+    dismissedIds: new Set(dismissedPostRunNudgeIds.value),
+    routingHint: composerRoutingHint.value,
+  });
+});
 watch(() => state.settings.harnessMetricsEnabled, () => {
   void refreshHarnessMetrics();
 }, { immediate: true });
 watch(sessionIsRunning, (running, wasRunning) => {
-  if (wasRunning && !running) void refreshHarnessMetrics();
+  if (running) {
+    postRunNudgeSessionId.value = "";
+    return;
+  }
+  if (wasRunning && session.value?.id) {
+    postRunNudgeSessionId.value = session.value.id;
+    void refreshHarnessMetrics();
+  }
 });
 const activeToolSequence = computed(() => {
   if (!sessionIsRunning.value) return undefined;
@@ -688,6 +721,7 @@ const firstRunBusy = computed(() => registering.value
   || Boolean(verificationAction.value)
   || Boolean(receiptExporting.value));
 const composerError = computed(() => taskError.value
+  || runtimeSubmitBlockMessage(runtime.value)
   || (mode.value === "build" && buildWorktreeBlocked.value ? "Finish or recover the current Build worktree before continuing." : "")
   || (mode.value === "build" && !runtimeCanBuild.value ? "Choose a runtime that supports guarded isolated-workspace writes for Build mode." : "")
   || (runtime.value && runtime.value.availability !== "installed" ? runtime.value.detail : ""));
@@ -1145,17 +1179,35 @@ function taskPaneIsNearBottom(): boolean {
   return pane.scrollHeight - pane.scrollTop - pane.clientHeight <= 80;
 }
 
+function updateLatestMessagesHidden(intersecting = true): void {
+  if (taskPaneIsNearBottom()) {
+    latestMessagesHidden.value = false;
+    return;
+  }
+  latestMessagesHidden.value = !intersecting;
+}
+
 // Observe the end of the transcript, not individual messages: streamed content,
 // expanded tools, and pane resizes all update visibility without polling.
-watch([sessionPane, taskEnd], ([pane, end], _previous, onCleanup) => {
+watch([sessionPane, taskEnd, () => displayedSessionEvents.value.length], ([pane, end], _previous, onCleanup) => {
   latestMessagesHidden.value = false;
   if (!pane || !end) return;
   const root = pane.scrollHeight > pane.clientHeight ? pane : null;
+  let intersecting = true;
   const observer = new IntersectionObserver(([entry]) => {
-    latestMessagesHidden.value = Boolean(entry && !entry.isIntersecting);
-  }, { root, rootMargin: "0px 0px 8px 0px" });
+    intersecting = Boolean(entry?.isIntersecting);
+    updateLatestMessagesHidden(intersecting);
+  }, { root, threshold: 0 });
   observer.observe(end);
-  onCleanup(() => observer.disconnect());
+  const onScroll = () => updateLatestMessagesHidden(intersecting);
+  pane.addEventListener("scroll", onScroll, { passive: true });
+  const resizeObserver = new ResizeObserver(() => updateLatestMessagesHidden(intersecting));
+  resizeObserver.observe(pane);
+  onCleanup(() => {
+    observer.disconnect();
+    pane.removeEventListener("scroll", onScroll);
+    resizeObserver.disconnect();
+  });
 }, { flush: "post" });
 
 async function jumpToLatest(): Promise<void> {
@@ -1236,6 +1288,9 @@ function selectTaskMode(modeId: string): void {
 function selectTaskModel(modelId: string): void {
   selectedModelId.value = modelId;
   taskError.value = "";
+  const runtimeId = selectedRuntimeId.value;
+  if (!runtimeId) return;
+  void updateSettings({ runtimeModels: { [runtimeId]: modelId.trim() || null } });
 }
 
 function setHarnessNotice(notice: HarnessNotice | null): void {
@@ -1447,6 +1502,60 @@ async function startNewTask(): Promise<void> {
   }
 }
 
+async function archiveSession(item: SessionSummary): Promise<void> {
+  if (sessionActionId.value) return;
+  if (item.status === "running") {
+    taskError.value = "Stop the task before archiving it.";
+    return;
+  }
+  sessionActionId.value = item.id;
+  taskError.value = "";
+  try {
+    await post(`/api/sessions/${encodeURIComponent(item.id)}/archive`, {});
+    await loadState({ blocking: false });
+  } catch (error) {
+    taskError.value = error instanceof Error ? error.message : "The task could not be archived.";
+  } finally {
+    sessionActionId.value = "";
+  }
+}
+
+async function restoreSession(item: SessionSummary): Promise<void> {
+  if (sessionActionId.value) return;
+  sessionActionId.value = item.id;
+  taskError.value = "";
+  try {
+    await post(`/api/sessions/${encodeURIComponent(item.id)}/restore`, {});
+    await loadState({ blocking: false });
+    await chooseSession(item);
+  } catch (error) {
+    taskError.value = error instanceof Error ? error.message : "The task could not be restored.";
+  } finally {
+    sessionActionId.value = "";
+  }
+}
+
+async function deleteSession(item: SessionSummary): Promise<void> {
+  if (sessionActionId.value) return;
+  if (item.status === "running") {
+    taskError.value = "Stop the task before deleting it.";
+    return;
+  }
+  sessionActionId.value = item.id;
+  taskError.value = "";
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+    const result = await response.json() as { error?: string };
+    if (!response.ok) throw new Error(result.error ?? "The task could not be deleted.");
+    confirmDeleteSessionId.value = "";
+    await loadState({ blocking: false });
+  } catch (error) {
+    taskError.value = error instanceof Error ? error.message : "The task could not be deleted.";
+  } finally {
+    sessionActionId.value = "";
+  }
+}
+
 function chooseFilePath(path: string): void {
   selectedFile.value = path;
   void loadSelectedFile();
@@ -1635,6 +1744,11 @@ function submitPrompt(event: Event): void {
   const prompt = String(detail?.[0] ?? composer.value).trim()
     || (attachments.length ? "Review the attached project files." : skillIds.length ? "Apply the attached skills to this project." : "");
   if (!prompt || !project.value || !runtime.value) return;
+  const conformanceBlock = runtimeSubmitBlockMessage(runtime.value);
+  if (conformanceBlock) {
+    taskError.value = conformanceBlock;
+    return;
+  }
   if (mode.value === "build" && !runtimeCanBuild.value) {
     taskError.value = "Choose a runtime that supports guarded isolated-workspace writes for Build mode.";
     return;
@@ -2386,7 +2500,12 @@ async function exportBrowserReplay(): Promise<void> {
 }
 
 async function interruptRun(): Promise<void> {
-  if (!session.value || !sessionIsRunning.value) return;
+  if (!session.value) return;
+  reconcileStaleRunningSession(session.value.id);
+  if (!sessionIsRunning.value) {
+    taskError.value = "";
+    return;
+  }
   const sessionId = session.value.id;
   const index = state.sessions.findIndex((item) => item.id === sessionId);
   const previous = index >= 0 ? cloneWorkspaceValue(state.sessions[index]!) : undefined;
@@ -2396,8 +2515,14 @@ async function interruptRun(): Promise<void> {
     await post(`/api/sessions/${sessionId}/interrupt`, {});
     void loadState({ blocking: false });
   } catch (error) {
+    const message = error instanceof Error ? error.message : "The task could not be stopped.";
+    if (message === "This task is not running.") {
+      taskError.value = "";
+      await refreshSessionRunState(sessionId);
+      return;
+    }
     if (previous && index >= 0) state.sessions[index] = previous;
-    taskError.value = error instanceof Error ? error.message : "The task could not be stopped.";
+    taskError.value = message;
   }
 }
 
@@ -2424,6 +2549,76 @@ async function resumeRun(): Promise<void> {
 function clearRunPoll(): void {
   if (runPollTimer) clearTimeout(runPollTimer);
   runPollTimer = undefined;
+}
+
+function reconcileStaleRunningSession(sessionId?: string): void {
+  const id = sessionId ?? session.value?.id;
+  if (!id) return;
+  const index = state.sessions.findIndex((item) => item.id === id);
+  if (index < 0) return;
+  const current = state.sessions[index]!;
+  if (current.status !== "running") return;
+
+  const settlement = current.settlement?.state;
+  if (settlement === "failed" || settlement === "interrupted") {
+    state.sessions[index] = {
+      ...current,
+      status: settlement,
+      updatedAt: current.settlement?.settledAt ?? current.updatedAt,
+    };
+    taskError.value = "";
+    return;
+  }
+  if (settlement === "complete") {
+    state.sessions[index] = {
+      ...current,
+      status: "idle",
+      updatedAt: current.settlement?.settledAt ?? current.updatedAt,
+    };
+    taskError.value = "";
+    return;
+  }
+
+  const events = state.events.filter((item) => item.sessionId === id);
+  for (let eventIndex = events.length - 1; eventIndex >= 0; eventIndex -= 1) {
+    const event = events[eventIndex]!;
+    if (event.kind !== "lifecycle") continue;
+    if (event.state === "failed") {
+      state.sessions[index] = { ...current, status: "failed", updatedAt: event.timestamp };
+      taskError.value = "";
+      return;
+    }
+    if (event.state === "interrupted") {
+      state.sessions[index] = { ...current, status: "interrupted", updatedAt: event.timestamp };
+      taskError.value = "";
+      return;
+    }
+    if (event.state === "complete" && event.title === "Task complete") {
+      state.sessions[index] = { ...current, status: "idle", updatedAt: event.timestamp };
+      taskError.value = "";
+      return;
+    }
+  }
+}
+
+async function refreshSessionRunState(sessionId: string): Promise<void> {
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/events?after=0`);
+    if (!response.ok) return;
+    const update = await response.json() as SessionEventsResponse;
+    const sessionIndex = state.sessions.findIndex((item) => item.id === sessionId);
+    if (sessionIndex >= 0) state.sessions[sessionIndex] = update.session;
+    else state.sessions.unshift(update.session);
+    for (const event of update.events) {
+      const eventIndex = state.events.findIndex((item) => item.id === event.id);
+      if (eventIndex < 0) state.events.push(event);
+      else state.events[eventIndex] = event;
+    }
+    reconcileStaleRunningSession(sessionId);
+    serviceOnline.value = true;
+  } catch {
+    reconcileStaleRunningSession(sessionId);
+  }
 }
 
 function closeTaskStream(): void {
@@ -2465,6 +2660,7 @@ async function applyTaskStreamPayload(update: SessionStreamPayload): Promise<voi
   if (wasRunning && update.session.status !== "running" && update.session.worktree) {
     await refreshWorkspaceEvidence(update.session.id);
   }
+  reconcileStaleRunningSession(update.session.id);
 }
 
 function connectTaskStream(): void {
@@ -2547,6 +2743,7 @@ async function pollRun(): Promise<void> {
     if (wasRunning && update.session.status !== "running" && update.session.worktree) {
       await refreshWorkspaceEvidence(sessionId);
     }
+    reconcileStaleRunningSession(sessionId);
   } catch {
     serviceOnline.value = false;
   } finally {
@@ -2601,16 +2798,27 @@ function openSettings(section: SettingsSectionId = "general"): void {
   activeView.value = "settings";
   void refreshPermissionRules();
   void refreshTeamPolicy();
+  if (section === "runtimes" || section === "harnesses" || section === "models") {
+    void refreshRuntimes();
+  }
 }
 
 async function openHarnessSetup(): Promise<void> {
-  openSettings("harnesses");
+  openSettings("runtimes");
+}
+
+function openProviderSetup(): void {
+  openSettings("models");
 }
 
 async function handleFirstRunAction(action: FirstRunActionId): Promise<void> {
   if (firstRunBusy.value) return;
   if (action === "setup-runtime") {
     await openHarnessSetup();
+    return;
+  }
+  if (action === "connect-provider") {
+    openProviderSetup();
     return;
   }
   if (action === "verify-runtime") {
@@ -2687,6 +2895,27 @@ function dismissComposerRoutingHint(): void {
   if (hint) dismissedRoutingHintId.value = hint.id;
 }
 
+function dismissPostRunNudge(): void {
+  const nudge = postRunNudge.value;
+  if (nudge) dismissedPostRunNudgeIds.value = [...dismissedPostRunNudgeIds.value, nudge.id];
+  postRunNudgeSessionId.value = "";
+}
+
+async function applyPostRunNudge(): Promise<void> {
+  const nudge = postRunNudge.value;
+  const action = nudge?.action;
+  if (!action) return;
+  if (action.type === "probe-runtime") {
+    const target = state.runtimes.find((item) => item.id === action.runtimeId);
+    if (target) await probeRuntime(target);
+  } else {
+    await updateSettings(settingsPatchForRecommendationAction(action, state.settings));
+    if (action.type === "set-default-runtime") selectedRuntimeId.value = action.runtimeId;
+    if (action.type === "set-default-mode" && !sessionIsRunning.value) mode.value = action.mode;
+  }
+  dismissPostRunNudge();
+}
+
 async function updateSettings(patch: UpdateSettingsRequest): Promise<void> {
   if (settingsSaving.value) return;
   const previous: UserSettings = {
@@ -2734,7 +2963,7 @@ async function refreshRuntimes(): Promise<void> {
   settingsError.value = "";
   try {
     const result = await post("/api/runtimes/refresh", {}) as { runtimes: RuntimeSummary[] };
-    state.runtimes = [...result.runtimes, ...state.runtimes.filter((item) => item.kind === "hosted-provider")];
+    state.runtimes = result.runtimes;
     syncTaskSelection();
   } catch (error) {
     settingsError.value = error instanceof Error ? error.message : "Harnesses could not be checked.";
@@ -2766,9 +2995,11 @@ async function probeRuntime(runtime: RuntimeSummary): Promise<void> {
         ? `${runtime.name} probe failed`
         : `${runtime.name} probe finished`;
     const description = result.conformance.state === "ready"
-      ? "This harness passed the live Vraxis conformance check and is ready for governed tasks."
+      ? runtime.kind === "hosted-provider"
+        ? "This provider passed catalog discovery and the bounded connection test."
+        : "This harness passed the live Vraxis conformance check and is ready for governed tasks."
       : result.conformance.state === "failed"
-        ? "Review the conformance checks in Settings before using this harness."
+        ? "Review the connection checks in Settings before using this runtime."
         : `${runtime.name} completed with ${result.conformance.state} capability. Review the checks in Settings before relying on Build mode.`;
     setHarnessNotice({ tone, title, description });
     if (activeView.value === "workspace") {
@@ -2782,7 +3013,6 @@ async function probeRuntime(runtime: RuntimeSummary): Promise<void> {
       title: `${runtime.name} probe could not finish`,
       description: message,
     });
-    if (activeView.value === "settings") settingsError.value = message;
   } finally {
     runtimeProbingId.value = "";
   }
@@ -2860,6 +3090,12 @@ async function providerConnected(providerId: string): Promise<void> {
     defaultRuntimeId: connectedRuntime.id,
     runtimeModels: { [connectedRuntime.id]: provider.model },
   });
+  setHarnessNotice({
+    tone: "info",
+    title: `${connectedRuntime.name} connected`,
+    description: "Running a bounded connection test to verify credentials and model access. This may use provider quota.",
+  });
+  await probeRuntime(connectedRuntime);
 }
 
 async function providersChanged(): Promise<void> {
@@ -3149,17 +3385,65 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
             <osx-icon :name="startingNewTask ? 'loader' : 'plus'" :size="14" />
             <span>{{ startingNewTask ? "Starting…" : "New task" }}</span>
           </button>
-          <button
-            v-for="item in projectSessions"
+          <div
+            v-for="item in activeProjectSessions"
             :key="item.id"
-            :class="['session-link', { selected: item.id === state.selectedSessionId }]"
-            type="button"
-            @click="chooseSession(item)"
+            :class="['session-row', { selected: item.id === state.selectedSessionId }]"
           >
-            <span>{{ item.title }}</span>
-            <small>{{ visibleSessionMode(item) }}</small>
-          </button>
-          <p v-if="projectSessions.length === 0" class="sidebar-empty-copy">Your tasks will appear here.</p>
+            <button
+              :class="['session-link', { selected: item.id === state.selectedSessionId }]"
+              type="button"
+              @click="chooseSession(item)"
+            >
+              <span>{{ item.title }}</span>
+              <small>{{ visibleSessionMode(item) }}</small>
+            </button>
+            <osx-icon-button
+              class="session-row-action"
+              label="Archive task"
+              icon="trash"
+              size="small"
+              :disabled="Boolean(sessionActionId) || item.status === 'running'"
+              @click.stop="archiveSession(item)"
+            />
+          </div>
+          <details v-if="archivedProjectSessions.length" class="archived-tasks">
+            <summary>Archived · {{ archivedProjectSessions.length }}</summary>
+            <div
+              v-for="item in archivedProjectSessions"
+              :key="item.id"
+              class="session-row archived"
+            >
+              <div class="session-link archived-task-copy">
+                <span>{{ item.title }}</span>
+                <small>{{ visibleSessionMode(item) }}</small>
+              </div>
+              <div v-if="confirmDeleteSessionId === item.id" class="session-delete-confirm" role="group" :aria-label="`Delete ${item.title}`">
+                <span>Delete permanently?</span>
+                <osx-button size="small" tone="secondary" :disabled="Boolean(sessionActionId)" @click.stop="confirmDeleteSessionId = ''">Cancel</osx-button>
+                <osx-button size="small" tone="danger" :loading="sessionActionId === item.id" :disabled="Boolean(sessionActionId && sessionActionId !== item.id)" @click.stop="deleteSession(item)">Delete</osx-button>
+              </div>
+              <div v-else class="session-row-actions">
+                <osx-icon-button
+                  class="session-row-action"
+                  label="Restore task"
+                  icon="refresh"
+                  size="small"
+                  :disabled="Boolean(sessionActionId)"
+                  @click.stop="restoreSession(item)"
+                />
+                <osx-icon-button
+                  class="session-row-action"
+                  label="Delete permanently"
+                  icon="trash"
+                  size="small"
+                  :disabled="Boolean(sessionActionId) || item.status === 'running'"
+                  @click.stop="confirmDeleteSessionId = item.id"
+                />
+              </div>
+            </div>
+          </details>
+          <p v-if="activeProjectSessions.length === 0 && archivedProjectSessions.length === 0" class="sidebar-empty-copy">Your tasks will appear here.</p>
         </section>
 
         <div class="sidebar-footer">
@@ -3185,6 +3469,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
           :harness-notice="harnessNotice"
           :theme-options="themeOptions"
           :runtimes="localRuntimes"
+          :hosted-runtimes="hostedRuntimes"
           :runtime-refreshing="runtimeRefreshing"
           :runtime-probing-id="runtimeProbingId"
           :permission-rules="permissionRules"
@@ -3282,6 +3567,15 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
               : 'Choose a runtime that supports guarded isolated-workspace writes.'"
           />
 
+          <HarnessRunNudge
+            v-if="postRunNudge"
+            :recommendation="postRunNudge"
+            :runtimes="localRuntimes"
+            :saving="settingsSaving || Boolean(runtimeProbingId)"
+            @apply="applyPostRunNudge"
+            @dismiss="dismissPostRunNudge"
+          />
+
           <details v-if="runtime && runtimeCapabilities.length" class="runtime-preflight">
             <summary>
               <span><osx-icon name="shield-check" :size="15" /> {{ runtime.name }} capabilities</span>
@@ -3309,7 +3603,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
             :runtime="runtime"
             :project="project"
             :project-doctor="state.projectDoctor"
-            :sessions="projectSessions"
+            :sessions="activeProjectSessions"
             :verification-runs="verificationRuns"
             :busy="firstRunBusy"
             :closable="verificationRuns.some((run) => run.state === 'passed')"
@@ -3385,6 +3679,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                 <div><strong>{{ item.title }}</strong><span>{{ item.detail }}</span></div>
               </div>
             </template>
+            <div ref="taskEnd" class="task-end" aria-hidden="true" />
             <div v-if="session?.status === 'failed' || session?.status === 'interrupted'" class="resume-run">
               <div>
                 <strong>{{ session.settlement?.state === "recovery-needed" ? "Recovered unfinished task" : session.status === "interrupted" ? "Continue this task" : "Try the runtime again" }}</strong>
@@ -3453,7 +3748,6 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
           </div>
           </div>
         </template>
-        <div v-if="activeView === 'workspace'" ref="taskEnd" class="task-end" aria-hidden="true" />
       </section>
 
       <div v-if="activeView === 'workspace' && project" slot="composer" class="task-composer-shell">

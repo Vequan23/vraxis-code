@@ -168,6 +168,7 @@ export interface SessionSummary {
   modelId?: string;
   updatedAt: string;
   status: "idle" | "running" | "interrupted" | "failed";
+  archivedAt?: string;
   settlement?: TaskSettlementSummary;
   steering?: SessionSteeringSummary;
   worktree?: WorktreeSummary;
@@ -239,7 +240,7 @@ export interface RuntimeConformanceSummary {
 }
 
 export interface RuntimeConformanceCheckSummary {
-  id: "adapter-contract" | "host-tool-isolation" | "live-output";
+  id: "adapter-contract" | "host-tool-isolation" | "credential-catalog" | "live-output";
   label: string;
   state: "passed" | "failed" | "not-checked";
   detail: string;

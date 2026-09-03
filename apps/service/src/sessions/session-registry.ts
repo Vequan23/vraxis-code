@@ -715,9 +715,48 @@ export class SessionRegistry {
 
   async select(sessionId: string): Promise<void> {
     await this.mutate((data) => {
-      this.session(data, sessionId);
+      const session = this.session(data, sessionId);
+      if (session.archivedAt) throw new TypeError("This task is archived. Restore it before opening.");
       data.selectedSessionId = sessionId;
       delete data.draftProjectId;
+    });
+  }
+
+  async archive(sessionId: string): Promise<SessionSummary> {
+    return this.mutate((data) => {
+      const session = this.session(data, sessionId);
+      if (session.status === "running") throw new TypeError("Stop the task before archiving it.");
+      if (session.archivedAt) return session;
+      session.archivedAt = new Date().toISOString();
+      session.updatedAt = session.archivedAt;
+      this.reselectAfterRemoval(data, session);
+      return session;
+    });
+  }
+
+  async restore(sessionId: string): Promise<SessionSummary> {
+    return this.mutate((data) => {
+      const session = this.session(data, sessionId);
+      if (!session.archivedAt) return session;
+      delete session.archivedAt;
+      session.updatedAt = new Date().toISOString();
+      return session;
+    });
+  }
+
+  async remove(sessionId: string): Promise<void> {
+    await this.mutate((data) => {
+      const session = this.session(data, sessionId);
+      if (session.status === "running") throw new TypeError("Stop the task before deleting it.");
+      const projectId = session.projectId;
+      data.sessions = data.sessions.filter((item) => item.id !== sessionId);
+      data.events = data.events.filter((event) => event.sessionId !== sessionId);
+      if (data.selectedSessionId === sessionId) {
+        delete data.selectedSessionId;
+        const replacement = data.sessions.find((item) => item.projectId === projectId && !item.archivedAt);
+        if (replacement) data.selectedSessionId = replacement.id;
+        else data.draftProjectId = projectId;
+      }
     });
   }
 
@@ -725,6 +764,14 @@ export class SessionRegistry {
     const session = data.sessions.find((item) => item.id === sessionId);
     if (!session) throw new TypeError("Session was not found.");
     return session;
+  }
+
+  private reselectAfterRemoval(data: SessionData, session: SessionSummary): void {
+    if (data.selectedSessionId !== session.id) return;
+    delete data.selectedSessionId;
+    const replacement = data.sessions.find((item) => item.projectId === session.projectId && item.id !== session.id && !item.archivedAt);
+    if (replacement) data.selectedSessionId = replacement.id;
+    else data.draftProjectId = session.projectId;
   }
 
   private nextSequence(data: SessionData, sessionId: string): number {

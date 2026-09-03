@@ -1,4 +1,5 @@
 import { defineSkill, type AgentSkill } from "@vraxis/agent-v";
+import { modeAgentProfile, type SessionMode } from "@vraxis/code-contracts";
 
 export const vraxisCodeSkill = defineSkill({
   id: "vraxis-code",
@@ -36,3 +37,17 @@ export const verificationRecipeSkill = defineSkill({
 });
 
 export const vraxisProductSkills: readonly AgentSkill[] = [vraxisCodeSkill, verificationRecipeSkill];
+
+/** Grants Vraxis Code mode tools for hosted provider runtimes that enforce skill-scoped tool policy. */
+export function vraxisModeHarnessSkill(mode: SessionMode): AgentSkill {
+  const profile = modeAgentProfile(mode);
+  return defineSkill({
+    id: `vraxis-mode-${mode}`,
+    name: `${profile.title} harness`,
+    version: "1.0.0",
+    description: `Vraxis Code ${profile.mode} mode product tools and guarded capabilities.`,
+    instructions: "These tools are governed by Vraxis Code approvals, workspace boundaries, and verification policy.",
+    tools: [...new Set([...profile.toolIds, ...profile.guardedToolIds])],
+    trust: "local",
+  });
+}

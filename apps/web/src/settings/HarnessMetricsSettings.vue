@@ -3,7 +3,6 @@ import { computed, onMounted, ref, watch } from "vue";
 import type {
   HarnessMetricsRecommendationActionV1,
   HarnessMetricsSummaryV1,
-  HarnessRuntimeStatsV1,
   RuntimeSummary,
   UpdateSettingsRequest,
   UserSettings,
@@ -43,11 +42,11 @@ async function refreshSummary(): Promise<void> {
     const response = await fetch("/api/harness-metrics");
     if (!response.ok) {
       const result = await response.json().catch(() => ({})) as { error?: string };
-      throw new Error(result.error ?? "Harness metrics could not be loaded.");
+      throw new Error(result.error ?? "Runtime metrics could not be loaded.");
     }
     summary.value = await response.json() as HarnessMetricsSummaryV1;
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : "Harness metrics could not be loaded.";
+    error.value = cause instanceof Error ? cause.message : "Runtime metrics could not be loaded.";
     summary.value = null;
   } finally {
     loading.value = false;
@@ -121,19 +120,6 @@ async function clearMetrics(): Promise<void> {
   }
 }
 
-function percent(value: number): string {
-  return `${Math.round(value * 100)}%`;
-}
-
-function modeLabel(mode: HarnessRuntimeStatsV1["mode"]): string {
-  return mode.charAt(0).toUpperCase() + mode.slice(1);
-}
-
-function runtimeLabel(stat: HarnessRuntimeStatsV1): string {
-  const version = stat.runtimeVersion ? ` · ${stat.runtimeVersion}` : "";
-  return `${stat.runtimeId}${version} · ${modeLabel(stat.mode)}`;
-}
-
 watch(() => props.settings.harnessMetricsEnabled, () => {
   void refreshSummary();
 }, { immediate: false });
@@ -148,8 +134,8 @@ onMounted(() => {
     <header>
       <span class="section-icon"><osx-icon name="sparkle" :size="19" /></span>
       <div>
-        <h2 id="harness-metrics-heading">Harness metrics</h2>
-        <p>Track runtime outcomes, tool reliability, approvals, and verification locally to improve harness defaults over time.</p>
+        <h2 id="harness-metrics-heading">Runtime metrics</h2>
+        <p>Track harness and provider outcomes, tool reliability, approvals, and verification locally to improve runtime defaults over time.</p>
       </div>
     </header>
 
@@ -158,7 +144,7 @@ onMounted(() => {
 
     <div class="metrics-controls">
       <osx-toggle
-        label="Record harness metrics"
+        label="Record runtime metrics"
         :checked="enabled"
         :disabled="saving"
         @change="toggleEnabled"
@@ -189,13 +175,14 @@ onMounted(() => {
     </div>
 
     <div v-if="loading" class="metrics-loading">
-      <osx-spinner size="small" label="Loading harness metrics" show-label />
+      <osx-spinner size="small" label="Loading runtime metrics" show-label />
     </div>
 
     <template v-else>
       <HarnessMetricsScorecard
         v-if="enabled && summary && runtimeStats.length"
         :summary="summary"
+        :runtimes="runtimes"
       />
 
       <HarnessRecommendationList
@@ -207,40 +194,9 @@ onMounted(() => {
         @probe="emit('probe', $event)"
       />
 
-      <div v-if="enabled && runtimeStats.length" class="metrics-table-wrap">
-        <table class="metrics-table">
-          <thead>
-            <tr>
-              <th scope="col">Runtime</th>
-              <th scope="col">Runs</th>
-              <th scope="col">Avg time</th>
-              <th scope="col">Avg tokens</th>
-              <th scope="col">Tool fail</th>
-              <th scope="col">Compaction</th>
-              <th scope="col">Approvals</th>
-              <th scope="col">Verify pass</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="stat in runtimeStats" :key="`${stat.runtimeId}:${stat.mode}`">
-              <td>{{ runtimeLabel(stat) }}</td>
-              <td>{{ stat.runs }}</td>
-              <td>{{ Math.round(stat.avgDurationMs / 1000) }}s</td>
-              <td>{{ stat.avgTokens === undefined ? "—" : `${Math.round(stat.avgTokens / 1000)}k` }}</td>
-              <td>{{ percent(stat.toolFailureRate) }}</td>
-              <td>{{ percent(stat.compactionRate) }}</td>
-              <td>{{ percent(stat.approvalRate) }}</td>
-              <td>{{ stat.verificationPassRate === undefined ? "—" : percent(stat.verificationPassRate) }}</td>
-            </tr>
-          </tbody>
-        </table>
-        <p v-if="summary" class="metrics-window">
-          {{ summary.totalRuns }} runs in the last {{ summary.windowDays }} days.
-        </p>
-      </div>
-
-      <p v-else-if="enabled" class="metrics-empty">No harness runs recorded yet. Complete a task to start building local metrics.</p>
-      <p v-else class="metrics-empty">Enable recording to start collecting local harness metrics.</p>
+      <p v-else-if="enabled && summary && !runtimeStats.length" class="metrics-empty">No runtime runs recorded yet. Complete a task to start building local metrics.</p>
+      <p v-else-if="enabled && !summary" class="metrics-empty">No runtime runs recorded yet. Complete a task to start building local metrics.</p>
+      <p v-else-if="!enabled" class="metrics-empty">Enable recording to start collecting local runtime metrics.</p>
     </template>
 
     <footer>

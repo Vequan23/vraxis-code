@@ -9,6 +9,8 @@ import {
   modeRuntimeSelection,
   runtimeAgentSkills,
   runtimeAgentSkillsFromMetadata,
+  providerRuntimeAgentSkills,
+  supplementalProviderRuntimeSkills,
   verificationRecipeSkill,
   vraxisCodeSkill,
 } from "../src/runtimes/mode-agent-runtime.js";
@@ -66,6 +68,25 @@ test("round-trips attached skill metadata for runtime reconstruction", () => {
   const restored = attachedSkillsFromMetadata(metadata);
   assert.deepEqual(restored, metadata);
   assert.equal(runtimeAgentSkillsFromMetadata("ask", restored).find((skill) => skill.id === "attached-abc")?.name, "UX fundamentals");
+});
+
+test("provider runtime skills grant Vraxis mode tools without duplicating recipe defaults", () => {
+  const skills = providerRuntimeAgentSkills("ask", []);
+  const ids = skills.map((skill) => skill.id);
+  assert.ok(ids.includes("general-utilities"));
+  assert.ok(ids.includes("web-research"));
+  assert.ok(ids.includes("repository-comprehension"));
+  assert.ok(ids.includes("vraxis-mode-ask"));
+  assert.ok(skills.find((skill) => skill.id === "vraxis-mode-ask")?.tools.includes("evidence-status"));
+});
+
+test("supplemental provider skills avoid duplicating recipe defaults", () => {
+  const skills = supplementalProviderRuntimeSkills("ask", []);
+  const ids = skills.map((skill) => skill.id);
+  assert.ok(!ids.includes("general-utilities"));
+  assert.ok(!ids.includes("web-research"));
+  assert.ok(ids.includes("repository-comprehension"));
+  assert.ok(ids.includes(vraxisCodeSkill.id));
 });
 
 test("builds attached skill artifacts for local runtime runs", () => {

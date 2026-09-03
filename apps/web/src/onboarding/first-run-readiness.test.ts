@@ -74,7 +74,18 @@ it("does not claim portable proof until retained verification passes", () => {
   expect(ready.action.id).toBe("export-proof");
 });
 
-it("treats a connected hosted provider as ready without a local CLI probe", () => {
-  const hosted = runtime({ kind: "hosted-provider", conformance: undefined });
+it("requires a hosted provider connection test before moving past runtime setup", () => {
+  const hosted = runtime({
+    kind: "hosted-provider",
+    conformance: { state: "unverified", detail: "Not checked", checks: [] },
+  });
+  expect(firstRunReadiness({ runtime: hosted, sessions: [], verificationRuns: [] }).action.id).toBe("verify-runtime");
+});
+
+it("accepts a verified hosted provider as runtime-ready", () => {
+  const hosted = runtime({
+    kind: "hosted-provider",
+    conformance: { state: "ready", detail: "Verified", checks: [] },
+  });
   expect(firstRunReadiness({ runtime: hosted, sessions: [], verificationRuns: [] }).action.id).toBe("choose-project");
 });

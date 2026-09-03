@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { CredentialStore } from "@vraxis/agent-v";
+import type { RuntimeReadiness } from "@vraxis/agent-v";
 import {
   ProviderRuntime,
   builtInModelProviders,
@@ -14,6 +15,7 @@ import type {
   RuntimeModelSummary,
   RuntimeSummary,
 } from "@vraxis/code-contracts";
+import { probeProviderConnection } from "./provider-probe.js";
 
 interface StoredProviderProfile {
   id: string;
@@ -147,6 +149,12 @@ export class ModelProviderRegistry {
   async profile(id: string): Promise<ReturnType<typeof defineProviderProfile> | undefined> {
     const stored = (await this.read()).find((item) => item.id === id);
     return stored ? defineProviderProfile(stored) : undefined;
+  }
+
+  async probe(id: string, runtimeModel?: string): Promise<{ readiness: RuntimeReadiness; catalogOk: boolean }> {
+    const stored = (await this.read()).find((item) => item.id === id);
+    if (!stored) throw new TypeError("Model provider connection was not found.");
+    return probeProviderConnection(stored, this.credentials, this.fetcher, runtimeModel);
   }
 
   private async read(): Promise<StoredProviderProfile[]> {

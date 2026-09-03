@@ -58,6 +58,15 @@ export function elapsedLabel(durationMs: number): string {
   return `${(durationMs / 1_000).toFixed(1)} seconds`;
 }
 
+function agentFailureMessage(error: unknown): string {
+  const failure = safeFailure(error);
+  const suffix = failure.retryable ? " Check the runtime, then resume this task." : "";
+  if (failure.code !== "invocation-failed") return `${failure.message}${suffix}`;
+  const cause = failure.cause instanceof Error ? failure.cause.message.trim() : "";
+  if (cause && cause !== failure.message) return `${cause}${suffix}`;
+  return `${failure.message}${suffix}`;
+}
+
 const askOutput = defineOutput<AskResult>({
   name: "repository-answer",
   jsonSchema: {
@@ -389,9 +398,8 @@ export class AgentExecutionCoordinator {
       completed = true;
     } catch (error) {
       if (controller.signal.aborted) return;
-      const failure = safeFailure(error);
       await this.recordRunMetrics(metricsCollector, "failed", metricsCollector.elapsedMs());
-      await this.sessions.fail(session.id, `${failure.message}${failure.retryable ? " Check the runtime, then resume this task." : ""}`);
+      await this.sessions.fail(session.id, agentFailureMessage(error));
     } finally {
       const redirected = this.redirects.delete(session.id);
       if (instructionEventId && redirected) {

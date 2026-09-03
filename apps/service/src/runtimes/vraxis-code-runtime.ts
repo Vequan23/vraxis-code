@@ -17,11 +17,12 @@ import { builtInRuntimes } from "@vraxis/agent-v/local-cli";
 import { createLocalCliRuntimeEngine } from "./local-cli-runtimes.js";
 import { type ModelProviderId } from "@vraxis/agent-v/providers";
 import { createAgentRuntime } from "@vraxis/agent-v/runtime";
+import { builtInAgentRecipes } from "@vraxis/agent-v/skills";
 import {
   attachedSkillsFromMetadata,
   attachedSkillArtifacts,
   modeRuntimeSelection,
-  runtimeAgentSkillsFromMetadata,
+  providerRuntimeAgentSkills,
 } from "./mode-agent-runtime.js";
 import { createBrowserTools, createPureTools, type BrowserController } from "@vraxis/agent-v/tools";
 import { createWorkspaceTools } from "@vraxis/agent-v/tools/node";
@@ -44,7 +45,8 @@ const developmentCommands = ["bun", "cargo", "git", "go", "node", "npm", "npx", 
 function withoutAttachedSkillArtifacts<T extends { artifacts?: readonly { id?: string }[] }>(input: T): T {
   const artifacts = input.artifacts?.filter((artifact) => !artifact.id?.startsWith("attached-skill:"));
   if (!artifacts?.length) {
-    const { artifacts: _removed, ...rest } = input;
+    const rest = { ...input };
+    delete rest.artifacts;
     return rest as T;
   }
   return { ...input, artifacts };
@@ -87,8 +89,8 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
   async probe(runtimeId: string, runtimeModel?: string): Promise<RuntimeReadiness> {
     const profile = await this.providers.profile(runtimeId);
     if (!profile) return this.local.probe(runtimeId, runtimeModel);
-    await this.providers.refresh(runtimeId);
-    return { runtimeId, availability: "installed", verification: "ready", detail: `${profile.name} credentials and model catalog are ready.` };
+    const { readiness } = await this.providers.probe(runtimeId, runtimeModel);
+    return readiness;
   }
 
   async run<T>(request: CodingRuntimeRequest<T>, events?: EventSink): Promise<CodingRuntimeResult<T>> {
@@ -162,11 +164,17 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
           blocking: true,
         }],
       });
-    const tools = uniqueTools(request.tools ?? [], this.modeWorkspaceTools(workspaceTools, mode), productTools);
+    const tools = uniqueTools(
+      request.tools ?? [],
+      this.modeWorkspaceTools(createPureTools(), mode),
+      this.modeWorkspaceTools(workspaceTools, mode),
+      productTools,
+    );
     const worktree = worktreeFromRuntimeMetadata(request.metadata?.worktree);
     const attachedSkills = attachedSkillsFromMetadata(request.metadata?.attachedSkills);
-    const runtimeSkills = runtimeAgentSkillsFromMetadata(mode, attachedSkills);
-    const { recipe, extraSkillIds } = modeRuntimeSelection(mode);
+    const runtimeSkills = providerRuntimeAgentSkills(mode, attachedSkills);
+    const { recipe } = modeRuntimeSelection(mode);
+    const recipeDefinition = builtInAgentRecipes[recipe];
     const runtime = createAgentRuntime({
       execution: {
         type: "provider",
@@ -184,13 +192,14 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
         id: request.workspaceAccess === "workspace-write" ? "vraxis-code-builder" : "vraxis-code-reader",
         name: "Vraxis Code",
         instructions: hostAgentInstructions(mode, worktree),
-        recipe,
-        skills: extraSkillIds,
+        skills: runtimeSkills.map((skill) => skill.id),
         tools: tools.map((tool) => tool.name),
-        requiredCapabilities: ["tools", "streaming"],
+        requiredCapabilities: [...recipeDefinition.requiredCapabilities],
+        maxSteps: recipeDefinition.maxSteps,
       },
       tools,
       skills: runtimeSkills,
+      includePureTools: false,
       ...(events ? { events } : {}),
     });
     const scope = {
