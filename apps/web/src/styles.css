@@ -2905,7 +2905,7 @@ osx-app-shell {
 }
 
 .change-workbench.preview-open {
-  grid-template-columns: minmax(240px, 300px) 1px minmax(0, 1fr);
+  grid-template-columns: minmax(200px, 240px) 1px minmax(0, 1fr);
 }
 
 .change-workbench-divider {
@@ -2927,6 +2927,18 @@ osx-app-shell {
   flex-direction: column;
   overflow: hidden;
   background: var(--osx-surface-sunken, #101416);
+}
+
+.diff-preview-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-height: 32px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--osx-border-soft, #2c3338);
+  background: var(--osx-surface, #15191b);
 }
 
 .diff-preview > header {
@@ -2975,11 +2987,12 @@ osx-app-shell {
   flex: 1;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
 }
 
 .diff-preview-body:has(.hunk-rail) {
-  grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
+  grid-template-rows: minmax(0, 1fr) auto;
 }
 
 .diff-viewer-pane {
@@ -2988,11 +3001,12 @@ osx-app-shell {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  padding: 8px;
 }
 
 .diff-viewer-pane > osx-alert {
   flex: 0 0 auto;
-  margin: 8px 8px 0;
+  margin: 0 0 8px;
 }
 
 .diff-viewer-pane > osx-diff-viewer {
@@ -3000,15 +3014,13 @@ osx-app-shell {
   min-height: 0;
   flex: 1;
   display: block;
-  overflow: auto;
 }
 
 .hunk-rail {
   min-width: 0;
-  min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  border-left: 1px solid var(--osx-border-soft, #2c3338);
+  grid-template-rows: auto auto auto;
+  border-top: 1px solid var(--osx-border-soft, #2c3338);
   background: var(--osx-surface, #15191b);
 }
 
@@ -3032,24 +3044,40 @@ osx-app-shell {
 .hunk-rail-list {
   min-height: 0;
   display: grid;
-  align-content: start;
-  gap: 2px;
-  padding: 6px;
-  overflow: auto;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(200px, 1fr);
+  gap: 6px;
+  padding: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
   overscroll-behavior: contain;
 }
 
 .hunk-rail-list label {
   min-width: 0;
+  min-height: 88px;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 8px;
-  padding: 7px 8px;
-  border: 1px solid transparent;
-  border-radius: 7px;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-content: start;
+  gap: 6px 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--osx-border-soft, #384148);
+  border-radius: 8px;
   cursor: pointer;
   font-size: 12px;
+  background: var(--osx-surface-sunken, #101416);
+}
+
+.hunk-rail-list label > input {
+  grid-row: 1 / span 2;
+  align-self: start;
+  margin-top: 2px;
+}
+
+.hunk-rail-list label > osx-badge {
+  grid-column: 2;
+  justify-self: start;
 }
 
 .hunk-rail-list label:hover {
@@ -3134,7 +3162,7 @@ osx-app-shell {
 @container (max-width: 760px) {
   .change-workbench.preview-open {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(140px, 0.35fr) 1px minmax(0, 1fr);
+    grid-template-rows: minmax(120px, 0.28fr) 1px minmax(0, 1fr);
   }
 
   .change-workbench.preview-open .change-workbench-divider {
@@ -3143,15 +3171,8 @@ osx-app-shell {
     box-shadow: 0 1px var(--osx-highlight, rgba(255, 255, 255, 0.1));
   }
 
-  .diff-preview-body:has(.hunk-rail) {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) auto;
-  }
-
-  .hunk-rail {
-    border-left: 0;
-    border-top: 1px solid var(--osx-border-soft, #2c3338);
-    max-height: 220px;
+  .hunk-rail-list {
+    grid-auto-columns: minmax(180px, 85%);
   }
 }
 

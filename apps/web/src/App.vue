@@ -4160,17 +4160,9 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                   class="diff-preview"
                   aria-label="Change diff"
                 >
-                  <header>
-                    <span class="diff-preview-title">
-                      <osx-icon name="file-text" :size="14" />
-                      <small v-if="selectedChangeDirectory">{{ selectedChangeDirectory }}/</small>
-                      <strong>{{ selectedChangeFileName }}</strong>
-                    </span>
-                    <span class="file-preview-actions">
-                      <osx-badge v-if="changeDiff" size="small" :label="`+${changeDiff.additions} −${changeDiff.deletions}`" />
-                      <osx-icon-button label="Close change diff" icon="close" size="small" @click="closeChangeDiff" />
-                    </span>
-                  </header>
+                  <div class="diff-preview-toolbar">
+                    <osx-icon-button label="Close change diff" icon="close" size="small" @click="closeChangeDiff" />
+                  </div>
                   <div v-if="changeLoading" class="file-preview-state"><osx-spinner size="small" label="Loading diff" show-label /></div>
                   <osx-alert v-else-if="changeError" tone="error" title="Diff not opened" :description="changeError" />
                   <template v-else-if="changeDiff">

@@ -1772,7 +1772,8 @@ test("starts Build in an isolated worktree and opens a closable exact diff", asy
   await changedFile.click();
   await expect(page.getByRole("region", { name: "Change diff" })).toBeVisible();
   await expect(page.getByLabel("Diff for src/index.ts")).toBeVisible();
-  await expect(page.locator(".diff-preview > header").getByText("+1 −0", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Diff for src/index.ts")).toContainText("+1");
+  await expect(page.getByLabel("Diff for src/index.ts")).toContainText("−0");
   await expect(page.getByRole("complementary", { name: "Hunks to apply" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Apply 1 hunk" })).toBeEnabled();
   await page.screenshot({ path: testInfo.outputPath("selective-hunk-review.png"), fullPage: true });
