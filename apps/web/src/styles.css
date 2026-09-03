@@ -113,6 +113,54 @@ osx-app-shell {
 
 .sidebar-section { display: grid; gap: 5px; }
 
+.project-source-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project-source-item {
+  width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--osx-text, #eef1f2);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-source-item > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-source-item osx-icon {
+  flex: 0 0 auto;
+  color: var(--osx-muted, #98a0a5);
+}
+
+.project-source-item:hover { background: color-mix(in srgb, var(--osx-text, #fff) 6%, transparent); }
+.project-source-item.selected {
+  background: color-mix(in srgb, var(--osx-accent, #4aa9dc) 18%, transparent);
+  font-weight: 600;
+}
+
+.project-source-item.selected osx-icon,
+.project-source-item.selected .project-activity-indicator {
+  color: var(--osx-text, #eef1f2);
+}
+
 .new-task-button,
 .session-link,
 .settings-link,
@@ -194,6 +242,40 @@ osx-app-shell {
   flex-direction: column;
   overflow: auto;
   background: var(--osx-surface, #15191b);
+}
+
+.workspace-stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.workspace-navigation-shade {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--osx-surface, #15191b) 78%, transparent);
+  backdrop-filter: blur(2px);
+  pointer-events: none;
+}
+
+.inspector.is-navigating {
+  position: relative;
+}
+
+.inspector.is-navigating::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  background: color-mix(in srgb, var(--osx-surface-sunken, #101416) 78%, transparent);
+  backdrop-filter: blur(2px);
+  pointer-events: none;
 }
 
 .settings-pane {
@@ -1158,12 +1240,27 @@ osx-app-shell {
 .evidence-view {
   min-width: 0;
   min-height: 0;
-  height: 100%;
 }
 
-.evidence-panel { overflow: hidden; }
-.evidence-panel.has-ledger { display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.evidence-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.evidence-chrome {
+  flex: 0 0 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--osx-border-soft, #2c3338);
+  background: color-mix(in srgb, var(--osx-surface-raised, #22282c) 55%, transparent);
+}
+
 .evidence-view {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
   animation: panel-reveal 160ms ease-out both;
 }
@@ -1194,16 +1291,31 @@ osx-app-shell {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
+  gap: 10px;
   padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--osx-accent, #4aa9dc) 28%, var(--osx-border-soft, #2c3338));
-  border-radius: 10px;
+  border-top: 1px solid var(--osx-border-soft, #2c3338);
   background: color-mix(in srgb, var(--osx-accent, #4aa9dc) 6%, var(--osx-surface-raised, #22282c));
 }
-.proof-export-title { display: inline-flex; align-items: center; gap: 7px; color: var(--osx-text, #eef1f2); font-size: 13px; font-weight: 620; }
-.proof-export-buttons { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
-.understand-loading { display: grid; place-items: center; min-height: 72px; margin-bottom: 10px; }
+.proof-export-title { min-width: 0; display: inline-flex; align-items: center; gap: 7px; color: var(--osx-text, #eef1f2); font-size: 13px; font-weight: 620; }
+.proof-export-buttons { display: flex; flex: 0 1 auto; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.understand-loading { display: grid; place-items: center; min-height: 72px; padding: 12px; border-top: 1px solid var(--osx-border-soft, #2c3338); }
+.evidence-chrome .understand-artifact {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  border-top: 1px solid var(--osx-border-soft, #2c3338);
+  max-height: min(420px, 45vh);
+  overflow: auto;
+}
+.evidence-chrome > .osx-alert { margin: 0; border-radius: 0; border-top: 1px solid var(--osx-border-soft, #2c3338); }
+
+@container (max-width: 420px) {
+  .proof-export-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .proof-export-buttons { justify-content: stretch; }
+}
 
 .understand-artifact {
   display: grid;

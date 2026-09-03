@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { contractVersion, type BootstrapState } from "@vraxis/code-contracts";
-import { captureWorkspaceState, resetWorkspaceState, restoreWorkspaceState, workspaceStateKey } from "./workspace-cache.js";
+import {
+  captureWorkspaceState,
+  resetWorkspaceState,
+  restoreWorkspaceState,
+  workspaceCollectionsEqual,
+  workspaceStateKey,
+} from "./workspace-cache.js";
 
 function state(): BootstrapState {
   return {
@@ -48,5 +54,12 @@ describe("workspace state cache", () => {
   it("uses separate cache identities for drafts and tasks", () => {
     expect(workspaceStateKey("alpha")).toBe("alpha:draft");
     expect(workspaceStateKey("alpha", "task-1")).toBe("alpha:task-1");
+  });
+
+  it("treats structurally equal workspace collections as unchanged", () => {
+    const left = [{ path: "src/index.ts" }];
+    const right = [{ path: "src/index.ts" }];
+    expect(workspaceCollectionsEqual(left, right)).toBe(true);
+    expect(workspaceCollectionsEqual(left, [{ path: "src/other.ts" }])).toBe(false);
   });
 });

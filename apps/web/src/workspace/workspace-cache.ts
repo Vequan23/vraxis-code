@@ -21,6 +21,10 @@ export function cloneWorkspaceValue<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+export function workspaceCollectionsEqual<T>(left: readonly T[], right: readonly T[]): boolean {
+  return left.length === right.length && JSON.stringify(left) === JSON.stringify(right);
+}
+
 export function workspaceStateKey(projectId: string, sessionId?: string): string {
   return `${projectId}:${sessionId ?? "draft"}`;
 }

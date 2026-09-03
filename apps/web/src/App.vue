@@ -21,6 +21,7 @@ import {
   type BrowserSessionSummary,
   type BrowserControlSummary,
   type BootstrapState,
+  type BootstrapScope,
   type InspectorView,
   type PromptAttachment,
   type ProjectSummary,
@@ -52,6 +53,7 @@ import {
 } from "@vraxis/code-contracts";
 import { demoState, emptyState } from "./workspace/demo-state.js";
 import { chooseProjectFolder } from "./projects/project-picker.js";
+import ProjectSourceList from "./projects/ProjectSourceList.vue";
 import ModelProviderSettings from "./settings/ModelProviderSettings.vue";
 import McpConnectionCenter from "./settings/McpConnectionCenter.vue";
 import AgentHarnessSettings from "./settings/AgentHarnessSettings.vue";
@@ -73,6 +75,7 @@ import {
   cloneWorkspaceValue,
   resetWorkspaceState,
   restoreWorkspaceState,
+  workspaceCollectionsEqual,
   workspaceStateKey,
   type WorkspaceStateSnapshot,
 } from "./workspace/workspace-cache.js";
@@ -86,6 +89,7 @@ const previewMode = Boolean(previewVariant);
 const state = reactive<BootstrapState>(structuredClone(previewVariant === "project" ? demoState : emptyState));
 const activeView = ref<"workspace" | "settings">("workspace");
 const inspector = ref<InspectorView>("files");
+const inspectorPanelWidth = ref(480);
 const mode = ref<SessionMode>(state.settings.defaultMode);
 const composer = ref("");
 const sessionPane = ref<HTMLElement>();
@@ -190,10 +194,12 @@ let protocolOpenQueue: Promise<void> = Promise.resolve();
 const terminalInputWrites = new Map<string, Promise<void>>();
 const desktopBrowserAvailable = Boolean(window.vraxisDesktop?.browserView);
 const workspaceRefreshing = ref(false);
+const workspaceNavigating = ref(false);
 const workspaceStateCache = new Map<string, WorkspaceStateSnapshot>();
 const latestWorkspaceKeyByProject = new Map<string, string>();
 interface WorkspaceViewSnapshot {
   inspector: InspectorView;
+  inspectorPanelWidth: number;
   selectedFile: string;
   filePreview?: WorkspaceFileContent;
   selectedChange: string;
@@ -571,15 +577,16 @@ const taskProofExportable = computed(() => Boolean(
     || displayedSessionEvents.value.some((event) => event.kind === "message" && event.actor === "agent")
   ),
 ));
+const evidenceChromeVisible = computed(() => evidenceLedger.value.hasEvidence
+  || taskProofExportable.value
+  || understandLoading.value
+  || understandOpen.value
+  || Boolean(understandError.value));
 const highlightedFile = computed(() => filePreview.value
   ? highlightCode(filePreview.value.content, filePreview.value.language)
   : undefined);
 const highlightedLines = computed(() => highlightedFile.value?.html.split("\n") ?? []);
-const inspectorWidth = computed(() =>
-  (inspector.value === "files" && selectedFile.value) || (inspector.value === "changes" && selectedChange.value)
-    ? "680px"
-    : inspector.value === "verify" ? "480px"
-    : inspector.value === "browser" ? "620px" : inspector.value === "terminal" ? "clamp(540px, 44vw, 920px)" : "360px");
+const inspectorWidth = computed(() => `${inspectorPanelWidth.value}px`);
 const workspaceBranch = computed(() => session.value?.worktree?.status === "active"
   ? session.value.worktree.branch
   : project.value?.branch ?? "");
@@ -591,8 +598,9 @@ const buildNeedsNewWorktree = computed(() => {
   if (worktree.status === "active") return false;
   return ["applied", "reverted", "archived", "cleaned"].includes(worktree.status);
 });
-const sourceItems = computed(() => state.projects.map((item) => item.name).join(","));
-const sourceIcons = computed(() => JSON.stringify(Object.fromEntries(state.projects.map((item) => [item.name, "folder"]))));
+const runningProjectIds = computed(() => new Set(
+  state.sessions.filter((item) => item.status === "running").map((item) => item.projectId),
+));
 const modeLabel = computed(() => mode.value.charAt(0).toUpperCase() + mode.value.slice(1));
 const sessionIsRunning = computed(() => session.value?.status === "running");
 const composerPending = computed(() => submitting.value || sessionIsRunning.value);
@@ -697,6 +705,7 @@ function cacheCurrentWorkspace(): string | undefined {
   latestWorkspaceKeyByProject.set(snapshot.projectId, key);
   workspaceViewCache.set(key, cloneWorkspaceValue({
     inspector: inspector.value,
+    inspectorPanelWidth: inspectorPanelWidth.value,
     selectedFile: selectedFile.value,
     ...(filePreview.value ? { filePreview: filePreview.value } : {}),
     selectedChange: selectedChange.value,
@@ -715,6 +724,7 @@ function restoreWorkspaceView(key: string): void {
   const view = workspaceViewCache.get(key);
   if (!view) {
     inspector.value = "files";
+    inspectorPanelWidth.value = 480;
     closeFilePreview();
     closeChangeDiff();
     composer.value = "";
@@ -725,6 +735,7 @@ function restoreWorkspaceView(key: string): void {
     return;
   }
   inspector.value = view.inspector;
+  inspectorPanelWidth.value = view.inspectorPanelWidth;
   selectedFile.value = view.selectedFile;
   filePreview.value = view.filePreview ? cloneWorkspaceValue(view.filePreview) : undefined;
   selectedChange.value = view.selectedChange;
@@ -747,14 +758,7 @@ function restoreCachedWorkspace(projectId: string, sessionId?: string): boolean 
     ? workspaceStateKey(projectId, sessionId)
     : latestWorkspaceKeyByProject.get(projectId);
   const snapshot = preferredKey ? workspaceStateCache.get(preferredKey) : undefined;
-  if (!snapshot) {
-    const fallbackSession = sessionId ?? state.sessions.find((item) => item.projectId === projectId)?.id;
-    resetWorkspaceState(state, projectId, fallbackSession);
-    restoreWorkspaceView(workspaceStateKey(projectId, fallbackSession));
-    mode.value = modeForSession(state.sessions.find((item) => item.id === fallbackSession), state.settings.defaultMode);
-    syncTaskSelection();
-    return false;
-  }
+  if (!snapshot) return false;
   restoreWorkspaceState(state, snapshot);
   restoreWorkspaceView(workspaceStateKey(snapshot.projectId, snapshot.sessionId));
   mode.value = modeForSession(state.sessions.find((item) => item.id === snapshot.sessionId), state.settings.defaultMode);
@@ -793,22 +797,53 @@ async function fetchBootstrap(scope: "shell" | "workspace" | "catalog" | "full",
   return await response.json() as Partial<BootstrapState>;
 }
 
-function applyBootstrapPatch(next: Partial<BootstrapState>): void {
-  const patch: Partial<BootstrapState> = {
-    ...next,
-    approvals: next.approvals ?? [],
-    approvalRules: next.approvalRules ?? [],
-    terminalRuns: next.terminalRuns ?? [],
-    verificationRuns: next.verificationRuns ?? [],
-  };
-  if ("selectedSessionId" in patch && !patch.selectedSessionId) delete state.selectedSessionId;
-  if ("browser" in patch) {
-    if (patch.browser) state.browser = patch.browser;
-    else delete state.browser;
-    delete patch.browser;
+function assignCollectionIfChanged<T>(current: T[], next: T[] | undefined): void {
+  if (next === undefined || workspaceCollectionsEqual(current, next)) return;
+  current.splice(0, current.length, ...next);
+}
+
+function applyBootstrapPatch(next: Partial<BootstrapState>, scope: BootstrapScope = "full"): void {
+  if (next.contractVersion !== undefined) state.contractVersion = next.contractVersion;
+  if (next.realtime !== undefined) state.realtime = next.realtime;
+  if (next.projects !== undefined) state.projects = next.projects;
+  if (next.sessions !== undefined) state.sessions = next.sessions;
+  if (next.selectedProjectId !== undefined) state.selectedProjectId = next.selectedProjectId;
+  if ("selectedSessionId" in next) {
+    if (next.selectedSessionId) state.selectedSessionId = next.selectedSessionId;
+    else delete state.selectedSessionId;
   }
-  if ("selectedSessionId" in patch && !patch.selectedSessionId) delete patch.selectedSessionId;
-  Object.assign(state, patch);
+  if (next.settings !== undefined) state.settings = next.settings;
+  if (next.startupRecovery !== undefined) state.startupRecovery = next.startupRecovery;
+  if (scope === "shell") return;
+
+  const includeWorkspace = scope === "workspace" || scope === "full";
+  const includeCatalog = scope === "catalog" || scope === "full";
+
+  if (includeWorkspace) {
+    assignCollectionIfChanged(state.files, next.files);
+    assignCollectionIfChanged(state.changes, next.changes);
+    assignCollectionIfChanged(state.events, next.events);
+    assignCollectionIfChanged(state.approvals, next.approvals);
+    assignCollectionIfChanged(state.approvalRules ??= [], next.approvalRules);
+    assignCollectionIfChanged(state.terminalRuns, next.terminalRuns);
+    assignCollectionIfChanged(state.verificationRuns ??= [], next.verificationRuns);
+    assignCollectionIfChanged(state.verificationHandoffs ??= [], next.verificationHandoffs);
+    if ("browser" in next) {
+      if (next.browser) state.browser = next.browser;
+      else delete state.browser;
+    }
+  }
+
+  if (includeCatalog) {
+    assignCollectionIfChanged(state.skills, next.skills);
+    assignCollectionIfChanged(state.runtimes, next.runtimes);
+    assignCollectionIfChanged(state.modelProviders, next.modelProviders);
+    assignCollectionIfChanged(state.mcpServers, next.mcpServers);
+    if ("projectDoctor" in next) {
+      if (next.projectDoctor) state.projectDoctor = next.projectDoctor;
+      else delete state.projectDoctor;
+    }
+  }
 }
 
 function syncBootstrapSelection(projectChanged: boolean): void {
@@ -837,22 +872,20 @@ async function loadState(options: { blocking?: boolean } = {}): Promise<void> {
     const shell = await fetchBootstrap(staged ? "shell" : "full", controller.signal);
     if (requestVersion !== bootstrapRequestVersion) return;
     const projectChanged = state.selectedProjectId !== shell.selectedProjectId;
-    applyBootstrapPatch(shell);
+    applyBootstrapPatch(shell, staged ? "shell" : "full");
     serviceOnline.value = true;
     syncBootstrapSelection(projectChanged);
     if (staged) {
-      hydrated = true;
-      loading.value = false;
-      cacheCurrentWorkspace();
-      scheduleRunPoll();
       const [workspace, catalog] = await Promise.all([
         fetchBootstrap("workspace", controller.signal),
         fetchBootstrap("catalog", controller.signal),
       ]);
       if (requestVersion !== bootstrapRequestVersion) return;
-      applyBootstrapPatch(workspace);
-      applyBootstrapPatch(catalog);
+      applyBootstrapPatch(workspace, "workspace");
+      applyBootstrapPatch(catalog, "catalog");
       syncBootstrapSelection(false);
+      hydrated = true;
+      loading.value = false;
       cacheCurrentWorkspace();
       scheduleRunPoll();
       return;
@@ -884,6 +917,10 @@ function attachmentSizeLabel(size = 0): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function onShellPanelResize(panel: "sidebar" | "inspector", width: number): void {
+  if (panel === "inspector") inspectorPanelWidth.value = width;
 }
 
 function chooseInspectorView(view: InspectorView): void {
@@ -1060,19 +1097,17 @@ function taskPaneIsNearBottom(): boolean {
 watch([sessionPane, taskEnd], ([pane, end], _previous, onCleanup) => {
   latestMessagesHidden.value = false;
   if (!pane || !end) return;
+  const root = pane.scrollHeight > pane.clientHeight ? pane : null;
   const observer = new IntersectionObserver(([entry]) => {
     latestMessagesHidden.value = Boolean(entry && !entry.isIntersecting);
-  }, { rootMargin: "0px 0px 8px 0px" });
+  }, { root, rootMargin: "0px 0px 8px 0px" });
   observer.observe(end);
   onCleanup(() => observer.disconnect());
 }, { flush: "post" });
 
 async function jumpToLatest(): Promise<void> {
   const pane = sessionPane.value;
-  const end = taskEnd.value;
-  if (!pane || !end) return;
-  // Keep keyboard focus in the conversation when the jump button disappears.
-  pane.focus({ preventScroll: true });
+  if (!pane) return;
   let cancelled = false;
   const cancel = () => { cancelled = true; };
   for (const event of ["wheel", "touchstart", "keydown"] as const) {
@@ -1082,20 +1117,28 @@ async function jumpToLatest(): Promise<void> {
     let stableFrames = 0;
     let previousHeight = -1;
     // content-visibility replaces estimated message heights during a jump.
-    // Follow the end through that layout work, but never fight user scrolling.
+    // Drive the pane directly instead of scrollIntoView, which can scroll
+    // ancestor containers and land at the top of the transcript.
     for (let frame = 0; frame < 24 && stableFrames < 4; frame += 1) {
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
-      if (cancelled || sessionPane.value !== pane || taskEnd.value !== end) return;
+      if (cancelled || sessionPane.value !== pane) return;
+      pane.scrollTop = pane.scrollHeight;
+      const end = taskEnd.value;
+      if (end) {
+        const endRect = end.getBoundingClientRect();
+        if (endRect.bottom > window.innerHeight || endRect.top < pane.getBoundingClientRect().top) {
+          window.scrollTo({
+            top: window.scrollY + endRect.bottom - window.innerHeight + 1,
+            behavior: "auto",
+          });
+        }
+      }
       const height = pane.scrollHeight;
-      const bounds = end.getBoundingClientRect();
-      const paneBounds = pane.getBoundingClientRect();
-      const bottom = Math.min(window.innerHeight, paneBounds.bottom);
-      const atEnd = bounds.bottom <= bottom + 2 && bounds.top >= Math.max(0, paneBounds.top);
-      stableFrames = atEnd && height === previousHeight ? stableFrames + 1 : 0;
+      const atBottom = height - pane.scrollTop - pane.clientHeight <= 2;
+      stableFrames = atBottom && height === previousHeight ? stableFrames + 1 : 0;
       previousHeight = height;
-      // Also handles the narrow layout, where the document itself scrolls.
-      if (!atEnd) end.scrollIntoView({ block: "end", behavior: "instant" });
     }
+    pane.focus({ preventScroll: true });
   } finally {
     for (const event of ["wheel", "touchstart", "keydown"] as const) {
       window.removeEventListener(event, cancel, true);
@@ -1241,15 +1284,21 @@ function submissionSkillIds(submission?: OsxAgentComposerSubmission): string[] {
   return [...new Set(selected)].slice(0, promptSkillLimits.maximumCount);
 }
 
-async function chooseProject(event: Event): Promise<void> {
-  const name = String(eventValue(event));
-  const next = state.projects.find((item) => item.name === name);
+async function chooseProject(next: ProjectSummary): Promise<void> {
   activeView.value = "workspace";
-  if (!next || next.id === state.selectedProjectId) return;
+  if (next.id === state.selectedProjectId) return;
   const previousKey = cacheCurrentWorkspace();
   const requestVersion = ++selectionVersion;
   focusedEvidence.value = undefined;
-  restoreCachedWorkspace(next.id);
+  const cached = restoreCachedWorkspace(next.id);
+  if (!cached) {
+    workspaceNavigating.value = true;
+    const fallbackSession = state.sessions.find((item) => item.projectId === next.id)?.id;
+    resetWorkspaceState(state, next.id, fallbackSession);
+    restoreWorkspaceView(workspaceStateKey(next.id, fallbackSession));
+    mode.value = modeForSession(state.sessions.find((item) => item.id === fallbackSession), state.settings.defaultMode);
+    syncTaskSelection();
+  }
   loadError.value = "";
   try {
     await queueSelection(`/api/projects/${next.id}/select`);
@@ -1265,6 +1314,8 @@ async function chooseProject(event: Event): Promise<void> {
       syncTaskSelection();
     }
     taskError.value = error instanceof Error ? error.message : "The project could not be opened.";
+  } finally {
+    if (requestVersion === selectionVersion) workspaceNavigating.value = false;
   }
 }
 
@@ -1277,8 +1328,16 @@ async function chooseSession(item: SessionSummary): Promise<void> {
   const previousKey = cacheCurrentWorkspace();
   const requestVersion = ++selectionVersion;
   focusedEvidence.value = undefined;
-  restoreCachedWorkspace(item.projectId, item.id);
-  mode.value = item.mode;
+  const cached = restoreCachedWorkspace(item.projectId, item.id);
+  if (!cached) {
+    workspaceNavigating.value = true;
+    resetWorkspaceState(state, item.projectId, item.id);
+    restoreWorkspaceView(workspaceStateKey(item.projectId, item.id));
+    mode.value = item.mode;
+    syncTaskSelection();
+  } else {
+    mode.value = item.mode;
+  }
   try {
     await queueSelection(`/api/sessions/${item.id}/select`);
     if (requestVersion !== selectionVersion) return;
@@ -1294,6 +1353,8 @@ async function chooseSession(item: SessionSummary): Promise<void> {
       syncTaskSelection();
     }
     taskError.value = error instanceof Error ? error.message : "The task could not be opened.";
+  } finally {
+    if (requestVersion === selectionVersion) workspaceNavigating.value = false;
   }
 }
 
@@ -1638,10 +1699,11 @@ async function ensureUserTerminal(force = false): Promise<void> {
   terminalStarting.value = true;
   terminalError.value = "";
   try {
-    const result = await post(`/api/sessions/${session.value.id}/terminal-shell`, {}) as { run: TerminalRunSummary };
+    const result = await post(`/api/sessions/${session.value.id}/terminal-shell`, force ? { force: true } : {}) as { run: TerminalRunSummary };
     const existingRun = state.terminalRuns.findIndex((run) => run.id === result.run.id);
     if (existingRun >= 0) state.terminalRuns[existingRun] = result.run;
     else state.terminalRuns.unshift(result.run);
+    selectedTerminalRunId.value = result.run.id;
     scheduleRunPoll(true);
   } catch (error) {
     terminalError.value = error instanceof Error ? error.message : "The terminal could not be opened.";
@@ -2837,7 +2899,8 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
       :sidebar-min-width="220"
       :sidebar-max-width="340"
       :inspector-min-width="320"
-      :inspector-max-width="inspector === 'terminal' || inspector === 'browser' ? 1200 : 760"
+      :inspector-max-width="1200"
+      @panel-resize="onShellPanelResize"
     >
       <div v-if="activeView === 'workspace' && project" slot="toolbar" class="workspace-identity" aria-label="Current project">
         <osx-icon name="folder" :size="15" />
@@ -2868,15 +2931,12 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
           <osx-icon-button v-if="state.projects.length" label="Choose another project" icon="plus" size="small" :disabled="registering" @click="openProjectPicker" />
         </div>
 
-        <osx-source-list
+        <ProjectSourceList
           v-if="state.projects.length"
-          label="Projects"
-          heading=""
-          :items="sourceItems"
-          :icons="sourceIcons"
-          :value="project?.name"
-          compact
-          @change="chooseProject"
+          :projects="state.projects"
+          :selected-project-id="state.selectedProjectId"
+          :running-project-ids="runningProjectIds"
+          @select="chooseProject"
         />
         <p v-else class="sidebar-empty-copy">No projects yet.</p>
 
@@ -3063,6 +3123,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
         </div>
 
         <template v-else>
+          <div class="workspace-stage" :class="{ 'is-navigating': workspaceNavigating }">
           <header class="task-header">
             <div class="task-title">
               <h1>{{ session?.title ?? "New task" }}</h1>
@@ -3247,6 +3308,10 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
               </div>
             </div>
           </section>
+          <div v-if="workspaceNavigating" class="workspace-navigation-shade" aria-hidden="true">
+            <osx-spinner size="small" label="Opening workspace" />
+          </div>
+          </div>
         </template>
         <div v-if="activeView === 'workspace'" ref="taskEnd" class="task-end" aria-hidden="true" />
       </section>
@@ -3335,7 +3400,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
         </div>
       </div>
 
-      <aside v-if="activeView === 'workspace' && project" slot="inspector" class="inspector" aria-label="Project evidence">
+      <aside v-if="activeView === 'workspace' && project" slot="inspector" class="inspector" :class="{ 'is-navigating': workspaceNavigating }" aria-label="Project evidence">
         <div class="evidence-tabs" role="tablist" aria-label="Project evidence">
           <button
             v-for="(item, index) in inspectorOptions"
@@ -3358,37 +3423,39 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
 
         <section
           id="evidence-panel"
-          :class="['evidence-panel', { 'has-ledger': evidenceLedger.hasEvidence }]"
+          class="evidence-panel"
           :role="inspectorUsesTab ? 'tabpanel' : 'region'"
           :aria-labelledby="inspectorUsesTab ? `evidence-tab-${inspector}` : undefined"
           :aria-label="inspectorUsesTab ? undefined : 'Project verification'"
         >
-          <section v-if="evidenceLedger.hasEvidence" class="evidence-ledger" aria-label="Task evidence ledger">
-            <span class="evidence-ledger-title"><osx-icon name="list-checks" :size="14" /><strong>Evidence</strong></span>
-            <span v-if="evidenceLedger.activeCommands"><osx-icon name="loader" :size="13" />{{ evidenceLedger.activeCommands }} running</span>
-            <span v-if="evidenceLedger.passedCommands"><osx-icon name="check" :size="13" />{{ evidenceLedger.passedCommands }} passed</span>
-            <span v-if="evidenceLedger.verificationPassed"><osx-icon name="shield-check" :size="13" />{{ evidenceLedger.verificationPassed }} verified</span>
-            <span v-if="evidenceLedger.verificationActive" class="warning"><osx-icon name="list-checks" :size="13" />{{ evidenceLedger.verificationActive }} verifying</span>
-            <span v-if="evidenceLedger.browserActions"><osx-icon name="eye" :size="13" />{{ evidenceLedger.browserActions }} browser {{ evidenceLedger.browserActions === 1 ? 'action' : 'actions' }}</span>
-            <span v-if="evidenceLedger.pendingApprovals" class="warning"><osx-icon name="lock" :size="13" />{{ evidenceLedger.pendingApprovals }} waiting</span>
-          </section>
-          <section v-if="taskProofExportable" class="proof-export-actions" aria-label="Portable task proof">
-            <span class="proof-export-title"><osx-icon name="shield-check" :size="14" /><strong>Portable proof</strong></span>
-            <span class="proof-export-buttons">
-              <osx-button size="small" variant="secondary" icon="sparkle" :loading="understandLoading" @click="openUnderstandArtifact">Understand</osx-button>
-              <osx-button size="small" variant="secondary" icon="download" :loading="receiptExporting === 'html'" @click="exportTaskReceipt('html')">Download proof</osx-button>
-              <osx-button size="small" variant="secondary" icon="file-code" :loading="receiptExporting === 'json'" @click="exportTaskReceipt('json')">Signed JSON</osx-button>
-            </span>
-          </section>
-          <div v-if="understandLoading" class="understand-loading"><osx-spinner size="small" label="Generating understanding" show-label /></div>
-          <UnderstandArtifactPanel
-            v-if="understandOpen && understandArtifact"
-            :artifact="understandArtifact"
-            @close="resetUnderstandArtifact"
-            @download="exportUnderstandArtifact"
-            @explore="exploreUnderstandEvidence"
-          />
-          <osx-alert v-else-if="understandError" tone="error" title="Understanding unavailable" :description="understandError" />
+          <div v-if="evidenceChromeVisible" class="evidence-chrome">
+            <section v-if="evidenceLedger.hasEvidence" class="evidence-ledger" aria-label="Task evidence ledger">
+              <span class="evidence-ledger-title"><osx-icon name="list-checks" :size="14" /><strong>Evidence</strong></span>
+              <span v-if="evidenceLedger.activeCommands"><osx-icon name="loader" :size="13" />{{ evidenceLedger.activeCommands }} running</span>
+              <span v-if="evidenceLedger.passedCommands"><osx-icon name="check" :size="13" />{{ evidenceLedger.passedCommands }} passed</span>
+              <span v-if="evidenceLedger.verificationPassed"><osx-icon name="shield-check" :size="13" />{{ evidenceLedger.verificationPassed }} verified</span>
+              <span v-if="evidenceLedger.verificationActive" class="warning"><osx-icon name="list-checks" :size="13" />{{ evidenceLedger.verificationActive }} verifying</span>
+              <span v-if="evidenceLedger.browserActions"><osx-icon name="eye" :size="13" />{{ evidenceLedger.browserActions }} browser {{ evidenceLedger.browserActions === 1 ? 'action' : 'actions' }}</span>
+              <span v-if="evidenceLedger.pendingApprovals" class="warning"><osx-icon name="lock" :size="13" />{{ evidenceLedger.pendingApprovals }} waiting</span>
+            </section>
+            <section v-if="taskProofExportable" class="proof-export-actions" aria-label="Portable task proof">
+              <span class="proof-export-title"><osx-icon name="shield-check" :size="14" /><strong>Portable proof</strong></span>
+              <span class="proof-export-buttons">
+                <osx-button size="small" variant="secondary" icon="sparkle" :loading="understandLoading" @click="openUnderstandArtifact">Understand</osx-button>
+                <osx-button size="small" variant="secondary" icon="download" :loading="receiptExporting === 'html'" @click="exportTaskReceipt('html')">Download proof</osx-button>
+                <osx-button size="small" variant="secondary" icon="file-code" :loading="receiptExporting === 'json'" @click="exportTaskReceipt('json')">Signed JSON</osx-button>
+              </span>
+            </section>
+            <div v-if="understandLoading" class="understand-loading"><osx-spinner size="small" label="Generating understanding" show-label /></div>
+            <UnderstandArtifactPanel
+              v-if="understandOpen && understandArtifact"
+              :artifact="understandArtifact"
+              @close="resetUnderstandArtifact"
+              @download="exportUnderstandArtifact"
+              @explore="exploreUnderstandEvidence"
+            />
+            <osx-alert v-else-if="understandError" tone="error" title="Understanding unavailable" :description="understandError" />
+          </div>
           <div v-if="inspector === 'files'" class="evidence-view file-inspector">
             <div
               v-if="state.files.length"

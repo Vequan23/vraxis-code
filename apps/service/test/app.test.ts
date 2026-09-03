@@ -1049,6 +1049,16 @@ test("opens an interactive user shell in the selected task workspace", async (co
   const reused = await reopened.json() as { run: { id: string } };
   assert.equal(reused.run.id, prepared.run.id);
 
+  const forced = await fetch(`${app.baseUrl}/api/sessions/${session.id}/terminal-shell`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ force: true }),
+  });
+  assert.equal(forced.status, 201);
+  const second = await forced.json() as { run: { id: string; label?: string } };
+  assert.notEqual(second.run.id, prepared.run.id);
+  assert.match(second.run.label ?? "", / 2$/);
+
   const streamAbort = new AbortController();
   context.after(() => streamAbort.abort());
   const streamed = await fetch(`${app.baseUrl}/api/terminal/${prepared.run.id}/stream`, { signal: streamAbort.signal });

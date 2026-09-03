@@ -213,35 +213,47 @@ export function createApp(options: AppOptions) {
     await Promise.all([approvals.reconcile(), terminal.reconcile(), verifications.reconcile()]);
     await reconcileWorktreeApplications();
   })();
-  async function ensureUserTerminalRun(sessionId: string, absoluteCwd: string): Promise<{ run: TerminalRunSummary; created: boolean }> {
-    const active = (await terminal.list(sessionId)).find((run) => run.purpose === "user-shell"
-      && (run.status === "pending" || run.status === "running"));
-    if (active) return { run: active, created: false };
-    const pending = userTerminalStarts.get(sessionId);
-    if (pending) return pending;
-    const start = (async () => {
-      const existing = (await terminal.list(sessionId)).find((run) => run.purpose === "user-shell"
+  async function ensureUserTerminalRun(
+    sessionId: string,
+    absoluteCwd: string,
+    options: { force?: boolean } = {},
+  ): Promise<{ run: TerminalRunSummary; created: boolean }> {
+    if (!options.force) {
+      const active = (await terminal.list(sessionId)).find((run) => run.purpose === "user-shell"
         && (run.status === "pending" || run.status === "running"));
-      if (existing) return { run: existing, created: false };
+      if (active) return { run: active, created: false };
+      const pending = userTerminalStarts.get(sessionId);
+      if (pending) return pending;
+    }
+    const start = (async () => {
+      if (!options.force) {
+        const existing = (await terminal.list(sessionId)).find((run) => run.purpose === "user-shell"
+          && (run.status === "pending" || run.status === "running"));
+        if (existing) return { run: existing, created: false };
+      }
       const shell = process.platform === "win32"
         ? process.env.COMSPEC ?? process.env.ComSpec ?? "cmd.exe"
         : process.env.SHELL ?? "/bin/sh";
       const shellArguments = process.platform === "win32" ? [] : ["-l"];
+      const baseLabel = basename(shell).replace(/\.exe$/i, "");
+      const activeShellCount = (await terminal.list(sessionId)).filter((run) => run.purpose === "user-shell"
+        && (run.status === "pending" || run.status === "running")).length;
+      const label = activeShellCount === 0 ? baseLabel : `${baseLabel} ${activeShellCount + 1}`;
       const run = await terminal.prepare(
         sessionId,
         `user-terminal:${randomUUID()}`,
         commandText(shell, shellArguments),
         ".",
-        { purpose: "user-shell", label: basename(shell).replace(/\.exe$/i, "") },
+        { purpose: "user-shell", label },
       );
       void terminal.execute(run.id, absoluteCwd).catch(() => undefined);
       return { run, created: true };
     })();
-    userTerminalStarts.set(sessionId, start);
+    if (!options.force) userTerminalStarts.set(sessionId, start);
     try {
       return await start;
     } finally {
-      if (userTerminalStarts.get(sessionId) === start) userTerminalStarts.delete(sessionId);
+      if (!options.force && userTerminalStarts.get(sessionId) === start) userTerminalStarts.delete(sessionId);
     }
   }
   interface ManualAction {
@@ -1752,7 +1764,12 @@ export function createApp(options: AppOptions) {
       if (request.method === "POST" && userTerminalMatch?.[1]) {
         const session = await sessions.get(userTerminalMatch[1]);
         const absoluteCwd = await sessionWorkspace(session);
-        const result = await ensureUserTerminalRun(session.id, absoluteCwd);
+        const contentType = request.headers["content-type"] ?? "";
+        const input = contentType.includes("json")
+          ? await body(request).catch(() => ({}))
+          : {};
+        const force = Boolean((input as { force?: boolean }).force);
+        const result = await ensureUserTerminalRun(session.id, absoluteCwd, { force });
         json(response, result.created ? 201 : 200, { run: result.run });
         return;
       }

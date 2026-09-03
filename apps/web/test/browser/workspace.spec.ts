@@ -401,9 +401,7 @@ test("switches projects immediately from cache while workspace data revalidates"
   });
 
   const selectProject = async (name: string) => {
-    await page.locator("osx-source-list").evaluate((element, value) => {
-      element.dispatchEvent(new CustomEvent("change", { detail: [value], bubbles: true, composed: true }));
-    }, name);
+    await page.getByRole("option", { name }).click();
     await expect.poll(() => pendingSelections.length).toBeGreaterThan(0);
   };
 
