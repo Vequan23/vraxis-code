@@ -76,6 +76,7 @@ import { TeamPolicyRegistry } from "../team-policy/team-policy-registry.js";
 import { createSupportBundle } from "../diagnostics/support-bundle.js";
 import { HarnessRunMetricsRegistry } from "../metrics/harness-run-metrics-registry.js";
 import { exportHarnessMetrics } from "../metrics/harness-run-metrics-aggregation.js";
+import { autoApplyHarnessRecommendation } from "../metrics/harness-metrics-recommendations.js";
 import { redactTaskReceipt } from "../receipts/portable-redaction.js";
 import { DesktopSession } from "./desktop-session.js";
 import { buildBootstrapState, parseBootstrapScope, resolveBootstrapContext } from "./bootstrap-state.js";
@@ -283,6 +284,9 @@ export function createApp(options: AppOptions) {
       },
     };
   }
+  const runMetricsHooks = {
+    afterRecorded: async (): Promise<void> => undefined,
+  };
   const execution = new AgentExecutionCoordinator(
     sessions,
     options.runtimeEngine ?? new VraxisCodeRuntimeEngine(modelProviders, credentials, approvals, browser, terminal, verifications, mcpServers),
@@ -292,6 +296,7 @@ export function createApp(options: AppOptions) {
       registry: harnessRunMetrics,
       enabled: async () => (await settings.read()).harnessMetricsEnabled === true,
       verificationRuns: (sessionId) => verifications.list(sessionId),
+      afterRecorded: async () => runMetricsHooks.afterRecorded(),
     },
   );
   const recovery = storageRecovery.then(() => execution.reconcile());
@@ -303,6 +308,30 @@ export function createApp(options: AppOptions) {
     options.runtimeProbeEngine ?? new LocalCliRuntimeEngine(),
   );
   const discoverLocalRuntimes = async () => runtimeConformance.decorate(await runtimeDiscoveryCache.get());
+  async function installedRuntimeIds(): Promise<string[]> {
+    return [...await discoverLocalRuntimes(), ...await modelProviders.runtimes()]
+      .filter((item) => item.availability === "installed")
+      .map((item) => item.id);
+  }
+  async function harnessRecommendationContext(currentSettings: Awaited<ReturnType<typeof settings.read>>) {
+    return {
+      defaultRuntimeId: currentSettings.defaultRuntimeId,
+      defaultMode: currentSettings.defaultMode,
+      disabledRuntimeIds: currentSettings.disabledRuntimeIds,
+      installedRuntimeIds: await installedRuntimeIds(),
+    };
+  }
+  runMetricsHooks.afterRecorded = async () => {
+    const currentSettings = await settings.read();
+    if (!currentSettings.harnessMetricsEnabled || !currentSettings.harnessMetricsAutoApply) return;
+    const summary = await harnessRunMetrics.summary(
+      true,
+      undefined,
+      await harnessRecommendationContext(currentSettings),
+    );
+    const patch = autoApplyHarnessRecommendation(summary, currentSettings, await installedRuntimeIds());
+    if (patch) await settings.update(patch);
+  };
   const folderPicker = options.folderPicker ?? pickProjectFolderWithSystemDialog;
 
   async function validateAttachmentFiles(
@@ -744,7 +773,7 @@ export function createApp(options: AppOptions) {
           verificationRuns: await verifications.list(),
           ...(options.startupRecovery ? { startupRecovery: options.startupRecovery } : {}),
           ...(currentSettings.harnessMetricsEnabled && currentSettings.harnessMetricsExportEnabled
-            ? { harnessMetrics: await harnessRunMetrics.summary(true) }
+            ? { harnessMetrics: await harnessRunMetrics.summary(true, undefined, await harnessRecommendationContext(currentSettings)) }
             : {}),
         });
         response.writeHead(200, {
@@ -803,6 +832,7 @@ export function createApp(options: AppOptions) {
         json(response, 200, await harnessRunMetrics.summary(
           currentSettings.harnessMetricsEnabled === true,
           Number.isFinite(windowDays) && windowDays > 0 ? windowDays : 30,
+          await harnessRecommendationContext(currentSettings),
         ));
         return;
       }
@@ -810,7 +840,7 @@ export function createApp(options: AppOptions) {
       if (request.method === "GET" && url.pathname === "/api/harness-metrics/export") {
         const currentSettings = await settings.read();
         if (!currentSettings.harnessMetricsEnabled) throw new TypeError("Enable harness metrics before exporting.");
-        const summary = await harnessRunMetrics.summary(true);
+        const summary = await harnessRunMetrics.summary(true, undefined, await harnessRecommendationContext(currentSettings));
         const exportBundle = exportHarnessMetrics(summary);
         response.writeHead(200, {
           "content-type": "application/vnd.vraxis.harness-metrics+json; charset=utf-8",

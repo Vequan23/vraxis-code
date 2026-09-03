@@ -44,7 +44,7 @@ function ruleLabel(rule: ApprovalRuleSummary): string {
         <p>Review the exact authority Vraxis Code can reuse without asking again.</p>
       </div>
       <span class="permission-header-actions">
-        <osx-icon-button label="Refresh remembered access" icon="refresh" size="small" :disabled="loading" @click="$emit('refresh')" />
+        <osx-button size="small" icon="refresh" :disabled="loading" @click="$emit('refresh')">Refresh</osx-button>
         <osx-button size="small" icon="download" :loading="exporting" :disabled="loading" @click="$emit('export')">Download audit</osx-button>
       </span>
     </header>

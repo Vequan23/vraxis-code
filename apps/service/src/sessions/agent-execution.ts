@@ -84,6 +84,7 @@ interface RunMetricsContext {
   registry: HarnessRunMetricsRegistry;
   enabled: () => Promise<boolean>;
   verificationRuns: (sessionId: string) => Promise<VerificationRunSummary[]>;
+  afterRecorded?: () => Promise<void>;
 }
 
 export class AgentExecutionCoordinator {
@@ -414,6 +415,7 @@ export class AgentExecutionCoordinator {
     const telemetry = runMetricsTelemetry(snapshot);
     await this.sessions.telemetry(collector.session.id, telemetry.title, telemetry.detail, snapshot);
     await this.runMetrics.registry.record(collector.buildRecord(outcome, durationMs, result, verificationRuns));
+    await this.runMetrics.afterRecorded?.().catch(() => undefined);
   }
 
   private async drainQueue(sessionId: string): Promise<void> {

@@ -9,7 +9,6 @@ import type {
   OsxPlanStep,
 } from "@vraxis/osx-components";
 import {
-  appThemes,
   promptAttachmentLimits,
   promptSkillLimits,
   type AppTheme,
@@ -54,16 +53,8 @@ import {
 import { demoState, emptyState } from "./workspace/demo-state.js";
 import { chooseProjectFolder } from "./projects/project-picker.js";
 import ProjectSourceList from "./projects/ProjectSourceList.vue";
-import ModelProviderSettings from "./settings/ModelProviderSettings.vue";
-import McpConnectionCenter from "./settings/McpConnectionCenter.vue";
-import AgentHarnessSettings from "./settings/AgentHarnessSettings.vue";
-import HarnessMetricsSettings from "./settings/HarnessMetricsSettings.vue";
-import AgentDefaults from "./settings/AgentDefaults.vue";
-import AuthorityModeSettings from "./settings/AuthorityModeSettings.vue";
-import PermissionCenter from "./settings/PermissionCenter.vue";
-import ProofTrustSettings from "./settings/ProofTrustSettings.vue";
-import TeamPolicySettings from "./settings/TeamPolicySettings.vue";
-import SupportDiagnostics from "./settings/SupportDiagnostics.vue";
+import SettingsShell from "./settings/SettingsShell.vue";
+import { type SettingsSectionId } from "./settings/settings-navigation.js";
 import FirstRunJourney from "./onboarding/FirstRunJourney.vue";
 import TaskRuntimePicker from "./composer/TaskRuntimePicker.vue";
 import ComposerMenuPicker from "./composer/ComposerMenuPicker.vue";
@@ -96,6 +87,7 @@ const previewVariant = new URLSearchParams(window.location.search).get("preview"
 const previewMode = Boolean(previewVariant);
 const state = reactive<BootstrapState>(structuredClone(previewVariant === "project" ? demoState : emptyState));
 const activeView = ref<"workspace" | "settings">("workspace");
+const settingsSection = ref<SettingsSectionId>("general");
 const inspector = ref<InspectorView>("files");
 const inspectorPanelWidth = ref(480);
 const mode = ref<SessionMode>(state.settings.defaultMode);
@@ -704,7 +696,7 @@ const pendingHandoffDestination = computed(() => {
   const runtimeName = state.runtimes.find((item) => item.id === pending.runtimeId)?.name ?? pending.runtimeId;
   return pending.modelId ? `${runtimeName} · ${pending.modelId}` : runtimeName;
 });
-const themeOptions = [
+const themeOptions: Array<{ value: AppTheme; label: string; description: string }> = [
   { value: "graphite-dark", label: "Graphite Dark", description: "Near-black surfaces with restrained neutral controls." },
   { value: "panther", label: "Panther", description: "Dark surfaces for focused work." },
   { value: "aqua", label: "Aqua", description: "Bright surfaces with blue accents." },
@@ -2582,18 +2574,17 @@ async function openProjectPicker(): Promise<void> {
   }
 }
 
-function openSettings(): void {
+function openSettings(section: SettingsSectionId = "general"): void {
   settingsError.value = "";
   setHarnessNotice(null);
+  settingsSection.value = section;
   activeView.value = "settings";
   void refreshPermissionRules();
   void refreshTeamPolicy();
 }
 
 async function openHarnessSetup(): Promise<void> {
-  openSettings();
-  await nextTick();
-  document.getElementById("harness-settings-heading")?.scrollIntoView({ block: "start" });
+  openSettings("harnesses");
 }
 
 async function handleFirstRunAction(action: FirstRunActionId): Promise<void> {
@@ -2671,10 +2662,6 @@ async function updateSettings(patch: UpdateSettingsRequest): Promise<void> {
   }
 }
 
-function chooseTheme(event: Event): void {
-  const theme = String(eventValue(event));
-  if (appThemes.includes(theme as AppTheme)) void updateSettings({ theme: theme as AppTheme });
-}
 
 async function refreshRuntimes(): Promise<void> {
   if (runtimeRefreshing.value) return;
@@ -3115,7 +3102,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
             type="button"
             :class="['settings-link', { selected: activeView === 'settings' }]"
             :aria-current="activeView === 'settings' ? 'page' : undefined"
-            @click="openSettings"
+            @click="openSettings()"
           >
             <osx-icon name="settings" :size="16" />
             <span>Settings</span>
@@ -3124,134 +3111,51 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
       </nav>
 
       <section ref="sessionPane" class="session-pane" tabindex="-1" :aria-label="activeView === 'settings' ? 'Settings' : 'Agent task'">
-        <div v-if="activeView === 'settings'" class="settings-pane">
-          <header class="settings-header">
-            <div>
-              <span class="settings-mark"><osx-icon name="settings" :size="22" /></span>
-              <span>
-                <h1>Settings</h1>
-                <p>Choose defaults for new tasks and this device.</p>
-              </span>
-            </div>
-            <osx-button size="small" @click="closeSettings">Done</osx-button>
-          </header>
-
-          <div class="settings-sections">
-            <osx-alert
-              v-if="settingsError"
-              tone="error"
-              title="Settings not saved"
-              :description="settingsError"
-            />
-            <osx-alert
-              v-if="harnessNotice"
-              class="harness-notice"
-              :tone="harnessNotice.tone"
-              :title="harnessNotice.title"
-              :description="harnessNotice.description"
-            />
-
-            <section class="settings-section" aria-labelledby="appearance-settings">
-              <header>
-                <span class="section-icon"><osx-icon name="palette" :size="19" /></span>
-                <div>
-                  <h2 id="appearance-settings">Appearance</h2>
-                  <p>Use one theme across the workspace.</p>
-                </div>
-              </header>
-              <osx-radio-group
-                label="Theme"
-                name="application-theme"
-                variant="cards"
-                orientation="horizontal"
-                :options="themeOptions"
-                :value="state.settings.theme"
-                :disabled="settingsSaving"
-                @change="chooseTheme"
-              />
-            </section>
-
-            <AgentDefaults />
-
-            <AuthorityModeSettings
-              :value="state.settings.authorityMode ?? 'supervised'"
-              :saving="settingsSaving"
-              @change="updateSettings({ authorityMode: $event })"
-            />
-
-            <PermissionCenter
-              :rules="permissionRules"
-              :projects="state.projects"
-              :loading="permissionLoading"
-              :exporting="permissionExporting"
-              :action-id="permissionActionId"
-              :error="permissionError"
-              :notice="permissionNotice"
-              @refresh="refreshPermissionRules"
-              @export="exportPermissionAudit"
-              @revoke="revokePermissionRule"
-            />
-
-            <ProofTrustSettings />
-
-            <TeamPolicySettings
-              :state="teamPolicy"
-              :busy="teamPolicyBusy"
-              :error="teamPolicyError"
-              :notice="teamPolicyNotice"
-              @refresh="refreshTeamPolicy"
-              @create="createTeamPolicy"
-              @import="importTeamPolicy"
-              @remove="removeTeamPolicy"
-              @error="teamPolicyError = $event"
-            />
-
-            <SupportDiagnostics />
-
-            <AgentHarnessSettings
-              :runtimes="localRuntimes"
-              :settings="state.settings"
-              :saving="settingsSaving"
-              :refreshing="runtimeRefreshing"
-              :probing-runtime-id="runtimeProbingId"
-              @update="updateSettings"
-              @refresh="refreshRuntimes"
-              @maintain="maintainRuntime"
-              @probe="probeRuntime"
-            />
-
-            <HarnessMetricsSettings
-              :settings="state.settings"
-              :saving="settingsSaving"
-              @update="updateSettings"
-            />
-
-            <McpConnectionCenter
-              :servers="state.mcpServers"
-              :projects="state.projects"
-              :selected-project-id="state.selectedProjectId"
-              @changed="mcpServersChanged"
-            />
-
-            <ModelProviderSettings
-              :providers="state.modelProviders"
-              @connected="providerConnected"
-              @changed="providersChanged"
-            />
-
-            <osx-alert
-              tone="info"
-              title="Settings stay on this device"
-              description="The local Vraxis Code service saves these defaults. They are not added to agent transcripts."
-            />
-          </div>
-
-          <footer class="settings-save-state" aria-live="polite">
-            <osx-spinner v-if="settingsSaving" size="small" label="Saving settings" show-label />
-            <span v-else-if="settingsError"><osx-icon name="warning" :size="14" /> Previous settings restored</span>
-            <span v-else><osx-icon name="check" :size="14" /> Saved on this device</span>
-          </footer>
-        </div>
+        <SettingsShell
+          v-if="activeView === 'settings'"
+          :section="settingsSection"
+          :settings="state.settings"
+          :saving="settingsSaving"
+          :settings-error="settingsError"
+          :harness-notice="harnessNotice"
+          :theme-options="themeOptions"
+          :runtimes="localRuntimes"
+          :runtime-refreshing="runtimeRefreshing"
+          :runtime-probing-id="runtimeProbingId"
+          :permission-rules="permissionRules"
+          :permission-projects="state.projects"
+          :permission-loading="permissionLoading"
+          :permission-exporting="permissionExporting"
+          :permission-action-id="permissionActionId"
+          :permission-error="permissionError"
+          :permission-notice="permissionNotice"
+          :team-policy="teamPolicy"
+          :team-policy-busy="teamPolicyBusy"
+          :team-policy-error="teamPolicyError"
+          :team-policy-notice="teamPolicyNotice"
+          :mcp-servers="state.mcpServers"
+          :mcp-projects="state.projects"
+          :selected-project-id="state.selectedProjectId"
+          :model-providers="state.modelProviders"
+          @close="closeSettings"
+          @update:section="settingsSection = $event"
+          @update="updateSettings"
+          @theme-change="updateSettings({ theme: $event })"
+          @refresh-permissions="refreshPermissionRules"
+          @export-permissions="exportPermissionAudit"
+          @revoke-permission="revokePermissionRule"
+          @refresh-team-policy="refreshTeamPolicy"
+          @create-team-policy="createTeamPolicy"
+          @import-team-policy="importTeamPolicy"
+          @remove-team-policy="removeTeamPolicy"
+          @team-policy-error="teamPolicyError = $event"
+          @refresh-runtimes="refreshRuntimes"
+          @maintain="maintainRuntime"
+          @probe="probeRuntime"
+          @mcp-changed="mcpServersChanged"
+          @provider-connected="providerConnected"
+          @providers-changed="providersChanged"
+        />
 
         <div v-else-if="loading" class="center-state">
           <WorkspaceSplash />

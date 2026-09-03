@@ -227,7 +227,9 @@ test("parses durable application settings", () => {
   assert.throws(() => parseUpdateSettingsRequest({}), /at least one setting/);
   assert.deepEqual(parseUpdateSettingsRequest({ harnessMetricsEnabled: true }), { harnessMetricsEnabled: true });
   assert.deepEqual(parseUpdateSettingsRequest({ harnessMetricsExportEnabled: false }), { harnessMetricsExportEnabled: false });
+  assert.deepEqual(parseUpdateSettingsRequest({ harnessMetricsAutoApply: true }), { harnessMetricsAutoApply: true });
   assert.throws(() => parseUpdateSettingsRequest({ harnessMetricsEnabled: "yes" }), /Harness metrics setting must be true or false/);
+  assert.throws(() => parseUpdateSettingsRequest({ harnessMetricsAutoApply: "yes" }), /Harness metrics auto-apply setting must be true or false/);
 });
 
 test("parses bounded MCP connections without accepting plaintext credential shortcuts", () => {

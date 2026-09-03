@@ -58,6 +58,7 @@ export class SettingsRegistry {
         ...(disabledRuntimeIds ? { disabledRuntimeIds } : {}),
         ...(parsed.harnessMetricsEnabled === true ? { harnessMetricsEnabled: true } : {}),
         ...(parsed.harnessMetricsExportEnabled === true ? { harnessMetricsExportEnabled: true } : {}),
+        ...(parsed.harnessMetricsAutoApply === true ? { harnessMetricsAutoApply: true } : {}),
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return structuredClone(defaultUserSettings);
@@ -77,6 +78,7 @@ export class SettingsRegistry {
     }
     const harnessMetricsEnabled = input.harnessMetricsEnabled ?? current.harnessMetricsEnabled ?? false;
     const harnessMetricsExportEnabled = input.harnessMetricsExportEnabled ?? current.harnessMetricsExportEnabled ?? false;
+    const harnessMetricsAutoApply = input.harnessMetricsAutoApply ?? current.harnessMetricsAutoApply ?? false;
     const settings: UserSettings = {
       theme: input.theme ?? current.theme,
       defaultMode: input.defaultMode ?? current.defaultMode,
@@ -88,6 +90,7 @@ export class SettingsRegistry {
         : {}),
       ...(harnessMetricsEnabled ? { harnessMetricsEnabled: true } : {}),
       ...(harnessMetricsExportEnabled ? { harnessMetricsExportEnabled: true } : {}),
+      ...(harnessMetricsAutoApply ? { harnessMetricsAutoApply: true } : {}),
     };
     await this.write(settings);
     return settings;

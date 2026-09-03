@@ -11,6 +11,12 @@ function collectBrowserErrors(page: import("@playwright/test").Page): string[] {
   return errors;
 }
 
+async function chooseSettingsSection(page: import("@playwright/test").Page, label: string): Promise<void> {
+  await page.getByRole("navigation", { name: "Settings sections" })
+    .getByRole("button", { name: label, exact: true })
+    .click();
+}
+
 async function expectBasicAccessibility(page: import("@playwright/test").Page): Promise<void> {
   const issues = await page.evaluate(() => {
     const failures: string[] = [];
@@ -238,7 +244,8 @@ test("switches MCP connection types without destabilizing settings", async ({ pa
 
   await page.goto("/?preview=project");
   await page.getByRole("button", { name: "Settings" }).click();
-  await page.getByRole("button", { name: "Add connection", exact: true }).first().click();
+  await chooseSettingsSection(page, "MCP servers");
+  await page.getByRole("button", { name: "Add server", exact: true }).first().click();
 
   const local = page.getByRole("radio", { name: /Local process/ });
   const remote = page.getByRole("radio", { name: /Remote server/ });
@@ -518,18 +525,12 @@ test("makes durable authority visible, revocable, and exportable", async ({ page
 
   await page.goto("/");
   await page.getByRole("button", { name: "Settings" }).click();
+  await chooseSettingsSection(page, "Permissions");
   const center = page.locator(".permission-center");
   await expect(center.getByRole("heading", { name: "Access & approvals" })).toBeVisible();
   await expect(center.getByText("2", { exact: true }).first()).toBeVisible();
   await expect(center.getByText(". · npm run check", { exact: true })).toBeVisible();
   await expect(center.getByText("other-project · this task", { exact: false })).toBeVisible();
-
-  const teamPolicy = page.locator(".team-policy");
-  await expect(teamPolicy.getByRole("heading", { name: "Team policy" })).toBeVisible();
-  await expect(teamPolicy.getByText("Example Engineering", { exact: true })).toBeVisible();
-  await expect(teamPolicy.getByText("Signed by Security team", { exact: true })).toBeVisible();
-  await expect(teamPolicy.getByText("Always ask", { exact: true })).toBeVisible();
-  await expect(teamPolicy.getByText("Blocked", { exact: true })).toBeVisible();
 
   const auditDownload = page.waitForEvent("download");
   await page.getByRole("button", { name: "Download audit" }).click();
@@ -539,6 +540,15 @@ test("makes durable authority visible, revocable, and exportable", async ({ page
   await allowedRule.getByRole("button", { name: "Revoke" }).click();
   await expect(page.getByText("The next matching action will ask for approval again.")).toBeVisible();
   await expect(page.getByText(". · npm run check", { exact: true })).toHaveCount(0);
+
+  await chooseSettingsSection(page, "Team policy");
+  const teamPolicy = page.locator(".team-policy");
+  await expect(teamPolicy.getByRole("heading", { name: "Team policy" })).toBeVisible();
+  await expect(teamPolicy.getByText("Example Engineering", { exact: true })).toBeVisible();
+  await expect(teamPolicy.getByText("Signed by Security team", { exact: true })).toBeVisible();
+  await expect(teamPolicy.getByText("Always ask", { exact: true })).toBeVisible();
+  await expect(teamPolicy.getByText("Blocked", { exact: true })).toBeVisible();
+
   await teamPolicy.getByRole("button", { name: "Remove policy" }).click();
   await expect(teamPolicy.getByText("Removing this policy widens local authority.", { exact: false })).toBeVisible();
   await teamPolicy.getByRole("button", { name: "Remove policy" }).click();
@@ -573,6 +583,7 @@ test("enrolls a proof signer and verifies an exported proof without exposing pri
 
   await page.goto("/?preview=project");
   await page.getByRole("button", { name: "Settings" }).click();
+  await chooseSettingsSection(page, "Proof & trust");
   const section = page.locator(".proof-trust-settings");
   await expect(section.getByRole("heading", { name: "Proof identity & trust" })).toBeVisible();
   await section.getByRole("textbox", { name: "Identity label" }).fill("Release builder");
@@ -622,6 +633,7 @@ test("hands off a privacy-preserving incident report without automatic upload", 
 
   await page.goto("/?preview=project");
   await page.getByRole("button", { name: "Settings" }).click();
+  await chooseSettingsSection(page, "Diagnostics");
   const section = page.locator(".support-diagnostics");
   await section.getByRole("button", { name: "Copy safe summary" }).click();
   const clipboard = await page.evaluate(() => navigator.clipboard.readText());
@@ -2172,7 +2184,7 @@ test("saves runtime and model defaults in a dedicated settings surface", async (
   await page.goto("/?preview=project");
   await page.getByRole("button", { name: "Settings" }).click();
 
-  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "General", exact: true })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Message to agent" })).toHaveCount(0);
   await expect(page.getByRole("tab", { name: "Files" })).toHaveCount(0);
   await expect(page.getByRole("radio", { name: /Graphite Dark/ })).toBeChecked();
@@ -2183,8 +2195,11 @@ test("saves runtime and model defaults in a dedicated settings surface", async (
   expect(settingsState.theme).toBe("graphite-dark");
   await expect(page.getByRole("heading", { name: "New tasks", exact: true })).toHaveCount(0);
   await expect(page.getByText("Default mode", { exact: true })).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: "Agent harnesses" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Agent harnesses" })).toHaveCount(0);
+
+  await chooseSettingsSection(page, "Proof & trust");
   await expect(page.getByRole("heading", { name: "Proof identity & trust" })).toBeVisible();
+  await chooseSettingsSection(page, "Diagnostics");
   const diagnostics = page.locator(".support-diagnostics");
   await expect(diagnostics.getByRole("heading", { name: "Recovery & diagnostics" })).toBeVisible();
   await expect(diagnostics.getByText("Generated locally. Nothing is uploaded.", { exact: true })).toBeVisible();
@@ -2202,6 +2217,9 @@ test("saves runtime and model defaults in a dedicated settings surface", async (
   await expect(page.getByText("Rotation history", { exact: true })).toBeVisible();
   await expect(page.getByText(`${"a".repeat(12)} → ${"b".repeat(12)}`, { exact: true })).toBeVisible();
   await expect(page.getByText(/old identity remains trusted/)).toBeVisible();
+
+  await chooseSettingsSection(page, "Harnesses");
+  await expect(page.getByRole("heading", { name: "Agent harnesses" })).toBeVisible();
   await expect(page.locator(".harness-row").filter({ hasText: "Codex CLI" })).toBeVisible();
   await expect(page.locator(".harness-row").filter({ hasText: "Claude Code" })).toBeVisible();
   await expect(page.getByText("Live catalog")).toBeVisible();
@@ -2223,7 +2241,7 @@ test("saves runtime and model defaults in a dedicated settings surface", async (
   await expect(page.getByText("Action needs your approval")).toBeVisible();
   await expect(page.getByText("/usr/local/bin/codex update", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Settings" }).click();
-  await page.getByRole("radio", { name: "Models" }).click();
+  await chooseSettingsSection(page, "Model providers");
   await expect(page.getByText("OpenRouter is optional.")).toBeVisible();
   await page.getByRole("button", { name: "Add provider" }).click();
   const providerForm = page.getByRole("form", { name: "Connect model provider" });
@@ -2263,7 +2281,8 @@ test("preserves the task at a narrow viewport without document overflow", async 
   await expect(page.getByRole("heading", { name: "Your first trusted task" })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Message to agent" })).toBeVisible();
   await page.getByRole("button", { name: "Settings" }).click();
-  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await chooseSettingsSection(page, "Harnesses");
+  await expect(page.getByRole("heading", { name: "Harnesses", exact: true })).toBeVisible();
   await expect(page.getByRole("radiogroup", { name: "Harness details" })).toBeVisible();
   const harnessHeight = await page.locator(".harness-workbench").evaluate((element) => element.getBoundingClientRect().height);
   const modelListHeight = await page.locator(".harness-model-list").evaluate((element) => element.getBoundingClientRect().height);

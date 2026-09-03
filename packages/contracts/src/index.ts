@@ -121,6 +121,7 @@ export interface UserSettings {
   disabledRuntimeIds?: string[];
   harnessMetricsEnabled?: boolean;
   harnessMetricsExportEnabled?: boolean;
+  harnessMetricsAutoApply?: boolean;
 }
 
 export const defaultUserSettings: UserSettings = {
@@ -1138,6 +1139,32 @@ export interface HarnessMetricsTrendV1 {
   verificationPassRateDelta?: number;
 }
 
+export type HarnessMetricsRecommendationKind =
+  | "prefer-runtime"
+  | "review-runtime"
+  | "trend-warning"
+  | "collect-more-data";
+
+export type HarnessMetricsRecommendationConfidence = "low" | "medium" | "high";
+
+export interface HarnessMetricsRecommendationActionV1 {
+  type: "set-default-runtime" | "disable-runtime" | "probe-runtime";
+  runtimeId: string;
+}
+
+export interface HarnessMetricsRecommendationV1 {
+  id: string;
+  kind: HarnessMetricsRecommendationKind;
+  tone: "info" | "warning" | "success";
+  title: string;
+  detail: string;
+  confidence: HarnessMetricsRecommendationConfidence;
+  mode?: SessionMode;
+  runtimeId?: string;
+  suggestedRuntimeId?: string;
+  action?: HarnessMetricsRecommendationActionV1;
+}
+
 export interface HarnessMetricsSummaryV1 {
   kind: "vraxis.harness-metrics-summary";
   version: 1;
@@ -1147,6 +1174,7 @@ export interface HarnessMetricsSummaryV1 {
   windowDays: number;
   byRuntime: HarnessRuntimeStatsV1[];
   recentTrend?: HarnessMetricsTrendV1;
+  recommendations?: HarnessMetricsRecommendationV1[];
 }
 
 export interface HarnessMetricsExportV1 {
@@ -1239,6 +1267,7 @@ export interface UpdateSettingsRequest {
   disabledRuntimeIds?: string[];
   harnessMetricsEnabled?: boolean;
   harnessMetricsExportEnabled?: boolean;
+  harnessMetricsAutoApply?: boolean;
 }
 
 export interface ConnectModelProviderRequest {
@@ -1621,6 +1650,10 @@ export function parseUpdateSettingsRequest(value: unknown): UpdateSettingsReques
   if (input.harnessMetricsExportEnabled !== undefined) {
     if (typeof input.harnessMetricsExportEnabled !== "boolean") throw new TypeError("Harness metrics export setting must be true or false.");
     result.harnessMetricsExportEnabled = input.harnessMetricsExportEnabled;
+  }
+  if (input.harnessMetricsAutoApply !== undefined) {
+    if (typeof input.harnessMetricsAutoApply !== "boolean") throw new TypeError("Harness metrics auto-apply setting must be true or false.");
+    result.harnessMetricsAutoApply = input.harnessMetricsAutoApply;
   }
   if (Object.keys(result).length === 0) throw new TypeError("Choose at least one setting to update.");
   return result;

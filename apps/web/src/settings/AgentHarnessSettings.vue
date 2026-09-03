@@ -1,6 +1,15 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
-import type { RuntimeMaintenanceActionSummary, RuntimeSummary, UpdateSettingsRequest, UserSettings } from "@vraxis/code-contracts";
+import { computed, onMounted, ref, watch } from "vue";
+import type {
+  HarnessMetricsRecommendationActionV1,
+  HarnessMetricsSummaryV1,
+  RuntimeMaintenanceActionSummary,
+  RuntimeSummary,
+  UpdateSettingsRequest,
+  UserSettings,
+} from "@vraxis/code-contracts";
+import HarnessRecommendationList from "./HarnessRecommendationList.vue";
+import { recommendationAppliesToRuntime, settingsPatchForRecommendationAction } from "./harness-recommendation-actions.js";
 import { harnessLogoUrl } from "./harness-logos.js";
 
 const props = defineProps<{
@@ -21,6 +30,8 @@ const emit = defineEmits<{
 const selectedRuntimeId = ref("");
 const detailTab = ref<"models" | "configuration">("models");
 const modelQuery = ref("");
+const metricsSummary = ref<HarnessMetricsSummaryV1 | null>(null);
+const metricsLoading = ref(false);
 
 const selectedRuntime = computed(() => props.runtimes.find((item) => item.id === selectedRuntimeId.value) ?? props.runtimes[0]);
 const selectedModelId = computed(() => selectedRuntime.value ? props.settings.runtimeModels?.[selectedRuntime.value.id] ?? "" : "");
@@ -35,6 +46,11 @@ const visibleMaintenanceActions = computed(() => (selectedRuntime.value?.mainten
   if (action.id === "update" && selectedRuntime.value?.update?.status === "current") return false;
   return true;
 }));
+const runtimeRecommendations = computed(() => {
+  const runtime = selectedRuntime.value;
+  if (!runtime || !props.settings.harnessMetricsEnabled) return [];
+  return (metricsSummary.value?.recommendations ?? []).filter((item) => recommendationAppliesToRuntime(runtime.id, item));
+});
 
 watch(() => props.runtimes, (runtimes) => {
   if (runtimes.some((item) => item.id === selectedRuntimeId.value)) return;
@@ -143,6 +159,38 @@ function conformanceTone(runtime: RuntimeSummary): "success" | "warning" | "neut
 function hasHarnessLogo(runtimeId: string): boolean {
   return Boolean(harnessLogoUrl(runtimeId));
 }
+
+async function refreshMetricsSummary(): Promise<void> {
+  if (!props.settings.harnessMetricsEnabled) {
+    metricsSummary.value = null;
+    return;
+  }
+  metricsLoading.value = true;
+  try {
+    const response = await fetch("/api/harness-metrics");
+    if (!response.ok) {
+      metricsSummary.value = null;
+      return;
+    }
+    metricsSummary.value = await response.json() as HarnessMetricsSummaryV1;
+  } catch {
+    metricsSummary.value = null;
+  } finally {
+    metricsLoading.value = false;
+  }
+}
+
+function applyRecommendation(action: HarnessMetricsRecommendationActionV1): void {
+  emit("update", settingsPatchForRecommendationAction(action, props.settings));
+}
+
+watch(() => props.settings.harnessMetricsEnabled, () => {
+  void refreshMetricsSummary();
+}, { immediate: true });
+
+onMounted(() => {
+  void refreshMetricsSummary();
+});
 </script>
 
 <template>
@@ -207,6 +255,16 @@ function hasHarnessLogo(runtimeId: string): boolean {
           </div>
           <osx-badge :tone="availabilityTone(selectedRuntime)" size="small" :label="availabilityLabel(selectedRuntime)" />
         </header>
+
+        <HarnessRecommendationList
+          v-if="runtimeRecommendations.length"
+          :recommendations="runtimeRecommendations"
+          :runtimes="runtimes"
+          :saving="saving || metricsLoading"
+          compact
+          @apply="applyRecommendation"
+          @probe="emit('probe', $event)"
+        />
 
         <osx-segmented-control class="harness-detail-switcher" items="Models,Configuration" :value="detailTab === 'models' ? 'Models' : 'Configuration'" label="Harness details" @change="chooseDetailTab" />
 

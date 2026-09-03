@@ -39,6 +39,6 @@ test("meets automated WCAG checks in the active project workspace", async ({ pag
 test("meets automated WCAG checks across settings", async ({ page }) => {
   await page.goto("/?preview=project");
   await page.getByRole("button", { name: "Settings" }).click();
-  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "General", exact: true })).toBeVisible();
   await expectNoAccessibilityViolations(page, "Settings");
 });

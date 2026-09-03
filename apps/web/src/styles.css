@@ -278,12 +278,101 @@ osx-app-shell {
   pointer-events: none;
 }
 
-.settings-pane {
-  width: min(100%, 1120px);
+.settings-pane,
+.settings-shell {
+  width: min(100%, 1200px);
   min-height: 100%;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
+}
+
+.settings-body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.settings-nav {
+  padding: 14px 10px 18px;
+  border-right: 1px solid var(--osx-border-soft, #2c3338);
+  overflow-y: auto;
+}
+
+.settings-nav-group + .settings-nav-group { margin-top: 14px; }
+
+.settings-nav-group-label {
+  margin: 0 0 6px;
+  padding: 0 10px;
+  color: var(--osx-muted, #98a0a5);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.settings-nav-item {
+  width: 100%;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 2px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--osx-text, #eef1f2);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-nav-item:hover { background: color-mix(in srgb, var(--osx-text, #fff) 5%, transparent); }
+
+.settings-nav-item.selected {
+  background: color-mix(in srgb, var(--osx-accent, #4aa9dc) 16%, transparent);
+  box-shadow: inset 2px 0 0 var(--osx-accent, #4aa9dc);
+}
+
+.settings-nav-item:focus-visible {
+  outline: 3px solid var(--osx-focus, rgba(59, 177, 233, 0.38));
+  outline-offset: 1px;
+}
+
+.settings-nav-icon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  color: var(--osx-accent, #4aa9dc);
+  background: color-mix(in srgb, var(--osx-accent, #4aa9dc) 10%, transparent);
+}
+
+.settings-nav-copy { min-width: 0; }
+.settings-nav-copy strong { font-size: 13px; font-weight: 620; }
+
+.settings-panel {
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.settings-panel-inner {
+  display: grid;
+  gap: 16px;
+  max-width: 920px;
+  padding: 22px clamp(18px, 3vw, 32px) 28px;
+}
+
+.settings-kicker {
+  margin: 0 0 2px;
+  color: var(--osx-muted, #98a0a5);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .settings-header {
@@ -2390,6 +2479,35 @@ button:focus-visible,
 
 @media (max-width: 1500px) {
   .task-header { align-items: flex-start; flex-direction: column; gap: 8px; }
+}
+
+@media (max-width: 860px) {
+  .settings-body { grid-template-columns: 1fr; }
+  .settings-nav {
+    display: flex;
+    gap: 8px;
+    padding: 10px 12px;
+    border-right: 0;
+    border-bottom: 1px solid var(--osx-border-soft, #2c3338);
+    overflow-x: auto;
+  }
+  .settings-nav-group {
+    display: flex;
+    gap: 6px;
+    margin-top: 0 !important;
+  }
+  .settings-nav-group-label { display: none; }
+  .settings-nav-item {
+    width: auto;
+    flex: 0 0 auto;
+    white-space: nowrap;
+    box-shadow: none;
+  }
+  .settings-nav-item.selected {
+    box-shadow: none;
+    background: color-mix(in srgb, var(--osx-accent, #4aa9dc) 20%, transparent);
+  }
+  .settings-panel-inner { padding-inline: 14px; }
 }
 
 @media (max-width: 760px) {

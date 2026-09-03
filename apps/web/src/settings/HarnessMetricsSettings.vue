@@ -1,14 +1,25 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import type { HarnessMetricsSummaryV1, HarnessRuntimeStatsV1, UpdateSettingsRequest, UserSettings } from "@vraxis/code-contracts";
+import type {
+  HarnessMetricsRecommendationActionV1,
+  HarnessMetricsSummaryV1,
+  HarnessRuntimeStatsV1,
+  RuntimeSummary,
+  UpdateSettingsRequest,
+  UserSettings,
+} from "@vraxis/code-contracts";
+import HarnessRecommendationList from "./HarnessRecommendationList.vue";
+import { settingsPatchForRecommendationAction } from "./harness-recommendation-actions.js";
 
 const props = defineProps<{
   settings: UserSettings;
   saving: boolean;
+  runtimes: RuntimeSummary[];
 }>();
 
 const emit = defineEmits<{
   update: [patch: UpdateSettingsRequest];
+  probe: [runtime: RuntimeSummary];
 }>();
 
 const summary = ref<HarnessMetricsSummaryV1 | null>(null);
@@ -21,6 +32,8 @@ const notice = ref("");
 const enabled = computed(() => props.settings.harnessMetricsEnabled === true);
 const exportEnabled = computed(() => props.settings.harnessMetricsExportEnabled === true);
 const runtimeStats = computed(() => summary.value?.byRuntime ?? []);
+const recommendations = computed(() => summary.value?.recommendations ?? []);
+const autoApply = computed(() => props.settings.harnessMetricsAutoApply === true);
 
 async function refreshSummary(): Promise<void> {
   loading.value = true;
@@ -48,8 +61,16 @@ function toggleEnabled(event: Event): void {
   emit("update", { harnessMetricsEnabled: Boolean(eventValue(event)) });
 }
 
+function toggleAutoApply(event: Event): void {
+  emit("update", { harnessMetricsAutoApply: Boolean(eventValue(event)) });
+}
+
 function toggleExport(event: Event): void {
   emit("update", { harnessMetricsExportEnabled: Boolean(eventValue(event)) });
+}
+
+function applyRecommendation(action: HarnessMetricsRecommendationActionV1): void {
+  emit("update", settingsPatchForRecommendationAction(action, props.settings));
 }
 
 async function exportMetrics(): Promise<void> {
@@ -142,6 +163,12 @@ onMounted(() => {
         @change="toggleEnabled"
       />
       <osx-toggle
+        label="Apply high-confidence recommendations automatically"
+        :checked="autoApply"
+        :disabled="saving || !enabled"
+        @change="toggleAutoApply"
+      />
+      <osx-toggle
         label="Include metrics in support bundle"
         :checked="exportEnabled"
         :disabled="saving || !enabled"
@@ -164,36 +191,47 @@ onMounted(() => {
       <osx-spinner size="small" label="Loading harness metrics" show-label />
     </div>
 
-    <div v-else-if="enabled && runtimeStats.length" class="metrics-table-wrap">
-      <table class="metrics-table">
-        <thead>
-          <tr>
-            <th scope="col">Runtime</th>
-            <th scope="col">Runs</th>
-            <th scope="col">Avg time</th>
-            <th scope="col">Tool fail</th>
-            <th scope="col">Approvals</th>
-            <th scope="col">Verify pass</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="stat in runtimeStats" :key="`${stat.runtimeId}:${stat.mode}`">
-            <td>{{ runtimeLabel(stat) }}</td>
-            <td>{{ stat.runs }}</td>
-            <td>{{ Math.round(stat.avgDurationMs / 1000) }}s</td>
-            <td>{{ percent(stat.toolFailureRate) }}</td>
-            <td>{{ percent(stat.approvalRate) }}</td>
-            <td>{{ stat.verificationPassRate === undefined ? "—" : percent(stat.verificationPassRate) }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <p v-if="summary" class="metrics-window">
-        {{ summary.totalRuns }} runs in the last {{ summary.windowDays }} days.
-      </p>
-    </div>
+    <template v-else>
+      <HarnessRecommendationList
+        v-if="enabled && recommendations.length"
+        :recommendations="recommendations"
+        :runtimes="runtimes"
+        :saving="saving"
+        @apply="applyRecommendation"
+        @probe="emit('probe', $event)"
+      />
 
-    <p v-else-if="enabled" class="metrics-empty">No harness runs recorded yet. Complete a task to start building local metrics.</p>
-    <p v-else class="metrics-empty">Enable recording to start collecting local harness metrics.</p>
+      <div v-if="enabled && runtimeStats.length" class="metrics-table-wrap">
+        <table class="metrics-table">
+          <thead>
+            <tr>
+              <th scope="col">Runtime</th>
+              <th scope="col">Runs</th>
+              <th scope="col">Avg time</th>
+              <th scope="col">Tool fail</th>
+              <th scope="col">Approvals</th>
+              <th scope="col">Verify pass</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="stat in runtimeStats" :key="`${stat.runtimeId}:${stat.mode}`">
+              <td>{{ runtimeLabel(stat) }}</td>
+              <td>{{ stat.runs }}</td>
+              <td>{{ Math.round(stat.avgDurationMs / 1000) }}s</td>
+              <td>{{ percent(stat.toolFailureRate) }}</td>
+              <td>{{ percent(stat.approvalRate) }}</td>
+              <td>{{ stat.verificationPassRate === undefined ? "—" : percent(stat.verificationPassRate) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-if="summary" class="metrics-window">
+          {{ summary.totalRuns }} runs in the last {{ summary.windowDays }} days.
+        </p>
+      </div>
+
+      <p v-else-if="enabled" class="metrics-empty">No harness runs recorded yet. Complete a task to start building local metrics.</p>
+      <p v-else class="metrics-empty">Enable recording to start collecting local harness metrics.</p>
+    </template>
 
     <footer>
       <span><osx-icon name="lock" :size="14" /> Metrics never leave this device unless you export them.</span>

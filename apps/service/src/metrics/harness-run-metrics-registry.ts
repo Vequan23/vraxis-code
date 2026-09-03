@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { HarnessMetricsSummaryV1, HarnessRunMetricsV1 } from "@vraxis/code-contracts";
 import { aggregateHarnessMetrics } from "./harness-run-metrics-aggregation.js";
+import { deriveHarnessRecommendations, type HarnessRecommendationContext } from "./harness-metrics-recommendations.js";
 
 interface HarnessMetricsData {
   schemaVersion: 1;
@@ -57,12 +58,21 @@ export class HarnessRunMetricsRegistry {
     await this.write(emptyData);
   }
 
-  async summary(enabled: boolean, windowDays?: number): Promise<HarnessMetricsSummaryV1> {
+  async summary(
+    enabled: boolean,
+    windowDays?: number,
+    recommendationContext?: HarnessRecommendationContext,
+  ): Promise<HarnessMetricsSummaryV1> {
     const data = await this.read();
-    return aggregateHarnessMetrics(data.runs, {
+    const summary = aggregateHarnessMetrics(data.runs, {
       enabled,
       ...(windowDays !== undefined ? { windowDays } : {}),
     });
+    if (!recommendationContext) return summary;
+    return {
+      ...summary,
+      recommendations: deriveHarnessRecommendations(summary, recommendationContext),
+    };
   }
 
   private async read(): Promise<HarnessMetricsData> {
