@@ -1294,14 +1294,13 @@ osx-app-shell {
 .proof-export-actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
   padding: 10px 12px;
   border-top: 1px solid var(--osx-border-soft, #2c3338);
   background: color-mix(in srgb, var(--osx-accent, #4aa9dc) 6%, var(--osx-surface-raised, #22282c));
 }
-.proof-export-title { min-width: 0; display: inline-flex; align-items: center; gap: 7px; color: var(--osx-text, #eef1f2); font-size: 13px; font-weight: 620; }
-.proof-export-buttons { display: flex; flex: 0 1 auto; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
 .understand-loading { display: grid; place-items: center; min-height: 72px; padding: 12px; border-top: 1px solid var(--osx-border-soft, #2c3338); }
 .evidence-chrome .understand-artifact {
   margin: 0;
@@ -1318,7 +1317,6 @@ osx-app-shell {
     align-items: stretch;
     flex-direction: column;
   }
-  .proof-export-buttons { justify-content: stretch; }
 }
 
 .understand-artifact {

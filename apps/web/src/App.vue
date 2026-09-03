@@ -3438,13 +3438,10 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
               <span v-if="evidenceLedger.browserActions"><osx-icon name="eye" :size="13" />{{ evidenceLedger.browserActions }} browser {{ evidenceLedger.browserActions === 1 ? 'action' : 'actions' }}</span>
               <span v-if="evidenceLedger.pendingApprovals" class="warning"><osx-icon name="lock" :size="13" />{{ evidenceLedger.pendingApprovals }} waiting</span>
             </section>
-            <section v-if="taskProofExportable" class="proof-export-actions" aria-label="Portable task proof">
-              <span class="proof-export-title"><osx-icon name="shield-check" :size="14" /><strong>Portable proof</strong></span>
-              <span class="proof-export-buttons">
-                <osx-button size="small" variant="secondary" icon="sparkle" :loading="understandLoading" @click="openUnderstandArtifact">Understand</osx-button>
-                <osx-button size="small" variant="secondary" icon="download" :loading="receiptExporting === 'html'" @click="exportTaskReceipt('html')">Download proof</osx-button>
-                <osx-button size="small" variant="secondary" icon="file-code" :loading="receiptExporting === 'json'" @click="exportTaskReceipt('json')">Signed JSON</osx-button>
-              </span>
+            <section v-if="taskProofExportable" class="proof-export-actions" aria-label="Task proof actions">
+              <osx-button size="small" variant="secondary" icon="sparkle" :loading="understandLoading" @click="openUnderstandArtifact">Understand</osx-button>
+              <osx-button size="small" variant="secondary" icon="download" :loading="receiptExporting === 'html'" @click="exportTaskReceipt('html')">Download proof</osx-button>
+              <osx-button size="small" variant="secondary" icon="file-code" :loading="receiptExporting === 'json'" @click="exportTaskReceipt('json')">Signed JSON</osx-button>
             </section>
             <div v-if="understandLoading" class="understand-loading"><osx-spinner size="small" label="Generating understanding" show-label /></div>
             <UnderstandArtifactPanel
