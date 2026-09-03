@@ -1,8 +1,8 @@
-import { defineSkill, type AgentSkill } from "@vraxis/agent-v";
+import { defineSkill, type AgentSkill, type ContextArtifact } from "@vraxis/agent-v";
 import { builtInAgentSkills, builtInSkillsForRecipe, type StarterRecipeId } from "@vraxis/agent-v/skills";
 import type { SessionMode } from "@vraxis/code-contracts";
 import type { ResolvedSkill } from "../skills/skill-registry.js";
-import { verificationRecipeSkill, vraxisCodeSkill, vraxisProductSkills } from "../skills/vraxis-product-skills.js";
+import { verificationRecipeSkill, vraxisCodeSkill, vraxisModeHarnessSkill, vraxisProductSkills } from "../skills/vraxis-product-skills.js";
 
 export interface AttachedSkillMetadata {
   id: string;
@@ -85,6 +85,17 @@ export function attachedSkillsJsonMetadata(skills: readonly ResolvedSkill[]): Ar
   }));
 }
 
+export function attachedSkillArtifacts(skills: readonly AttachedSkillMetadata[]): ContextArtifact[] {
+  return skills.map((skill) => ({
+    id: `attached-skill:${skill.id}`,
+    uri: `vraxis-skill:///${skill.id}/${encodeURIComponent(skill.version)}`,
+    mediaType: "text/markdown",
+    title: skill.name,
+    content: skill.instructions,
+    metadata: { skillId: skill.id, version: skill.version },
+  }));
+}
+
 export function attachedSkillsFromMetadata(value: unknown): AttachedSkillMetadata[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((entry) => {
@@ -141,6 +152,22 @@ export function runtimeAgentSkillsFromMetadata(mode: SessionMode, attached: read
     return skill;
   });
   return uniqueSkills([...recipeSkills, ...extras, ...vraxisProductSkills, ...attachedGuidanceSkillsFromMetadata(attached)]);
+}
+
+/** Skills for hosted provider runtimes, including mode tool grants required by agent-v policy. */
+export function providerRuntimeAgentSkills(mode: SessionMode, attached: readonly AttachedSkillMetadata[]): AgentSkill[] {
+  return uniqueSkills([...runtimeAgentSkillsFromMetadata(mode, attached), vraxisModeHarnessSkill(mode)]);
+}
+
+/** Skills registered alongside a hosted provider recipe without duplicating recipe defaults. */
+export function supplementalProviderRuntimeSkills(mode: SessionMode, attached: readonly AttachedSkillMetadata[]): AgentSkill[] {
+  const { extraSkillIds } = modeRuntimeSelection(mode);
+  const extras = extraSkillIds.map((id) => {
+    const skill = Object.values(builtInAgentSkills).find((candidate) => candidate.id === id);
+    if (!skill) throw new TypeError(`Unknown extra skill ${id}.`);
+    return skill;
+  });
+  return uniqueSkills([...extras, ...vraxisProductSkills, ...attachedGuidanceSkillsFromMetadata(attached)]);
 }
 
 function uniqueSkills(skills: readonly AgentSkill[]): AgentSkill[] {

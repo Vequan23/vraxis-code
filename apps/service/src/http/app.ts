@@ -6,7 +6,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { CodingRuntimeEngine, CredentialStore } from "@vraxis/agent-v";
 import type { McpConnectionAuthorizer } from "@vraxis/agent-v/mcp";
 import { SystemCredentialStore } from "@vraxis/agent-v/node";
-import { LocalCliRuntimeEngine } from "@vraxis/agent-v/local-cli";
+import { createLocalCliRuntimeEngine } from "../runtimes/local-cli-runtimes.js";
 import {
   contractVersion,
   parseAppendMessageRequest,
@@ -50,6 +50,7 @@ import { SessionRegistry } from "../sessions/session-registry.js";
 import { AgentExecutionCoordinator } from "../sessions/agent-execution.js";
 import { SettingsRegistry } from "../settings/settings-registry.js";
 import { ModelProviderRegistry } from "../model-providers/model-provider-registry.js";
+import { ProviderConformanceRegistry } from "../model-providers/provider-conformance.js";
 import { McpServerRegistry, type McpConnector } from "../mcp/mcp-server-registry.js";
 import { VraxisCodeRuntimeEngine } from "../runtimes/vraxis-code-runtime.js";
 import { indexProjectFiles } from "../workspace/file-index.js";
@@ -305,20 +306,28 @@ export function createApp(options: AppOptions) {
   void runtimeDiscoveryCache.start();
   const runtimeConformance = new RuntimeConformanceRegistry(
     options.dataDirectory,
-    options.runtimeProbeEngine ?? new LocalCliRuntimeEngine(),
+    options.runtimeProbeEngine ?? createLocalCliRuntimeEngine(),
   );
+  const providerConformance = new ProviderConformanceRegistry(options.dataDirectory);
   const discoverLocalRuntimes = async () => runtimeConformance.decorate(await runtimeDiscoveryCache.get());
+  const discoverProviderRuntimes = async () => providerConformance.decorate(await modelProviders.runtimes());
+  const discoverAllRuntimes = async () => [
+    ...await discoverLocalRuntimes(),
+    ...await discoverProviderRuntimes(),
+  ];
   async function installedRuntimeIds(): Promise<string[]> {
-    return [...await discoverLocalRuntimes(), ...await modelProviders.runtimes()]
+    return (await discoverAllRuntimes())
       .filter((item) => item.availability === "installed")
       .map((item) => item.id);
   }
   async function harnessRecommendationContext(currentSettings: Awaited<ReturnType<typeof settings.read>>) {
+    const runtimes = await discoverAllRuntimes();
     return {
       defaultRuntimeId: currentSettings.defaultRuntimeId,
       defaultMode: currentSettings.defaultMode,
       disabledRuntimeIds: currentSettings.disabledRuntimeIds,
-      installedRuntimeIds: await installedRuntimeIds(),
+      installedRuntimeIds: runtimes.filter((item) => item.availability === "installed").map((item) => item.id),
+      runtimeConformance: Object.fromEntries(runtimes.map((item) => [item.id, item.conformance?.state])),
     };
   }
   runMetricsHooks.afterRecorded = async () => {
@@ -349,7 +358,7 @@ export function createApp(options: AppOptions) {
   }
 
   async function validateBuildRuntime(runtimeId: string): Promise<void> {
-    const runtime = [...await discoverLocalRuntimes(), ...await modelProviders.runtimes()].find((item) => item.id === runtimeId);
+    const runtime = (await discoverAllRuntimes()).find((item) => item.id === runtimeId);
     if (!runtime?.capabilities?.includes("workspace-write")) {
       throw new TypeError("Choose a runtime that supports guarded isolated-workspace writes for Build mode.");
     }
@@ -767,7 +776,7 @@ export function createApp(options: AppOptions) {
           desktopSessionProtected: Boolean(options.desktopToken),
           projects: projectData.projects,
           sessions: sessionData.sessions,
-          runtimes: withProductCapabilityMatrix([...await discoverLocalRuntimes(), ...await modelProviders.runtimes()]),
+          runtimes: withProductCapabilityMatrix(await discoverAllRuntimes()),
           approvals: await approvals.list(),
           terminalRuns: await terminal.list(),
           verificationRuns: await verifications.list(),
@@ -793,6 +802,7 @@ export function createApp(options: AppOptions) {
           settings,
           worktrees,
           discoverLocalRuntimes,
+          discoverProviderRuntimes,
           modelProviders,
           mcpServers,
           skills,
@@ -865,7 +875,7 @@ export function createApp(options: AppOptions) {
               force: true,
               timeoutMs: backgroundDiscoveryTimeoutMs,
             })),
-            ...await modelProviders.runtimes(),
+            ...await discoverProviderRuntimes(),
           ]),
         });
         return;
@@ -939,11 +949,20 @@ export function createApp(options: AppOptions) {
       const runtimeProbeMatch = /^\/api\/runtimes\/([^/]+)\/probe$/.exec(url.pathname);
       if (request.method === "POST" && runtimeProbeMatch?.[1]) {
         const input = await body(request) as { consent?: unknown; modelId?: unknown };
-        if (input.consent !== true) throw new TypeError("Confirm the bounded provider request before verifying this harness.");
+        if (input.consent !== true) throw new TypeError("Confirm the bounded provider request before verifying this runtime.");
         const modelId = input.modelId === undefined ? undefined : String(input.modelId).trim();
         if (modelId && modelId.length > 200) throw new TypeError("The runtime model ID is too long.");
-        const runtime = (await discoverLocalRuntimes()).find((item) => item.id === runtimeProbeMatch[1]);
-        if (!runtime) throw new TypeError("The selected local harness is unavailable.");
+        const runtime = (await discoverAllRuntimes()).find((item) => item.id === runtimeProbeMatch[1]);
+        if (!runtime || runtime.availability !== "installed") throw new TypeError("The selected runtime is unavailable.");
+        if (runtime.kind === "hosted-provider") {
+          const { readiness, catalogOk } = await modelProviders.probe(runtime.id, modelId || undefined);
+          if (readiness.verification === "ready") {
+            await modelProviders.refresh(runtime.id).catch(() => undefined);
+          }
+          const conformance = await providerConformance.recordProbe(runtime.id, readiness, catalogOk);
+          json(response, 200, { runtimeId: runtime.id, conformance });
+          return;
+        }
         const conformance = await runtimeConformance.probe(runtime, modelId || undefined);
         json(response, 200, { runtimeId: runtime.id, conformance });
         return;
@@ -1177,6 +1196,29 @@ export function createApp(options: AppOptions) {
         await registry.select(selectedSession.projectId);
         await sessions.select(selectedSession.id);
         json(response, 200, { status: "selected" });
+        return;
+      }
+
+      const archiveSessionMatch = /^\/api\/sessions\/([^/]+)\/archive$/.exec(url.pathname);
+      if (request.method === "POST" && archiveSessionMatch?.[1]) {
+        const session = await sessions.archive(archiveSessionMatch[1]);
+        json(response, 200, { session });
+        return;
+      }
+
+      const restoreSessionMatch = /^\/api\/sessions\/([^/]+)\/restore$/.exec(url.pathname);
+      if (request.method === "POST" && restoreSessionMatch?.[1]) {
+        const session = await sessions.restore(restoreSessionMatch[1]);
+        json(response, 200, { session });
+        return;
+      }
+
+      const deleteSessionMatch = /^\/api\/sessions\/([^/]+)$/.exec(url.pathname);
+      if (request.method === "DELETE" && deleteSessionMatch?.[1]) {
+        const session = await sessions.get(deleteSessionMatch[1]);
+        await registry.resolveInside(session.projectId);
+        await sessions.remove(deleteSessionMatch[1]);
+        json(response, 200, { status: "deleted", sessionId: deleteSessionMatch[1] });
         return;
       }
 

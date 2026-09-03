@@ -806,6 +806,66 @@ test("connects a direct model provider without exposing its credential", async (
   assert.deepEqual(removed.modelProviders, []);
 });
 
+test("probes a connected hosted provider through the runtime probe endpoint", async (context) => {
+  const secret = "test-provider-probe-secret";
+  const credentials = new MemoryCredentialStore();
+  let generationRequests = 0;
+  const providerFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url.includes("/models")) {
+      return new Response(JSON.stringify({
+        models: [{
+          name: "models/gemini-2.5-flash",
+          displayName: "Gemini 2.5 Flash",
+          supportedGenerationMethods: ["generateContent"],
+        }],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    generationRequests += 1;
+    assert.equal(new Headers(init?.headers).get("x-goog-api-key"), secret);
+    return new Response(JSON.stringify({
+      candidates: [{
+        content: {
+          parts: [{ text: JSON.stringify({ status: "ready", evidenceLabel: "runtime-probe" }) }],
+        },
+      }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof globalThis.fetch;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = providerFetch;
+  const app = await fixture(undefined, new DeterministicCodingRuntimeEngine(), { credentialStore: credentials, providerFetch });
+  context.after(async () => {
+    globalThis.fetch = originalFetch;
+    await app.close();
+  });
+
+  const connectedResponse = await fetch(`${app.baseUrl}/api/model-providers`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ provider: "google", name: "GEMINI", apiKey: secret, model: "gemini-2.5-flash" }),
+  });
+  assert.equal(connectedResponse.status, 201);
+  const connected = await connectedResponse.json() as { id: string };
+
+  const response = await fetch(`${app.baseUrl}/api/runtimes/${connected.id}/probe`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ consent: true }),
+  });
+  assert.equal(response.status, 200);
+  const probed = await response.json() as { runtimeId: string; conformance: { state: string; checks: Array<{ id: string; state: string; detail?: string }> } };
+  assert.equal(probed.runtimeId, connected.id);
+  assert.notEqual(probed.conformance.state, "unverified");
+  assert.ok(probed.conformance.checks.some((check) => check.id === "credential-catalog"));
+  assert.ok(probed.conformance.checks.some((check) => check.id === "live-output"));
+  assert.ok(generationRequests >= 1, `expected a generation request, got ${generationRequests}`);
+
+  const refreshed = await (await fetch(`${app.baseUrl}/api/runtimes/refresh`, { method: "POST" })).json() as {
+    runtimes: Array<{ id: string; conformance?: { state: string } }>;
+  };
+  assert.ok(refreshed.runtimes.find((item) => item.id === connected.id)?.conformance);
+});
+
 test("governs MCP connection discovery and project access through the approval lifecycle", async (context) => {
   const secret = "test-mcp-secret";
   const credentials = new MemoryCredentialStore();
@@ -1227,7 +1287,7 @@ test("discovers, attaches, persists, and applies agent-v skills", async (context
     skills?: Array<{ id: string; name: string; version: string }>;
   };
   assert.deepEqual(userEvent.skills, [{ id: skillId, name: "ux-fundamentals", version: "1.2.0" }]);
-  assert.match(runtime.requests[0]?.input.instructions ?? "", /available as artifacts/);
+  assert.match(runtime.requests[0]?.input.instructions ?? "", /registered for this run/);
   assert.match(runtime.requests[0]?.input.instructions ?? "", /cannot grant tools, permissions, workspace writes, network access/);
   assert.deepEqual(runtime.requests[0]?.input.artifacts, [{
     id: `attached-skill:${skillId}`,

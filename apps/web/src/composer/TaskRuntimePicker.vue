@@ -3,6 +3,7 @@ import { computed } from "vue";
 import type { OsxIconName } from "@vraxis/osx-components";
 import type { RuntimeSummary } from "@vraxis/code-contracts";
 import { harnessLogoUrl } from "../settings/harness-logos.js";
+import { runtimePickerSubtitle } from "../settings/runtime-conformance.js";
 import ComposerMenuPicker, { type ComposerMenuGroup } from "./ComposerMenuPicker.vue";
 
 const props = defineProps<{
@@ -21,10 +22,7 @@ function runtimeDisabled(runtime: RuntimeSummary): boolean {
 }
 
 function runtimeSubtitle(runtime: RuntimeSummary): string {
-  if (runtime.availability !== "installed") return runtime.applicationPath ? "CLI needed" : "Setup needed";
-  if (!props.isEnabled(runtime.id)) return "Disabled in settings";
-  if (runtime.authentication === "required") return "Sign in needed";
-  return "Ready";
+  return runtimePickerSubtitle(runtime, props.isEnabled(runtime.id));
 }
 
 function mapRuntime(runtime: RuntimeSummary) {

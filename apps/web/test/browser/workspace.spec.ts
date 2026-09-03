@@ -2218,8 +2218,8 @@ test("saves runtime and model defaults in a dedicated settings surface", async (
   await expect(page.getByText(`${"a".repeat(12)} → ${"b".repeat(12)}`, { exact: true })).toBeVisible();
   await expect(page.getByText(/old identity remains trusted/)).toBeVisible();
 
-  await chooseSettingsSection(page, "Harnesses");
-  await expect(page.getByRole("heading", { name: "Agent harnesses" })).toBeVisible();
+  await chooseSettingsSection(page, "Runtimes");
+  await expect(page.getByRole("heading", { name: "Runtimes", exact: true })).toBeVisible();
   await expect(page.locator(".harness-row").filter({ hasText: "Codex CLI" })).toBeVisible();
   await expect(page.locator(".harness-row").filter({ hasText: "Claude Code" })).toBeVisible();
   await expect(page.getByText("Live catalog")).toBeVisible();
@@ -2241,8 +2241,7 @@ test("saves runtime and model defaults in a dedicated settings surface", async (
   await expect(page.getByText("Action needs your approval")).toBeVisible();
   await expect(page.getByText("/usr/local/bin/codex update", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Settings" }).click();
-  await chooseSettingsSection(page, "Model providers");
-  await expect(page.getByText("OpenRouter is optional.")).toBeVisible();
+  await chooseSettingsSection(page, "Runtimes");
   await page.getByRole("button", { name: "Add provider" }).click();
   const providerForm = page.getByRole("form", { name: "Connect model provider" });
   await providerForm.getByRole("combobox", { name: "Provider", exact: true }).selectOption("deepseek");
@@ -2281,10 +2280,10 @@ test("preserves the task at a narrow viewport without document overflow", async 
   await expect(page.getByRole("heading", { name: "Your first trusted task" })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Message to agent" })).toBeVisible();
   await page.getByRole("button", { name: "Settings" }).click();
-  await chooseSettingsSection(page, "Harnesses");
-  await expect(page.getByRole("heading", { name: "Harnesses", exact: true })).toBeVisible();
+  await chooseSettingsSection(page, "Runtimes");
+  await expect(page.getByRole("heading", { name: "Runtimes", exact: true })).toBeVisible();
   await expect(page.getByRole("radiogroup", { name: "Harness details" })).toBeVisible();
-  const harnessHeight = await page.locator(".harness-workbench").evaluate((element) => element.getBoundingClientRect().height);
+  const harnessHeight = await page.locator(".runtime-workbench").evaluate((element) => element.getBoundingClientRect().height);
   const modelListHeight = await page.locator(".harness-model-list").evaluate((element) => element.getBoundingClientRect().height);
   expect(harnessHeight).toBeLessThan(1_000);
   expect(modelListHeight).toBeLessThanOrEqual(360);

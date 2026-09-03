@@ -1,6 +1,7 @@
 export const settingsSectionIds = [
   "general",
   "agent",
+  "runtimes",
   "harnesses",
   "models",
   "metrics",
@@ -45,24 +46,18 @@ export const settingsNavigation: SettingsNavGroup[] = [
     }],
   },
   {
-    label: "Runtimes",
+    label: "Execution",
     items: [
       {
-        id: "harnesses",
-        label: "Harnesses",
-        description: "Installed coding agents, models, and conformance on this device.",
+        id: "runtimes",
+        label: "Runtimes",
+        description: "Installed coding agents, direct providers, models, and conformance.",
         icon: "terminal",
       },
       {
-        id: "models",
-        label: "Model providers",
-        description: "Direct API connections outside installed harnesses.",
-        icon: "sparkle",
-      },
-      {
         id: "metrics",
-        label: "Harness metrics",
-        description: "Opt-in local telemetry to improve harness defaults over time.",
+        label: "Runtime metrics",
+        description: "Opt-in local telemetry for harness and provider runs on this device.",
         icon: "sparkle",
       },
     ],
@@ -111,8 +106,9 @@ export const settingsNavigation: SettingsNavGroup[] = [
 ];
 
 export function settingsNavItem(id: SettingsSectionId): SettingsNavItem {
+  const resolved = id === "harnesses" || id === "models" ? "runtimes" : id;
   for (const group of settingsNavigation) {
-    const item = group.items.find((entry) => entry.id === id);
+    const item = group.items.find((entry) => entry.id === resolved);
     if (item) return item;
   }
   return settingsNavigation[0]!.items[0]!;

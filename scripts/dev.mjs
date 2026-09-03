@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
 
+const servicePort = Number(process.env.PORT ?? 4317);
+
 const children = [
-  spawn("npm", ["run", "dev:service"], { stdio: "inherit", shell: false }),
+  spawn("npm", ["run", "dev:service"], { stdio: "inherit", shell: false, env: { ...process.env, PORT: String(servicePort) } }),
   spawn("npm", ["run", "dev:web"], { stdio: "inherit", shell: false }),
 ];
 
@@ -19,7 +21,12 @@ for (const child of children) {
     close(1);
   });
   child.once("exit", (code, signal) => {
-    if (!closing && code !== 0 && signal !== "SIGTERM") close(code ?? 1);
+    if (!closing && code !== 0 && signal !== "SIGTERM") {
+      console.error(
+        `A dev process exited unexpectedly. If the service failed with EADDRINUSE on ${servicePort}, stop the other listener with: lsof -ti tcp:${servicePort} | xargs kill`,
+      );
+      close(code ?? 1);
+    }
   });
 }
 

@@ -5,6 +5,7 @@ import { aggregateHarnessMetrics } from "../src/metrics/harness-run-metrics-aggr
 import {
   autoApplyHarnessRecommendation,
   deriveHarnessRecommendations,
+  deriveHarnessRoutingHint,
 } from "../src/metrics/harness-metrics-recommendations.js";
 
 function sampleRun(overrides: Partial<HarnessRunMetricsV1> = {}): HarnessRunMetricsV1 {
@@ -121,4 +122,89 @@ test("does not auto-apply when disabled or already on the suggested runtime", ()
     harnessMetricsAutoApply: true,
   };
   assert.equal(autoApplyHarnessRecommendation(summary, alreadyApplied, ["codex", "claude-code"]), null);
+});
+
+test("suggests verify-conformance when default runtime is stale", () => {
+  const summary = aggregateHarnessMetrics([...reliableClaudeRuns(4)], { enabled: true });
+  const recommendations = deriveHarnessRecommendations(summary, {
+    defaultMode: "ask",
+    defaultRuntimeId: "claude-code",
+    installedRuntimeIds: ["claude-code"],
+    runtimeConformance: { "claude-code": "stale" },
+  });
+  const verify = recommendations.find((item) => item.kind === "verify-conformance");
+  assert.ok(verify);
+  assert.equal(verify?.action?.type, "probe-runtime");
+});
+
+test("flags high compaction and token usage on a runtime/mode pair", () => {
+  const summary = aggregateHarnessMetrics([
+    ...Array.from({ length: 4 }, () => sampleRun({
+      runtimeId: "codex",
+      compactions: 2,
+      tokens: { total: 60_000 },
+    })),
+  ], { enabled: true });
+  const recommendations = deriveHarnessRecommendations(summary, {
+    defaultMode: "ask",
+    defaultRuntimeId: "codex",
+    installedRuntimeIds: ["codex"],
+  });
+  assert.ok(recommendations.some((item) => item.kind === "high-compaction"));
+  assert.ok(recommendations.some((item) => item.kind === "high-tokens"));
+});
+
+test("prefers a stronger mode on the default runtime", () => {
+  const summary = aggregateHarnessMetrics([
+    ...Array.from({ length: 4 }, () => sampleRun({
+      runtimeId: "codex",
+      mode: "ask",
+      outcome: "failed",
+      tools: [{ id: "read-file", calls: 4, successes: 1, failures: 3, totalDurationMs: 400 }],
+      verification: { runs: 1, passed: 0 },
+    })),
+    ...Array.from({ length: 4 }, () => sampleRun({
+      runtimeId: "codex",
+      mode: "plan",
+      outcome: "complete",
+      tools: [{ id: "read-file", calls: 4, successes: 4, failures: 0, totalDurationMs: 200 }],
+      verification: { runs: 1, passed: 1 },
+    })),
+  ], { enabled: true });
+  const recommendations = deriveHarnessRecommendations(summary, {
+    defaultMode: "ask",
+    defaultRuntimeId: "codex",
+    installedRuntimeIds: ["codex"],
+  });
+  const preferMode = recommendations.find((item) => item.kind === "prefer-mode");
+  assert.ok(preferMode);
+  assert.equal(preferMode?.action?.type, "set-default-mode");
+  assert.equal(preferMode?.action?.type === "set-default-mode" ? preferMode.action.mode : undefined, "plan");
+});
+
+test("derives composer routing hint from prefer-runtime and prefer-mode", () => {
+  const summary = aggregateHarnessMetrics([
+    ...strugglingCodexRuns(4),
+    ...reliableClaudeRuns(4),
+    ...Array.from({ length: 4 }, () => sampleRun({
+      runtimeId: "codex",
+      mode: "plan",
+      outcome: "complete",
+      tools: [{ id: "read-file", calls: 4, successes: 4, failures: 0, totalDurationMs: 200 }],
+      verification: { runs: 1, passed: 1 },
+    })),
+  ], { enabled: true });
+  const recommendations = deriveHarnessRecommendations(summary, {
+    defaultMode: "ask",
+    defaultRuntimeId: "codex",
+    installedRuntimeIds: ["codex", "claude-code"],
+  });
+  const hint = deriveHarnessRoutingHint(recommendations, {
+    defaultMode: "ask",
+    defaultRuntimeId: "codex",
+    installedRuntimeIds: ["codex", "claude-code"],
+  });
+  assert.ok(hint);
+  assert.equal(hint?.suggestedRuntimeId, "claude-code");
+  assert.equal(hint?.suggestedMode, "plan");
 });

@@ -15,12 +15,11 @@ import type {
   TeamPolicyCreateRequest,
 } from "@vraxis/code-contracts";
 import AgentDefaults from "./AgentDefaults.vue";
-import AgentHarnessSettings from "./AgentHarnessSettings.vue";
 import AuthorityModeSettings from "./AuthorityModeSettings.vue";
 import GeneralSettings from "./GeneralSettings.vue";
+import RuntimeSettings from "./RuntimeSettings.vue";
 import HarnessMetricsSettings from "./HarnessMetricsSettings.vue";
 import McpConnectionCenter from "./McpConnectionCenter.vue";
-import ModelProviderSettings from "./ModelProviderSettings.vue";
 import PermissionCenter from "./PermissionCenter.vue";
 import ProofTrustSettings from "./ProofTrustSettings.vue";
 import SupportDiagnostics from "./SupportDiagnostics.vue";
@@ -56,6 +55,7 @@ const props = defineProps<{
   mcpProjects: ProjectSummary[];
   selectedProjectId?: string;
   modelProviders: ModelProviderSummary[];
+  hostedRuntimes: RuntimeSummary[];
 }>();
 
 const emit = defineEmits<{
@@ -79,7 +79,18 @@ const emit = defineEmits<{
   "providers-changed": [];
 }>();
 
-const activeItem = computed(() => settingsNavItem(props.section));
+const activeItem = computed(() => {
+  if (props.section === "harnesses" || props.section === "models") {
+    return settingsNavItem("runtimes");
+  }
+  return settingsNavItem(props.section);
+});
+
+const runtimeFocus = computed(() => {
+  if (props.section === "models") return "provider";
+  if (props.section === "harnesses") return "harness";
+  return undefined;
+});
 
 function chooseSection(id: SettingsSectionId): void {
   emit("update:section", id);
@@ -153,31 +164,30 @@ function chooseSection(id: SettingsSectionId): void {
             />
           </template>
 
-          <AgentHarnessSettings
-            v-else-if="section === 'harnesses'"
-            :runtimes="runtimes"
+          <RuntimeSettings
+            v-else-if="section === 'runtimes' || section === 'harnesses' || section === 'models'"
+            :local-runtimes="runtimes"
+            :hosted-runtimes="hostedRuntimes"
+            :providers="modelProviders"
             :settings="settings"
             :saving="saving"
             :refreshing="runtimeRefreshing"
             :probing-runtime-id="runtimeProbingId"
+            :initial-focus="runtimeFocus"
             @update="emit('update', $event)"
             @refresh="emit('refresh-runtimes')"
             @maintain="(runtime, action) => emit('maintain', runtime, action)"
             @probe="emit('probe', $event)"
-          />
-
-          <ModelProviderSettings
-            v-else-if="section === 'models'"
-            :providers="modelProviders"
             @connected="emit('provider-connected', $event)"
             @changed="emit('providers-changed')"
+            @navigate="chooseSection"
           />
 
           <HarnessMetricsSettings
             v-else-if="section === 'metrics'"
             :settings="settings"
             :saving="saving"
-            :runtimes="runtimes"
+            :runtimes="[...runtimes, ...hostedRuntimes]"
             @update="emit('update', $event)"
             @probe="emit('probe', $event)"
           />

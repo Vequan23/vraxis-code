@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { HarnessMetricsSummaryV1, HarnessRunMetricsV1 } from "@vraxis/code-contracts";
 import { aggregateHarnessMetrics } from "./harness-run-metrics-aggregation.js";
-import { deriveHarnessRecommendations, type HarnessRecommendationContext } from "./harness-metrics-recommendations.js";
+import { deriveHarnessRecommendations, deriveHarnessRoutingHint, type HarnessRecommendationContext } from "./harness-metrics-recommendations.js";
 
 interface HarnessMetricsData {
   schemaVersion: 1;
@@ -69,9 +69,12 @@ export class HarnessRunMetricsRegistry {
       ...(windowDays !== undefined ? { windowDays } : {}),
     });
     if (!recommendationContext) return summary;
+    const recommendations = deriveHarnessRecommendations(summary, recommendationContext);
+    const routingHint = deriveHarnessRoutingHint(recommendations, recommendationContext);
     return {
       ...summary,
-      recommendations: deriveHarnessRecommendations(summary, recommendationContext),
+      recommendations,
+      ...(routingHint ? { routingHint } : {}),
     };
   }
 

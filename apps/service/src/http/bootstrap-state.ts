@@ -36,6 +36,7 @@ export interface BootstrapDependencies {
   settings: SettingsRegistry;
   worktrees: GitWorktrees;
   discoverLocalRuntimes: () => Promise<RuntimeSummary[]>;
+  discoverProviderRuntimes: () => Promise<RuntimeSummary[]>;
   modelProviders: ModelProviderRegistry;
   mcpServers: McpServerRegistry;
   skills: SkillRegistry;
@@ -94,8 +95,8 @@ export async function resolveBootstrapContext(
   const selected = data.projects.find((project) => project.id === data.selectedProjectId);
   const selectedSession = sessionData.draftProjectId === selected?.id
     ? undefined
-    : sessionData.sessions.find((session) => session.id === sessionData.selectedSessionId && session.projectId === selected?.id)
-      ?? sessionData.sessions.find((session) => session.projectId === selected?.id);
+    : sessionData.sessions.find((session) => session.id === sessionData.selectedSessionId && session.projectId === selected?.id && !session.archivedAt)
+      ?? sessionData.sessions.find((session) => session.projectId === selected?.id && !session.archivedAt);
   return {
     data,
     sessionData,
@@ -186,7 +187,7 @@ export async function buildBootstrapState(
         projectDoctor,
       ] = await Promise.all([
         deps.discoverLocalRuntimes(),
-        deps.modelProviders.runtimes(),
+        deps.discoverProviderRuntimes(),
         deps.modelProviders.summaries(),
         deps.mcpServers.summaries(),
         ctx.selected ? deps.skills.summaries(ctx.selected.path) : Promise.resolve([]),
