@@ -43,6 +43,9 @@ test("includes product and attached guidance skills without granting tools", () 
   assert.match(attachedSkill?.instructions ?? "", /guidance only/);
   assert.ok(skills.some((skill) => skill.id === vraxisCodeSkill.id));
   assert.ok(skills.some((skill) => skill.id === verificationRecipeSkill.id));
+  assert.match(vraxisCodeSkill.instructions, /Do not request verification because an external page failed/);
+  assert.match(vraxisCodeSkill.instructions, /Do not retry the same URL/);
+  assert.match(verificationRecipeSkill.instructions, /If the current page is not the configured target/);
   assert.ok(activeRuntimeSkillNames("plan").includes("Project architecture"));
 });
 

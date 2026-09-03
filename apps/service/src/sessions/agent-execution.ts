@@ -5,18 +5,22 @@ import {
   safeFailure,
   textMessage,
   type CodingRuntimeEngine,
+  type CodingRuntimeResult,
   type ContextUsageBreakdown,
   type ContextArtifact,
   type EventSink,
 } from "@vraxis/agent-v";
 import { LocalCliRuntimeEngine } from "@vraxis/agent-v/local-cli";
-import { modeAgentProfile, type PromptAttachment, type SessionSummary, type WorktreeSummary } from "@vraxis/code-contracts";
+import { modeAgentProfile, type HarnessRunOutcome, type PromptAttachment, type SessionSummary, type VerificationRunSummary, type WorktreeSummary } from "@vraxis/code-contracts";
 import type { AttachmentStore } from "../attachments/attachment-store.js";
 import type { ResolvedSkill } from "../skills/skill-registry.js";
 import type { BrowserWorkspace } from "../browser/browser-workspace.js";
 import { activeRuntimeSkillNames, attachedSkillsJsonMetadata, modeRuntimeReceipt } from "../runtimes/mode-agent-runtime.js";
 import { BUILD_GIT_POLICY_INSTRUCTION, buildWorktreeInstructionBlock, summarizeWorktreeForEvidence, worktreeRuntimeMetadata } from "./build-workspace-context.js";
 import { SessionRegistry, type PendingSteeringInput } from "./session-registry.js";
+import { TASK_RECOVERY_INSTRUCTION } from "./task-recovery-instruction.js";
+import type { HarnessRunMetricsRegistry } from "../metrics/harness-run-metrics-registry.js";
+import { RunMetricsCollector, runMetricsTelemetry } from "../metrics/run-metrics-collector.js";
 
 interface AskResult {
   answer: string;
@@ -76,6 +80,13 @@ const askOutput = defineOutput<AskResult>({
   },
 });
 
+interface RunMetricsContext {
+  registry: HarnessRunMetricsRegistry;
+  enabled: () => Promise<boolean>;
+  verificationRuns: (sessionId: string) => Promise<VerificationRunSummary[]>;
+  afterRecorded?: () => Promise<void>;
+}
+
 export class AgentExecutionCoordinator {
   private readonly controllers = new Map<string, AbortController>();
   private readonly queues = new Map<string, QueuedExecution[]>();
@@ -87,6 +98,7 @@ export class AgentExecutionCoordinator {
     private readonly engine: CodingRuntimeEngine = new LocalCliRuntimeEngine(),
     private readonly importedAttachments?: AttachmentStore,
     private readonly browser?: BrowserWorkspace,
+    private readonly runMetrics?: RunMetricsContext,
   ) {}
 
   async start(
@@ -195,10 +207,13 @@ export class AgentExecutionCoordinator {
     instructionEventId?: string,
   ): Promise<void> {
     const approvalTools = new Map<string, string>();
+    const runId = crypto.randomUUID();
+    const metricsCollector = new RunMetricsCollector(runId, session);
     const events: EventSink = {
       emit: async (event) => {
         if (controller.signal.aborted) return;
         if (event.type === "run.started") {
+          metricsCollector.noteRuntimeStarted(event.provenance.runtimeVersion);
           const runtimeVersion = event.provenance.runtimeVersion ? ` ${event.provenance.runtimeVersion}` : "";
           await this.sessions.progress(
             session.id,
@@ -211,15 +226,18 @@ export class AgentExecutionCoordinator {
         } else if (event.type === "model.started") {
           await this.sessions.progress(
             session.id,
-            event.step === 1 ? session.mode === "build" ? "Implementing the task" : "Reading the project" : "Checking the result",
-            session.mode === "build"
-              ? "The agent can edit files inside the isolated worktree. The source project stays unchanged."
-              : "The agent is gathering repository evidence without changing files.",
+            event.step === 1 ? session.mode === "build" ? "Implementing the task" : "Reading the project" : "Continuing from evidence",
+            event.step === 1
+              ? session.mode === "build"
+                ? "The agent can edit files inside the isolated worktree. The source project stays unchanged."
+                : "The agent is gathering repository evidence without changing files."
+              : "The agent is using tool results to continue or answer. Blocked web results should not be retried.",
             "running",
           );
         } else if (event.type === "model.completed") {
           await this.sessions.progress(session.id, "Answer prepared", "The runtime returned schema-valid output.", "complete");
         } else if (event.type === "context.measured") {
+          metricsCollector.noteContextMeasured(event.usage);
           const usage = event.usage;
           await this.sessions.telemetry(
             session.id,
@@ -227,6 +245,7 @@ export class AgentExecutionCoordinator {
             contextUsageDetail(usage),
           );
         } else if (event.type === "context.compacted") {
+          metricsCollector.noteCompaction(event.usage);
           await this.sessions.telemetry(
             session.id,
             "Context compacted",
@@ -236,17 +255,21 @@ export class AgentExecutionCoordinator {
           const activity = toolActivity(event.toolName);
           await this.sessions.activity(session.id, "tool", activity.title, activity.detail, "running");
         } else if (event.type === "tool.completed") {
+          metricsCollector.noteToolCompleted(event.toolName, event.durationMs);
           const activity = toolActivity(event.toolName);
           const duration = event.durationMs === undefined ? "Completed with a retained task receipt." : `Completed in ${elapsedLabel(event.durationMs)} with a retained task receipt.`;
           await this.sessions.activity(session.id, "tool", activity.title, duration, "complete");
         } else if (event.type === "tool.failed") {
+          metricsCollector.noteToolFailed(event.toolName);
           const activity = toolActivity(event.toolName);
           await this.sessions.activity(session.id, "tool", activity.title, event.message, "failed");
         } else if (event.type === "approval.requested") {
+          metricsCollector.noteApprovalRequested(event.approvalId);
           approvalTools.set(event.approvalId, event.toolName);
           const activity = toolActivity(event.toolName);
           await this.sessions.activity(session.id, "approval", `Approval · ${activity.title}`, event.reason, "pending");
         } else if (event.type === "approval.resolved") {
+          metricsCollector.noteApprovalResolved(event.approvalId, event.decision);
           const activity = toolActivity(approvalTools.get(event.approvalId) ?? "guarded action");
           await this.sessions.activity(
             session.id,
@@ -295,7 +318,7 @@ export class AgentExecutionCoordinator {
         ...(session.modelId ? { runtimeModel: session.modelId } : {}),
         workspacePath: projectPath,
         workspaceAccess: session.mode === "build" ? "workspace-write" : "read-only",
-        runId: crypto.randomUUID(),
+        runId,
         sessionId: session.id,
         abortSignal: controller.signal,
         metadata: {
@@ -322,7 +345,8 @@ export class AgentExecutionCoordinator {
             skills.length
               ? `Attached skills (${skills.map((item) => `${item.reference.name} (${item.reference.version})`).join(", ")}) are available as artifacts. Apply them when relevant.`
               : "",
-            "When the current user turn names a URL, use the typed http-fetch tool for bounded HTML, text, JSON, or API reads. Use the controlled browser only when JavaScript, authentication, visual evidence, or interaction is required. Never use raw curl through the terminal when the typed web tool can perform the request.",
+            "When the current user turn names a URL, use the typed http-fetch tool for bounded HTML, text, JSON, or API reads. Use the controlled browser only when JavaScript, authentication, visual evidence, or interaction is required, and never to bypass a block or bot-check page. Never use raw curl through the terminal when the typed web tool can perform the request.",
+            TASK_RECOVERY_INSTRUCTION,
             "Name the relevant project-relative file paths in the answer.",
             ...(session.mode === "build" && session.worktree ? [buildWorktreeInstructionBlock(session.worktree)] : []),
             session.mode === "build"
@@ -358,12 +382,15 @@ export class AgentExecutionCoordinator {
         await this.sessions.markSteeringHandled(session.id, instructionEventId).catch(() => undefined);
       }
       const hasQueuedFollowUp = (this.queues.get(session.id)?.length ?? 0) > 0;
+      const outcome: HarnessRunOutcome = hasQueuedFollowUp ? "turn-complete" : "complete";
       if (hasQueuedFollowUp) await this.sessions.completeTurn(session.id, result.output.answer, evidenceDetail);
       else await this.sessions.complete(session.id, result.output.answer, evidenceDetail);
+      await this.recordRunMetrics(metricsCollector, outcome, result.durationMs, result);
       completed = true;
     } catch (error) {
       if (controller.signal.aborted) return;
       const failure = safeFailure(error);
+      await this.recordRunMetrics(metricsCollector, "failed", metricsCollector.elapsedMs());
       await this.sessions.fail(session.id, `${failure.message}${failure.retryable ? " Check the runtime, then resume this task." : ""}`);
     } finally {
       const redirected = this.redirects.delete(session.id);
@@ -373,6 +400,22 @@ export class AgentExecutionCoordinator {
       if (this.controllers.get(session.id) === controller) this.controllers.delete(session.id);
       if (completed || redirected) await this.drainQueue(session.id);
     }
+  }
+
+  private async recordRunMetrics(
+    collector: RunMetricsCollector,
+    outcome: HarnessRunOutcome,
+    durationMs: number,
+    result?: Pick<CodingRuntimeResult<unknown>, "usage">,
+  ): Promise<void> {
+    if (!this.runMetrics) return;
+    if (!(await this.runMetrics.enabled())) return;
+    const verificationRuns = await this.runMetrics.verificationRuns(collector.session.id);
+    const snapshot = collector.buildSnapshot(outcome, durationMs, result, verificationRuns);
+    const telemetry = runMetricsTelemetry(snapshot);
+    await this.sessions.telemetry(collector.session.id, telemetry.title, telemetry.detail, snapshot);
+    await this.runMetrics.registry.record(collector.buildRecord(outcome, durationMs, result, verificationRuns));
+    await this.runMetrics.afterRecorded?.().catch(() => undefined);
   }
 
   private async drainQueue(sessionId: string): Promise<void> {

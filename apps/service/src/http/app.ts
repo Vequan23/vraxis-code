@@ -74,6 +74,9 @@ import { createUnderstandArtifact } from "../receipts/understand-artifact.js";
 import { ProofTrustRegistry } from "../receipts/proof-trust.js";
 import { TeamPolicyRegistry } from "../team-policy/team-policy-registry.js";
 import { createSupportBundle } from "../diagnostics/support-bundle.js";
+import { HarnessRunMetricsRegistry } from "../metrics/harness-run-metrics-registry.js";
+import { exportHarnessMetrics } from "../metrics/harness-run-metrics-aggregation.js";
+import { autoApplyHarnessRecommendation } from "../metrics/harness-metrics-recommendations.js";
 import { redactTaskReceipt } from "../receipts/portable-redaction.js";
 import { DesktopSession } from "./desktop-session.js";
 import { buildBootstrapState, parseBootstrapScope, resolveBootstrapContext } from "./bootstrap-state.js";
@@ -168,6 +171,7 @@ export function createApp(options: AppOptions) {
   const userTerminalStarts = new Map<string, Promise<{ run: TerminalRunSummary; created: boolean }>>();
   const browser = options.browserWorkspace ?? new BrowserWorkspace(options.dataDirectory, credentials, options.browserRelay);
   const verifications = new VerificationRegistry(options.dataDirectory);
+  const harnessRunMetrics = new HarnessRunMetricsRegistry(options.dataDirectory);
   async function proofTrustState() {
     return proofTrust.state(await proofSigner.identity(), await proofSigner.rotationHistory());
   }
@@ -280,11 +284,20 @@ export function createApp(options: AppOptions) {
       },
     };
   }
+  const runMetricsHooks = {
+    afterRecorded: async (): Promise<void> => undefined,
+  };
   const execution = new AgentExecutionCoordinator(
     sessions,
     options.runtimeEngine ?? new VraxisCodeRuntimeEngine(modelProviders, credentials, approvals, browser, terminal, verifications, mcpServers),
     importedAttachments,
     browser,
+    {
+      registry: harnessRunMetrics,
+      enabled: async () => (await settings.read()).harnessMetricsEnabled === true,
+      verificationRuns: (sessionId) => verifications.list(sessionId),
+      afterRecorded: async () => runMetricsHooks.afterRecorded(),
+    },
   );
   const recovery = storageRecovery.then(() => execution.reconcile());
   const discover = options.discover ?? discoverRuntimes;
@@ -295,6 +308,30 @@ export function createApp(options: AppOptions) {
     options.runtimeProbeEngine ?? new LocalCliRuntimeEngine(),
   );
   const discoverLocalRuntimes = async () => runtimeConformance.decorate(await runtimeDiscoveryCache.get());
+  async function installedRuntimeIds(): Promise<string[]> {
+    return [...await discoverLocalRuntimes(), ...await modelProviders.runtimes()]
+      .filter((item) => item.availability === "installed")
+      .map((item) => item.id);
+  }
+  async function harnessRecommendationContext(currentSettings: Awaited<ReturnType<typeof settings.read>>) {
+    return {
+      defaultRuntimeId: currentSettings.defaultRuntimeId,
+      defaultMode: currentSettings.defaultMode,
+      disabledRuntimeIds: currentSettings.disabledRuntimeIds,
+      installedRuntimeIds: await installedRuntimeIds(),
+    };
+  }
+  runMetricsHooks.afterRecorded = async () => {
+    const currentSettings = await settings.read();
+    if (!currentSettings.harnessMetricsEnabled || !currentSettings.harnessMetricsAutoApply) return;
+    const summary = await harnessRunMetrics.summary(
+      true,
+      undefined,
+      await harnessRecommendationContext(currentSettings),
+    );
+    const patch = autoApplyHarnessRecommendation(summary, currentSettings, await installedRuntimeIds());
+    if (patch) await settings.update(patch);
+  };
   const folderPicker = options.folderPicker ?? pickProjectFolderWithSystemDialog;
 
   async function validateAttachmentFiles(
@@ -723,6 +760,7 @@ export function createApp(options: AppOptions) {
       if (request.method === "GET" && url.pathname === "/api/support-bundle") {
         const projectData = await registry.read();
         const sessionData = await sessions.read();
+        const currentSettings = await settings.read();
         const bundle = createSupportBundle({
           applicationVersion: "0.1.0",
           contractVersion,
@@ -734,6 +772,9 @@ export function createApp(options: AppOptions) {
           terminalRuns: await terminal.list(),
           verificationRuns: await verifications.list(),
           ...(options.startupRecovery ? { startupRecovery: options.startupRecovery } : {}),
+          ...(currentSettings.harnessMetricsEnabled && currentSettings.harnessMetricsExportEnabled
+            ? { harnessMetrics: await harnessRunMetrics.summary(true, undefined, await harnessRecommendationContext(currentSettings)) }
+            : {}),
         });
         response.writeHead(200, {
           "content-type": "application/vnd.vraxis.support-bundle+json; charset=utf-8",
@@ -782,6 +823,38 @@ export function createApp(options: AppOptions) {
       if (request.method === "POST" && url.pathname === "/api/settings") {
         const input = parseUpdateSettingsRequest(await body(request));
         json(response, 200, await settings.update(input));
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/harness-metrics") {
+        const currentSettings = await settings.read();
+        const windowDays = Number.parseInt(url.searchParams.get("windowDays") ?? "30", 10);
+        json(response, 200, await harnessRunMetrics.summary(
+          currentSettings.harnessMetricsEnabled === true,
+          Number.isFinite(windowDays) && windowDays > 0 ? windowDays : 30,
+          await harnessRecommendationContext(currentSettings),
+        ));
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/harness-metrics/export") {
+        const currentSettings = await settings.read();
+        if (!currentSettings.harnessMetricsEnabled) throw new TypeError("Enable harness metrics before exporting.");
+        const summary = await harnessRunMetrics.summary(true, undefined, await harnessRecommendationContext(currentSettings));
+        const exportBundle = exportHarnessMetrics(summary);
+        response.writeHead(200, {
+          "content-type": "application/vnd.vraxis.harness-metrics+json; charset=utf-8",
+          "content-disposition": `attachment; filename="vraxis-harness-metrics-${exportBundle.generatedAt.slice(0, 10)}.json"`,
+          "cache-control": "no-store",
+          "x-content-type-options": "nosniff",
+        });
+        response.end(`${JSON.stringify(exportBundle, null, 2)}\n`);
+        return;
+      }
+
+      if (request.method === "DELETE" && url.pathname === "/api/harness-metrics") {
+        await harnessRunMetrics.clear();
+        json(response, 200, { status: "cleared" });
         return;
       }
 
@@ -1175,14 +1248,16 @@ export function createApp(options: AppOptions) {
         const liveEvidenceTtlMs = 200;
         let cachedLiveEvidence: SessionLiveEvidenceResponse | undefined;
         let cachedLiveEvidenceAt = 0;
-        const liveEvidence = async (): Promise<SessionLiveEvidenceResponse> => {
+        const liveEvidence = async (force = false): Promise<SessionLiveEvidenceResponse> => {
           const now = Date.now();
-          if (!cachedLiveEvidence || now - cachedLiveEvidenceAt >= liveEvidenceTtlMs) {
+          if (force || !cachedLiveEvidence || now - cachedLiveEvidenceAt >= liveEvidenceTtlMs) {
             cachedLiveEvidence = await sessionLiveEvidence(sessionId);
             cachedLiveEvidenceAt = now;
           }
           return cachedLiveEvidence;
         };
+        const needsFreshEvidence = (update: Parameters<Parameters<typeof sessions.subscribe>[1]>[0]) =>
+          update.events.some((event) => event.kind === "approval" && event.state === "pending");
         const send = (event: "snapshot" | "update", payload: SessionStreamPayload) => {
           if (closed || response.writableEnded) return;
           try {
@@ -1194,7 +1269,7 @@ export function createApp(options: AppOptions) {
         const deliver = (update: Parameters<Parameters<typeof sessions.subscribe>[1]>[0]) => {
           delivery = delivery.then(async () => {
             if (closed || response.writableEnded) return;
-            send("update", { ...update, evidence: await liveEvidence() });
+            send("update", { ...update, evidence: await liveEvidence(needsFreshEvidence(update)) });
           }).catch(() => {
             if (!closed && !response.writableEnded) {
               try { response.write("event: refresh\ndata: {}\n\n"); } catch { closed = true; }

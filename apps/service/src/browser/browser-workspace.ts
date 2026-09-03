@@ -16,6 +16,7 @@ import type {
 import { BrowserStateVault, type BrowserStorageState } from "./browser-state-vault.js";
 import type { BrowserAutomationObservation, BrowserAutomationRelay } from "./browser-automation.js";
 import { normalizeBrowserObservation } from "./browser-automation.js";
+import { annotateWebResearchResult } from "../web/web-research-observation.js";
 
 interface BrowserPage {
   id: string;
@@ -1055,7 +1056,7 @@ export class BrowserWorkspace {
   }
 
   private snapshotResult(state: BrowserSessionSummary): JsonObject {
-    return {
+    return annotateWebResearchResult({
       url: state.url,
       title: state.title,
       visibleText: state.snapshot,
@@ -1075,6 +1076,10 @@ export class BrowserWorkspace {
         status: item.status ?? null,
         failure: item.failure ?? null,
       })),
-    };
+    }, {
+      url: state.url,
+      title: state.title,
+      visibleText: state.snapshot,
+    }) as unknown as JsonObject;
   }
 }

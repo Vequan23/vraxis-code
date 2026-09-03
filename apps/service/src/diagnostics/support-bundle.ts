@@ -1,6 +1,7 @@
 import { arch, platform } from "node:os";
 import type {
   ApprovalSummary,
+  HarnessMetricsSummaryV1,
   ProjectSummary,
   RuntimeSummary,
   SessionSummary,
@@ -21,6 +22,7 @@ export interface SupportBundleInput {
   terminalRuns: TerminalRunSummary[];
   verificationRuns: VerificationRunSummary[];
   startupRecovery?: StartupRecoverySummary;
+  harnessMetrics?: HarnessMetricsSummaryV1;
 }
 
 function sessionCounts(sessions: SessionSummary[]): Record<SessionSummary["status"], number> {
@@ -81,5 +83,6 @@ export function createSupportBundle(input: SupportBundleInput): SupportBundleV1 
       includesProjectContent: false,
       includesCredentials: false,
     },
+    ...(input.harnessMetrics ? { harnessMetrics: input.harnessMetrics } : {}),
   };
 }

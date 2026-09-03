@@ -9,7 +9,6 @@ import type {
   OsxPlanStep,
 } from "@vraxis/osx-components";
 import {
-  appThemes,
   promptAttachmentLimits,
   promptSkillLimits,
   type AppTheme,
@@ -54,16 +53,16 @@ import {
 import { demoState, emptyState } from "./workspace/demo-state.js";
 import { chooseProjectFolder } from "./projects/project-picker.js";
 import ProjectSourceList from "./projects/ProjectSourceList.vue";
-import ModelProviderSettings from "./settings/ModelProviderSettings.vue";
-import McpConnectionCenter from "./settings/McpConnectionCenter.vue";
-import AgentHarnessSettings from "./settings/AgentHarnessSettings.vue";
-import AgentDefaults from "./settings/AgentDefaults.vue";
-import AuthorityModeSettings from "./settings/AuthorityModeSettings.vue";
-import PermissionCenter from "./settings/PermissionCenter.vue";
-import ProofTrustSettings from "./settings/ProofTrustSettings.vue";
-import TeamPolicySettings from "./settings/TeamPolicySettings.vue";
-import SupportDiagnostics from "./settings/SupportDiagnostics.vue";
+import SettingsShell from "./settings/SettingsShell.vue";
+import { type SettingsSectionId } from "./settings/settings-navigation.js";
 import FirstRunJourney from "./onboarding/FirstRunJourney.vue";
+import TaskRuntimePicker from "./composer/TaskRuntimePicker.vue";
+import ComposerMenuPicker from "./composer/ComposerMenuPicker.vue";
+import {
+  buildComposerSlashCommandSuggestions,
+  composerSlashCommandById,
+  type ComposerSlashCommandContext,
+} from "./composer/composer-slash-commands.js";
 import TerminalWorkbench from "./terminal/TerminalWorkbench.vue";
 import WorkspaceSplash from "./workspace/WorkspaceSplash.vue";
 import type { FirstRunActionId } from "./onboarding/first-run-readiness.js";
@@ -88,6 +87,7 @@ const previewVariant = new URLSearchParams(window.location.search).get("preview"
 const previewMode = Boolean(previewVariant);
 const state = reactive<BootstrapState>(structuredClone(previewVariant === "project" ? demoState : emptyState));
 const activeView = ref<"workspace" | "settings">("workspace");
+const settingsSection = ref<SettingsSectionId>("general");
 const inspector = ref<InspectorView>("files");
 const inspectorPanelWidth = ref(480);
 const mode = ref<SessionMode>(state.settings.defaultMode);
@@ -140,7 +140,12 @@ const settingsSaving = ref(false);
 const runtimeRefreshing = ref(false);
 const runtimeProbingId = ref("");
 const settingsError = ref("");
-const runtimeActionNotice = ref("");
+interface HarnessNotice {
+  tone: "success" | "warning" | "error" | "info";
+  title: string;
+  description: string;
+}
+const harnessNotice = ref<HarnessNotice | null>(null);
 const permissionRules = ref<ApprovalRuleSummary[]>([]);
 const permissionLoading = ref(false);
 const permissionError = ref("");
@@ -310,35 +315,6 @@ const composerModelOptions = computed<OsxAgentComposerOption[]>(() => {
   }
   return options;
 });
-const composerModelLabel = computed(() => {
-  const selected = modelId.value;
-  if (!selected) return "Runtime default";
-  return modelSuggestions.value.find((item) => item.id === selected)?.name ?? selected;
-});
-const composerSuggestions = computed<OsxAgentComposerSuggestion[]>(() => [
-  ...state.files.map((file) => ({
-    id: `project-file:${file.path}`,
-    kind: "file" as const,
-    trigger: "@" as const,
-    label: file.path,
-    description: "Approved project file",
-    icon: "file-code" as const,
-    keywords: file.path.split("/"),
-    selectionBehavior: "attach" as const,
-  })),
-  ...state.skills.map((skill) => ({
-    id: `skill:${skill.id}`,
-    kind: "skill" as const,
-    trigger: "$" as const,
-    label: skill.name,
-    description: skill.description,
-    icon: "sparkle" as const,
-    badge: skill.scopes.includes("project") ? "Project" : "Local",
-    group: "Skills",
-    keywords: [skill.name, skill.description, ...skill.scopes, ...skill.runtimes],
-    selectionBehavior: "attach" as const,
-  })),
-]);
 const browserComposerContext = computed<OsxAgentComposerContextItem | undefined>(() => state.browser?.url ? {
   id: "browser:current-page",
   label: state.browser.title || state.browser.url,
@@ -429,6 +405,43 @@ const verificationHasRecipe = computed(() => Boolean(
   || state.projectDoctor?.verificationServices?.length
   || state.projectDoctor?.verificationSource?.browserRequired,
 ));
+const composerSlashCommandContext = computed<ComposerSlashCommandContext>(() => ({
+  previewMode,
+  sessionIsRunning: sessionIsRunning.value,
+  hasSession: Boolean(session.value),
+  hasProject: Boolean(project.value),
+  runtimeCanBuild: runtimeCanBuild.value,
+  verificationHasRecipe: verificationHasRecipe.value,
+  hasChanges: changedFiles.value.length > 0,
+  pendingApprovalCount: pendingApprovals.value.length,
+  hasRuntime: Boolean(runtime.value),
+  startingNewTask: startingNewTask.value,
+}));
+const composerSuggestions = computed<OsxAgentComposerSuggestion[]>(() => [
+  ...buildComposerSlashCommandSuggestions(composerSlashCommandContext.value),
+  ...state.files.map((file) => ({
+    id: `project-file:${file.path}`,
+    kind: "file" as const,
+    trigger: "@" as const,
+    label: file.path,
+    description: "Approved project file",
+    icon: "file-code" as const,
+    keywords: file.path.split("/"),
+    selectionBehavior: "attach" as const,
+  })),
+  ...state.skills.map((skill) => ({
+    id: `skill:${skill.id}`,
+    kind: "skill" as const,
+    trigger: "$" as const,
+    label: skill.name,
+    description: skill.description,
+    icon: "sparkle" as const,
+    badge: skill.scopes.includes("project") ? "Project" : "Local",
+    group: "Skills",
+    keywords: [skill.name, skill.description, ...skill.scopes, ...skill.runtimes],
+    selectionBehavior: "attach" as const,
+  })),
+]);
 const verificationCanRerun = computed(() => Boolean(latestVerification.value
   && ["passed", "failed", "interrupted"].includes(latestVerification.value.state)));
 const verificationBrowserTarget = computed(() => latestVerification.value?.browserTarget
@@ -624,6 +637,26 @@ const composerModeOptions = computed<OsxAgentComposerOption[]>(() => {
   ];
   return options.map((item) => ({ ...item, disabled: locked, ...(disabledReason ? { disabledReason } : {}) }));
 });
+const composerModeGroups = computed(() => [{
+  heading: "Task mode",
+  options: composerModeOptions.value.map((item) => ({
+    id: item.id,
+    label: item.label,
+    description: item.description,
+    disabled: item.disabled,
+    icon: item.icon,
+  })),
+}]);
+const composerModelGroups = computed(() => [{
+  heading: "Model",
+  options: composerModelOptions.value.map((item) => ({
+    id: item.id,
+    label: item.label,
+    description: item.description,
+    disabled: item.disabled,
+    icon: "bot" as const,
+  })),
+}]);
 const composerState = computed(() => submitting.value
   ? "submitting"
   : taskError.value ? "error"
@@ -663,7 +696,7 @@ const pendingHandoffDestination = computed(() => {
   const runtimeName = state.runtimes.find((item) => item.id === pending.runtimeId)?.name ?? pending.runtimeId;
   return pending.modelId ? `${runtimeName} · ${pending.modelId}` : runtimeName;
 });
-const themeOptions = [
+const themeOptions: Array<{ value: AppTheme; label: string; description: string }> = [
   { value: "graphite-dark", label: "Graphite Dark", description: "Near-black surfaces with restrained neutral controls." },
   { value: "panther", label: "Panther", description: "Dark surfaces for focused work." },
   { value: "aqua", label: "Aqua", description: "Bright surfaces with blue accents." },
@@ -1166,23 +1199,27 @@ watch(
   { flush: "post" },
 );
 
-function chooseMode(event: Event): void {
+function selectTaskRuntime(runtimeId: string): void {
+  selectedRuntimeId.value = runtimeId;
+  selectedModelId.value = state.settings.runtimeModels?.[runtimeId] ?? "";
+  taskError.value = "";
+}
+
+function selectTaskMode(modeId: string): void {
   if (sessionIsRunning.value) return;
-  const nextMode = normalizeMode(eventValue(event));
+  const nextMode = normalizeMode(modeId);
   mode.value = nextMode;
   taskError.value = "";
   if (nextMode === "review") void scrollTaskToBottom();
 }
 
-function chooseTaskRuntime(event: Event): void {
-  selectedRuntimeId.value = (event.target as HTMLSelectElement).value;
-  selectedModelId.value = state.settings.runtimeModels?.[selectedRuntimeId.value] ?? "";
+function selectTaskModel(modelId: string): void {
+  selectedModelId.value = modelId;
   taskError.value = "";
 }
 
-function chooseTaskModel(event: Event): void {
-  selectedModelId.value = String(eventValue(event) ?? "");
-  taskError.value = "";
+function setHarnessNotice(notice: HarnessNotice | null): void {
+  harnessNotice.value = notice;
 }
 
 function updateComposerValue(event: Event): void {
@@ -1512,6 +1549,61 @@ async function loadSelectedFile(): Promise<void> {
 function useSuggestion(prompt: string, nextMode: SessionMode): void {
   composer.value = prompt;
   mode.value = nextMode;
+}
+
+function applySlashPrompt(nextMode: SessionMode, prompt: string): void {
+  if (!sessionIsRunning.value) mode.value = nextMode;
+  composer.value = prompt;
+  taskError.value = "";
+  if (nextMode === "review") void scrollTaskToBottom();
+  void nextTick(() => document.querySelector<HTMLElement>("osx-agent-composer")?.focus());
+}
+
+async function executeComposerSlashCommand(commandId: string): Promise<void> {
+  const command = composerSlashCommandById(commandId);
+  if (!command) return;
+  taskError.value = "";
+
+  switch (command.action.type) {
+    case "prompt":
+      applySlashPrompt(command.action.mode, command.action.prompt);
+      return;
+    case "clear":
+      composer.value = "";
+      composerBranchSlug.value = "";
+      composerAttachments.value = [];
+      composerContextItems.value = [];
+      attachmentReferences.clear();
+      taskError.value = "";
+      void nextTick(() => document.querySelector<HTMLElement>("osx-agent-composer")?.focus());
+      return;
+    case "new-task":
+      await startNewTask();
+      return;
+    case "open-inspector":
+      chooseInspectorView(command.action.view);
+      if (command.action.view === "verify" && project.value && !state.projectDoctor) {
+        await refreshProjectDoctor();
+      }
+      if (command.action.prompt) applySlashPrompt(command.action.prompt.mode, command.action.prompt.text);
+      return;
+    case "doctor":
+      await refreshProjectDoctor();
+      applySlashPrompt("ask", command.action.prompt);
+      return;
+    case "harness-setup":
+      await openHarnessSetup();
+      return;
+    case "probe-runtime":
+      if (runtime.value) await probeRuntime(runtime.value);
+      return;
+  }
+}
+
+function handleComposerCommand(event: Event): void {
+  const suggestion = eventValue(event) as OsxAgentComposerSuggestion | undefined;
+  if (!suggestion?.id.startsWith("command:")) return;
+  void executeComposerSlashCommand(suggestion.id.slice("command:".length));
 }
 
 function submitPrompt(event: Event): void {
@@ -2341,6 +2433,12 @@ async function applyTaskStreamPayload(update: SessionStreamPayload): Promise<voi
     }
   }
   applyLiveEvidence(update.evidence);
+  const pendingApprovalActivity = update.events.some(
+    (event) => event.kind === "approval" && event.state === "pending",
+  );
+  if (pendingApprovalActivity && !state.approvals.some((item) => item.state === "pending")) {
+    await refreshLiveEvidence(update.session.id);
+  }
   serviceOnline.value = true;
   cacheCurrentWorkspace();
   if (followNewestActivity && activityChanged) await scrollTaskToBottom();
@@ -2397,7 +2495,10 @@ async function pollRun(): Promise<void> {
   const steeringCanChangeExistingEvents = sessionEvents.value.some((event) => event.steering?.state === "queued" || event.steering?.state === "running");
   const lastSequence = steeringCanChangeExistingEvents ? 0 : sessionEvents.value[sessionEvents.value.length - 1]?.sequence ?? 0;
   try {
-    const response = await fetch(`/api/sessions/${sessionId}/events?after=${lastSequence}`);
+    const [response, evidenceResponse] = await Promise.all([
+      fetch(`/api/sessions/${sessionId}/events?after=${lastSequence}`),
+      fetch(`/api/sessions/${sessionId}/live-evidence`),
+    ]);
     if (!response.ok) throw new Error("Run updates are unavailable.");
     const update = await response.json() as SessionEventsResponse;
     const followNewestActivity = taskPaneIsNearBottom();
@@ -2416,7 +2517,12 @@ async function pollRun(): Promise<void> {
       }
     }
     if (followNewestActivity && activityChanged) await scrollTaskToBottom();
-    await refreshLiveEvidence(sessionId);
+    if (evidenceResponse.ok) {
+      const evidence = await evidenceResponse.json() as SessionLiveEvidenceResponse & { error?: string };
+      if (session.value?.id === sessionId) applyLiveEvidence(evidence);
+    } else {
+      await refreshLiveEvidence(sessionId);
+    }
     serviceOnline.value = true;
     if (wasRunning && update.session.status !== "running" && update.session.worktree) {
       await refreshWorkspaceEvidence(sessionId);
@@ -2468,18 +2574,17 @@ async function openProjectPicker(): Promise<void> {
   }
 }
 
-function openSettings(): void {
+function openSettings(section: SettingsSectionId = "general"): void {
   settingsError.value = "";
-  runtimeActionNotice.value = "";
+  setHarnessNotice(null);
+  settingsSection.value = section;
   activeView.value = "settings";
   void refreshPermissionRules();
   void refreshTeamPolicy();
 }
 
 async function openHarnessSetup(): Promise<void> {
-  openSettings();
-  await nextTick();
-  document.getElementById("harness-settings-heading")?.scrollIntoView({ block: "start" });
+  openSettings("harnesses");
 }
 
 async function handleFirstRunAction(action: FirstRunActionId): Promise<void> {
@@ -2557,10 +2662,6 @@ async function updateSettings(patch: UpdateSettingsRequest): Promise<void> {
   }
 }
 
-function chooseTheme(event: Event): void {
-  const theme = String(eventValue(event));
-  if (appThemes.includes(theme as AppTheme)) void updateSettings({ theme: theme as AppTheme });
-}
 
 async function refreshRuntimes(): Promise<void> {
   if (runtimeRefreshing.value) return;
@@ -2581,7 +2682,7 @@ async function probeRuntime(runtime: RuntimeSummary): Promise<void> {
   if (runtimeProbingId.value || runtime.availability !== "installed") return;
   runtimeProbingId.value = runtime.id;
   settingsError.value = "";
-  runtimeActionNotice.value = "";
+  setHarnessNotice(null);
   try {
     const result = await post(`/api/runtimes/${encodeURIComponent(runtime.id)}/probe`, {
       consent: true,
@@ -2589,11 +2690,34 @@ async function probeRuntime(runtime: RuntimeSummary): Promise<void> {
     }) as { runtimeId: string; conformance: NonNullable<RuntimeSummary["conformance"]> };
     const index = state.runtimes.findIndex((item) => item.id === result.runtimeId);
     if (index >= 0) state.runtimes[index] = { ...state.runtimes[index]!, conformance: result.conformance };
-    runtimeActionNotice.value = result.conformance.state === "ready"
-      ? `${runtime.name} passed the live Vraxis conformance probe.`
-      : `${runtime.name} completed with ${result.conformance.state} capability. Review the checks before using it.`;
+    const tone = result.conformance.state === "ready"
+      ? "success"
+      : result.conformance.state === "failed"
+        ? "error"
+        : "warning";
+    const title = result.conformance.state === "ready"
+      ? `${runtime.name} verified`
+      : result.conformance.state === "failed"
+        ? `${runtime.name} probe failed`
+        : `${runtime.name} probe finished`;
+    const description = result.conformance.state === "ready"
+      ? "This harness passed the live Vraxis conformance check and is ready for governed tasks."
+      : result.conformance.state === "failed"
+        ? "Review the conformance checks in Settings before using this harness."
+        : `${runtime.name} completed with ${result.conformance.state} capability. Review the checks in Settings before relying on Build mode.`;
+    setHarnessNotice({ tone, title, description });
+    if (activeView.value === "workspace") {
+      await nextTick();
+      document.querySelector(".harness-notice")?.scrollIntoView({ block: "nearest" });
+    }
   } catch (error) {
-    settingsError.value = error instanceof Error ? error.message : "The bounded runtime probe could not finish.";
+    const message = error instanceof Error ? error.message : "The bounded runtime probe could not finish.";
+    setHarnessNotice({
+      tone: "error",
+      title: `${runtime.name} probe could not finish`,
+      description: message,
+    });
+    if (activeView.value === "settings") settingsError.value = message;
   } finally {
     runtimeProbingId.value = "";
   }
@@ -2607,13 +2731,17 @@ function terminalArgument(value: string): string {
 
 async function maintainRuntime(runtime: RuntimeSummary, action: RuntimeMaintenanceActionSummary): Promise<void> {
   settingsError.value = "";
-  runtimeActionNotice.value = "";
+  setHarnessNotice(null);
   if (action.kind === "documentation") {
     try {
       const url = new URL(action.url ?? "");
       if (url.protocol !== "https:" || !runtimeDocumentationHosts.has(url.hostname)) throw new TypeError("Unsupported harness documentation URL.");
       window.open(url.href, "_blank", "noopener,noreferrer");
-      runtimeActionNotice.value = `Opened the official ${runtime.name} setup guide. Return here and check again after installation.`;
+      setHarnessNotice({
+        tone: "info",
+        title: "Setup guide opened",
+        description: `Opened the official ${runtime.name} setup guide. Return here and check again after installation.`,
+      });
     } catch (error) {
       settingsError.value = error instanceof Error ? error.message : "The setup guide could not be opened.";
     }
@@ -2627,7 +2755,11 @@ async function maintainRuntime(runtime: RuntimeSummary, action: RuntimeMaintenan
   if (!project.value) {
     try {
       await navigator.clipboard.writeText(command);
-      runtimeActionNotice.value = `${action.label} was copied. Open a project, then run it from the governed terminal.`;
+      setHarnessNotice({
+        tone: "info",
+        title: "Command copied",
+        description: `${action.label} was copied. Open a project, then run it from the governed terminal.`,
+      });
     } catch {
       settingsError.value = "Choose a project before running this harness action.";
     }
@@ -2644,7 +2776,11 @@ async function maintainRuntime(runtime: RuntimeSummary, action: RuntimeMaintenan
     activeView.value = "workspace";
     inspector.value = "terminal";
     scheduleRunPoll(true);
-    runtimeActionNotice.value = `${action.label} is ready for approval in the terminal.`;
+    setHarnessNotice({
+      tone: "info",
+      title: "Harness action prepared",
+      description: `${action.label} is ready for approval in the terminal.`,
+    });
   } catch (error) {
     settingsError.value = error instanceof Error ? error.message : "Runtime maintenance could not be prepared.";
   }
@@ -2966,7 +3102,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
             type="button"
             :class="['settings-link', { selected: activeView === 'settings' }]"
             :aria-current="activeView === 'settings' ? 'page' : undefined"
-            @click="openSettings"
+            @click="openSettings()"
           >
             <osx-icon name="settings" :size="16" />
             <span>Settings</span>
@@ -2975,127 +3111,51 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
       </nav>
 
       <section ref="sessionPane" class="session-pane" tabindex="-1" :aria-label="activeView === 'settings' ? 'Settings' : 'Agent task'">
-        <div v-if="activeView === 'settings'" class="settings-pane">
-          <header class="settings-header">
-            <div>
-              <span class="settings-mark"><osx-icon name="settings" :size="22" /></span>
-              <span>
-                <h1>Settings</h1>
-                <p>Choose defaults for new tasks and this device.</p>
-              </span>
-            </div>
-            <osx-button size="small" @click="closeSettings">Done</osx-button>
-          </header>
-
-          <div class="settings-sections">
-            <osx-alert
-              v-if="settingsError"
-              tone="error"
-              title="Settings not saved"
-              :description="settingsError"
-            />
-            <osx-alert
-              v-if="runtimeActionNotice"
-              tone="info"
-              title="Harness action ready"
-              :description="runtimeActionNotice"
-            />
-
-            <section class="settings-section" aria-labelledby="appearance-settings">
-              <header>
-                <span class="section-icon"><osx-icon name="palette" :size="19" /></span>
-                <div>
-                  <h2 id="appearance-settings">Appearance</h2>
-                  <p>Use one theme across the workspace.</p>
-                </div>
-              </header>
-              <osx-radio-group
-                label="Theme"
-                name="application-theme"
-                variant="cards"
-                orientation="horizontal"
-                :options="themeOptions"
-                :value="state.settings.theme"
-                :disabled="settingsSaving"
-                @change="chooseTheme"
-              />
-            </section>
-
-            <AgentDefaults />
-
-            <AuthorityModeSettings
-              :value="state.settings.authorityMode ?? 'supervised'"
-              :saving="settingsSaving"
-              @change="updateSettings({ authorityMode: $event })"
-            />
-
-            <PermissionCenter
-              :rules="permissionRules"
-              :projects="state.projects"
-              :loading="permissionLoading"
-              :exporting="permissionExporting"
-              :action-id="permissionActionId"
-              :error="permissionError"
-              :notice="permissionNotice"
-              @refresh="refreshPermissionRules"
-              @export="exportPermissionAudit"
-              @revoke="revokePermissionRule"
-            />
-
-            <ProofTrustSettings />
-
-            <TeamPolicySettings
-              :state="teamPolicy"
-              :busy="teamPolicyBusy"
-              :error="teamPolicyError"
-              :notice="teamPolicyNotice"
-              @refresh="refreshTeamPolicy"
-              @create="createTeamPolicy"
-              @import="importTeamPolicy"
-              @remove="removeTeamPolicy"
-              @error="teamPolicyError = $event"
-            />
-
-            <SupportDiagnostics />
-
-            <AgentHarnessSettings
-              :runtimes="localRuntimes"
-              :settings="state.settings"
-              :saving="settingsSaving"
-              :refreshing="runtimeRefreshing"
-              :probing-runtime-id="runtimeProbingId"
-              @update="updateSettings"
-              @refresh="refreshRuntimes"
-              @maintain="maintainRuntime"
-              @probe="probeRuntime"
-            />
-
-            <McpConnectionCenter
-              :servers="state.mcpServers"
-              :projects="state.projects"
-              :selected-project-id="state.selectedProjectId"
-              @changed="mcpServersChanged"
-            />
-
-            <ModelProviderSettings
-              :providers="state.modelProviders"
-              @connected="providerConnected"
-              @changed="providersChanged"
-            />
-
-            <osx-alert
-              tone="info"
-              title="Settings stay on this device"
-              description="The local Vraxis Code service saves these defaults. They are not added to agent transcripts."
-            />
-          </div>
-
-          <footer class="settings-save-state" aria-live="polite">
-            <osx-spinner v-if="settingsSaving" size="small" label="Saving settings" show-label />
-            <span v-else-if="settingsError"><osx-icon name="warning" :size="14" /> Previous settings restored</span>
-            <span v-else><osx-icon name="check" :size="14" /> Saved on this device</span>
-          </footer>
-        </div>
+        <SettingsShell
+          v-if="activeView === 'settings'"
+          :section="settingsSection"
+          :settings="state.settings"
+          :saving="settingsSaving"
+          :settings-error="settingsError"
+          :harness-notice="harnessNotice"
+          :theme-options="themeOptions"
+          :runtimes="localRuntimes"
+          :runtime-refreshing="runtimeRefreshing"
+          :runtime-probing-id="runtimeProbingId"
+          :permission-rules="permissionRules"
+          :permission-projects="state.projects"
+          :permission-loading="permissionLoading"
+          :permission-exporting="permissionExporting"
+          :permission-action-id="permissionActionId"
+          :permission-error="permissionError"
+          :permission-notice="permissionNotice"
+          :team-policy="teamPolicy"
+          :team-policy-busy="teamPolicyBusy"
+          :team-policy-error="teamPolicyError"
+          :team-policy-notice="teamPolicyNotice"
+          :mcp-servers="state.mcpServers"
+          :mcp-projects="state.projects"
+          :selected-project-id="state.selectedProjectId"
+          :model-providers="state.modelProviders"
+          @close="closeSettings"
+          @update:section="settingsSection = $event"
+          @update="updateSettings"
+          @theme-change="updateSettings({ theme: $event })"
+          @refresh-permissions="refreshPermissionRules"
+          @export-permissions="exportPermissionAudit"
+          @revoke-permission="revokePermissionRule"
+          @refresh-team-policy="refreshTeamPolicy"
+          @create-team-policy="createTeamPolicy"
+          @import-team-policy="importTeamPolicy"
+          @remove-team-policy="removeTeamPolicy"
+          @team-policy-error="teamPolicyError = $event"
+          @refresh-runtimes="refreshRuntimes"
+          @maintain="maintainRuntime"
+          @probe="probeRuntime"
+          @mcp-changed="mcpServersChanged"
+          @provider-connected="providerConnected"
+          @providers-changed="providersChanged"
+        />
 
         <div v-else-if="loading" class="center-state">
           <WorkspaceSplash />
@@ -3112,6 +3172,13 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
         </div>
 
         <div v-else-if="!project" class="onboarding-state first-run-onboarding">
+          <osx-alert
+            v-if="harnessNotice"
+            class="harness-notice"
+            :tone="harnessNotice.tone"
+            :title="harnessNotice.title"
+            :description="harnessNotice.description"
+          />
           <FirstRunJourney
             :runtime="runtime"
             :sessions="[]"
@@ -3163,6 +3230,14 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
               </li>
             </ul>
           </details>
+
+          <osx-alert
+            v-if="harnessNotice"
+            class="harness-notice"
+            :tone="harnessNotice.tone"
+            :title="harnessNotice.title"
+            :description="harnessNotice.description"
+          />
 
           <FirstRunJourney
             v-if="showFirstRunJourney"
@@ -3325,14 +3400,12 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
           </div>
           <osx-agent-composer
             :value="composer"
-            :placeholder="sessionIsRunning ? 'Steer the agent or queue the next instruction…' : session ? 'Send a follow-up. @ adds files. $ adds skills.' : 'Describe the task. @ adds files. $ adds skills.'"
+            :placeholder="sessionIsRunning ? 'Steer the agent or queue the next instruction…' : session ? 'Send a follow-up. / commands · @ files · $ skills.' : 'Describe the task. / commands · @ files · $ skills.'"
             label="Message to agent"
-            :model="composerModelLabel"
             :model-id="modelId ?? ''"
-            :models="composerModelOptions"
-            :access-mode="modeLabel"
             :access-mode-id="mode"
-            :access-modes="composerModeOptions"
+            :models="[]"
+            :access-modes="[]"
             :suggestions="composerSuggestions"
             :context-items="visibleComposerContextItems"
             :attachments="composerAttachments"
@@ -3347,8 +3420,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
             :max-rows="8"
             submit-shortcut="enter"
             @input="updateComposerValue"
-            @model-change="chooseTaskModel"
-            @access-mode-change="chooseMode"
+            @command-select="handleComposerCommand"
             @attachment-add="acceptNativeAttachments"
             @attachments-change="syncComposerAttachments"
             @context-change="syncComposerContext"
@@ -3376,26 +3448,32 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                 :disabled="submitting || composerPending"
               />
             </label>
-            <label slot="controls" class="composer-runtime-control">
-              <osx-icon name="terminal" :size="14" />
-              <span class="visually-hidden">Runtime</span>
-              <select
-                aria-label="Runtime"
-                :value="runtime?.id"
-                :disabled="submitting || sessionIsRunning"
-                @change="chooseTaskRuntime"
-              >
-                <option
-                  v-for="item in state.runtimes"
-                  :key="item.id"
-                  :value="item.id"
-                  :disabled="item.availability !== 'installed' || !runtimeIsEnabled(item.id)"
-                >
-                  {{ item.name }}{{ item.availability !== "installed" ? " (setup needed)" : !runtimeIsEnabled(item.id) ? " (disabled)" : "" }}
-                </option>
-              </select>
-              <osx-icon name="chevron-down" :size="12" />
-            </label>
+            <ComposerMenuPicker
+              slot="controls"
+              label="Mode"
+              :value="mode"
+              :groups="composerModeGroups"
+              :disabled="submitting || sessionIsRunning"
+              :trigger-icon="composerModeOptions.find((item) => item.id === mode)?.icon ?? 'lock'"
+              @change="selectTaskMode"
+            />
+            <ComposerMenuPicker
+              slot="controls"
+              label="Model"
+              :value="selectedModelId"
+              :groups="composerModelGroups"
+              :disabled="submitting || sessionIsRunning"
+              trigger-icon="bot"
+              @change="selectTaskModel"
+            />
+            <TaskRuntimePicker
+              slot="controls"
+              :runtimes="state.runtimes"
+              :value="runtime?.id ?? ''"
+              :disabled="submitting || sessionIsRunning"
+              :is-enabled="runtimeIsEnabled"
+              @change="selectTaskRuntime"
+            />
           </osx-agent-composer>
         </div>
       </div>

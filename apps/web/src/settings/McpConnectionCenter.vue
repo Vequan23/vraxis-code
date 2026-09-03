@@ -254,7 +254,7 @@ async function removeServer(server: McpServerSummary): Promise<void> {
           <p>Connect external tools and context servers, inspect what they expose, and choose which projects may use them.</p>
         </div>
       </div>
-      <osx-button v-if="!showingForm" size="small" icon="plus" :disabled="!projects.length" @click="showingForm = true">Add connection</osx-button>
+      <osx-button v-if="!showingForm" size="small" icon="plus" :disabled="!projects.length" @click="showingForm = true">Add server</osx-button>
     </header>
 
     <osx-alert v-if="error" tone="error" title="MCP connection not updated" :description="error" />
@@ -369,7 +369,7 @@ async function removeServer(server: McpServerSummary): Promise<void> {
       icon="boxes"
       title="No MCP connections"
       description="Connect a local or remote MCP server to inspect its tools, resources, and prompts before exposing it to a project."
-      action-label="Add connection"
+      action-label="Add server"
       @action="showingForm = true"
     />
   </section>

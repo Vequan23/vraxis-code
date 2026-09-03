@@ -5,6 +5,7 @@ import type {
   ActivityEvent,
   AppendMessageRequest,
   CreateSessionRequest,
+  HarnessRunMetricsSnapshot,
   PromptAttachment,
   SkillReference,
   WorktreeConflictSummary,
@@ -482,10 +483,17 @@ export class SessionRegistry {
     });
   }
 
-  async telemetry(sessionId: string, title: string, detail: string): Promise<void> {
+  async telemetry(sessionId: string, title: string, detail: string, metrics?: HarnessRunMetricsSnapshot): Promise<void> {
     await this.mutate((data) => {
       const session = this.session(data, sessionId);
-      this.pushEvent(data, session, { kind: "telemetry", title, detail, state: "complete", actor: "system" });
+      this.pushEvent(data, session, {
+        kind: "telemetry",
+        title,
+        detail,
+        state: "complete",
+        actor: "system",
+        ...(metrics ? { metrics } : {}),
+      });
       session.updatedAt = new Date().toISOString();
     }, { persist: "deferred" });
   }
@@ -779,7 +787,7 @@ export class SessionRegistry {
   private pushEvent(
     data: SessionData,
     session: SessionSummary,
-    event: Pick<ActivityEvent, "kind" | "title" | "detail" | "state" | "actor">,
+    event: Pick<ActivityEvent, "kind" | "title" | "detail" | "state" | "actor" | "metrics">,
   ): void {
     data.events.push({
       id: randomUUID(),

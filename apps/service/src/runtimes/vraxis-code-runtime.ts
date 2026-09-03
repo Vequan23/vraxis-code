@@ -32,6 +32,7 @@ import type { TerminalRegistry } from "../terminal/terminal-registry.js";
 import { createAgentEvidenceTool } from "../sessions/agent-evidence-tool.js";
 import { BUILD_GIT_POLICY_INSTRUCTION, buildWorktreeInstructionBlock, worktreeFromRuntimeMetadata } from "../sessions/build-workspace-context.js";
 import { createAgentVerificationHandoffTool } from "../sessions/agent-verification-handoff-tool.js";
+import { TASK_RECOVERY_INSTRUCTION } from "../sessions/task-recovery-instruction.js";
 import type { VerificationRegistry } from "../verification/verification-registry.js";
 import { createPromptWebFetchTool } from "../web/prompt-web-access.js";
 import type { McpServerRegistry, McpTaskConnection } from "../mcp/mcp-server-registry.js";
@@ -41,6 +42,7 @@ const developmentCommands = ["bun", "cargo", "git", "go", "node", "npm", "npx", 
 function builderInstructions(worktree?: WorktreeSummary): string {
   const parts = [
     "Work only inside the approved isolated worktree. Request approval for guarded writes, commands, network, or browser actions and verify the result.",
+    TASK_RECOVERY_INSTRUCTION,
   ];
   if (worktree) {
     parts.push(buildWorktreeInstructionBlock(worktree), BUILD_GIT_POLICY_INSTRUCTION);
@@ -73,7 +75,7 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
     private readonly terminal?: TerminalRegistry,
     private readonly verifications?: VerificationRegistry,
     private readonly mcpServers?: McpServerRegistry,
-    private readonly local = new LocalCliRuntimeEngine(),
+    private readonly local = new LocalCliRuntimeEngine({ timeoutMs: 10 * 60_000 }),
   ) {}
 
   async inspect(runtimeId: string): Promise<RuntimeReadiness> {
@@ -183,7 +185,7 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
         name: "Vraxis Code",
         instructions: request.workspaceAccess === "workspace-write"
           ? builderInstructions(worktree)
-          : "Inspect only the approved repository and browser evidence. Use read tools for evidence and never claim files you did not inspect.",
+          : `Inspect only the approved repository and browser evidence. Use read tools for evidence and never claim files you did not inspect. ${TASK_RECOVERY_INSTRUCTION}`,
         recipe,
         skills: extraSkillIds,
         tools: tools.map((tool) => tool.name),
