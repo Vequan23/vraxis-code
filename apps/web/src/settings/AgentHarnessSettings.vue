@@ -125,6 +125,14 @@ function conformanceLabel(runtime: RuntimeSummary): string {
   return "Not verified";
 }
 
+function conformanceListLabel(runtime: RuntimeSummary): string {
+  if (runtime.conformance?.state === "ready") return "Verified";
+  if (runtime.conformance?.state === "failed") return "Probe failed";
+  if (runtime.conformance?.state === "limited") return "Limited";
+  if (runtime.conformance?.state === "stale") return "Stale";
+  return "Unverified";
+}
+
 function conformanceTone(runtime: RuntimeSummary): "success" | "warning" | "neutral" | "error" {
   if (runtime.conformance?.state === "ready") return "success";
   if (runtime.conformance?.state === "failed") return "error";
@@ -167,8 +175,12 @@ function hasHarnessLogo(runtimeId: string): boolean {
               <osx-icon v-else name="terminal" :size="16" />
             </span>
             <span class="harness-row-copy">
-              <strong>{{ runtime.name }}</strong>
-              <small><i :class="availabilityTone(runtime)" />{{ availabilityLabel(runtime) }}<template v-if="runtime.version"> · {{ runtime.version }}</template></small>
+              <span class="harness-row-title">
+                <strong>{{ runtime.name }}</strong>
+              </span>
+              <small>
+                <i :class="availabilityTone(runtime)" />{{ availabilityLabel(runtime) }}<template v-if="runtime.availability === 'installed'"> · <span :class="['harness-conformance-text', conformanceTone(runtime)]">{{ conformanceListLabel(runtime) }}</span></template><template v-if="runtime.version"> · {{ runtime.version }}</template>
+              </small>
             </span>
           </button>
           <osx-toggle
@@ -178,7 +190,7 @@ function hasHarnessLogo(runtimeId: string): boolean {
             @change="toggleRuntime(runtime, $event)"
           />
         </div>
-        <footer>{{ checkedLabel(runtimes[0]?.checkedAt) }}</footer>
+        <footer>{{ checkedLabel(selectedRuntime?.checkedAt) }}</footer>
       </aside>
 
       <section v-if="selectedRuntime" class="harness-detail" :aria-label="`${selectedRuntime.name} details`">

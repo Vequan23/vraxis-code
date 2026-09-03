@@ -56,6 +56,8 @@ export class SettingsRegistry {
           : {}),
         ...(runtimeModels ? { runtimeModels } : {}),
         ...(disabledRuntimeIds ? { disabledRuntimeIds } : {}),
+        ...(parsed.harnessMetricsEnabled === true ? { harnessMetricsEnabled: true } : {}),
+        ...(parsed.harnessMetricsExportEnabled === true ? { harnessMetricsExportEnabled: true } : {}),
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return structuredClone(defaultUserSettings);
@@ -73,6 +75,8 @@ export class SettingsRegistry {
       if (modelId) runtimeModels[runtimeId] = modelId;
       else delete runtimeModels[runtimeId];
     }
+    const harnessMetricsEnabled = input.harnessMetricsEnabled ?? current.harnessMetricsEnabled ?? false;
+    const harnessMetricsExportEnabled = input.harnessMetricsExportEnabled ?? current.harnessMetricsExportEnabled ?? false;
     const settings: UserSettings = {
       theme: input.theme ?? current.theme,
       defaultMode: input.defaultMode ?? current.defaultMode,
@@ -82,6 +86,8 @@ export class SettingsRegistry {
       ...((input.disabledRuntimeIds ?? current.disabledRuntimeIds)?.length
         ? { disabledRuntimeIds: [...new Set(input.disabledRuntimeIds ?? current.disabledRuntimeIds)] }
         : {}),
+      ...(harnessMetricsEnabled ? { harnessMetricsEnabled: true } : {}),
+      ...(harnessMetricsExportEnabled ? { harnessMetricsExportEnabled: true } : {}),
     };
     await this.write(settings);
     return settings;

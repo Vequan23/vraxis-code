@@ -355,6 +355,35 @@ test("persists settings through the local service", async (context) => {
   });
 });
 
+test("serves harness metrics summary and export when enabled", async (context) => {
+  const app = await fixture();
+  context.after(() => app.close());
+
+  const disabled = await fetch(`${app.baseUrl}/api/harness-metrics`);
+  assert.equal(disabled.status, 200);
+  const disabledSummary = await disabled.json() as { enabled: boolean; totalRuns: number };
+  assert.equal(disabledSummary.enabled, false);
+
+  const enable = await fetch(`${app.baseUrl}/api/settings`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ harnessMetricsEnabled: true }),
+  });
+  assert.equal(enable.status, 200);
+
+  const enabledSummary = await fetch(`${app.baseUrl}/api/harness-metrics`);
+  assert.equal(enabledSummary.status, 200);
+  assert.equal((await enabledSummary.json() as { enabled: boolean }).enabled, true);
+
+  const exported = await fetch(`${app.baseUrl}/api/harness-metrics/export`);
+  assert.equal(exported.status, 200);
+  assert.equal((await exported.clone().json() as { kind: string }).kind, "vraxis.harness-metrics-export");
+
+  const cleared = await fetch(`${app.baseUrl}/api/harness-metrics`, { method: "DELETE" });
+  assert.equal(cleared.status, 200);
+  assert.deepEqual(await cleared.json(), { status: "cleared" });
+});
+
 test("rotates the local proof identity only after confirmation and returns a portable attestation", async (context) => {
   const app = await fixture();
   context.after(() => app.close());
@@ -1328,6 +1357,8 @@ test("runs Plan read-only and rejects Build when the runtime cannot write worksp
   assert.match(runtime.requests[0]?.input.instructions ?? "", /Repository comprehension, Project architecture/);
   assert.match(runtime.requests[0]?.input.instructions ?? "", /Default tool requests for this mode: calculate, date-time, evidence-status, request-verification, list-directory/);
   assert.match(runtime.requests[0]?.input.instructions ?? "", /This mode is read-only/);
+  assert.match(runtime.requests[0]?.input.instructions ?? "", /After every tool result, decide whether to continue/);
+  assert.match(runtime.requests[0]?.input.instructions ?? "", /Never request it because an external page failed to load/);
   assert.equal(runtime.requests[0]?.workspaceAccess, "read-only");
 
   const buildResponse = await fetch(`${app.baseUrl}/api/sessions`, {

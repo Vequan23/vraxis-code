@@ -140,9 +140,9 @@ test("starts a task from a selected project and keeps evidence truthful", async 
   await page.getByRole("button", { name: "Draft the first task" }).focus();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("textbox", { name: "Message to agent" })).toHaveValue("Inspect this project and explain its architecture with file-backed evidence.");
-  await page.getByRole("button", { name: "Ask", exact: true }).click();
+  await page.getByRole("button", { name: "Mode" }).click();
   await page.getByRole("option", { name: /Plan/ }).click();
-  await expect(page.getByRole("button", { name: "Plan", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Mode" })).toContainText("Plan");
 
   await page.getByRole("tab", { name: "Changes" }).click();
   await expect(page.getByText("No changes", { exact: true })).toBeVisible();
@@ -1391,11 +1391,13 @@ test("runs the selected mode and model without reloading the workspace", async (
 
   await page.goto("/");
   await page.addStyleTag({ content: ".session-pane::before { content: ''; display: block; flex: 0 0 1200px; }" });
-  await expect(page.getByLabel("Runtime")).toHaveValue("codex");
-  await page.getByRole("button", { name: "Ask", exact: true }).click();
-  await page.getByRole("option", { name: /Plan/ }).click();
-  await expect(page.getByRole("button", { name: "Plan", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "GPT-5.6-Sol", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Runtime" })).toContainText("Codex CLI");
+  const composer = page.getByRole("textbox", { name: "Message to agent" });
+  await composer.fill("/plan");
+  await page.getByRole("option", { name: /Investigate and prepare an implementation plan/ }).click();
+  await expect(page.getByRole("button", { name: "Mode" })).toContainText("Plan");
+  await expect(composer).toContainText("Investigate this codebase and produce a concrete implementation plan");
+  await page.getByRole("button", { name: "Model" }).click();
   await page.getByRole("option", { name: /GPT-5.6-Terra/ }).click();
   const fileChooser = page.waitForEvent("filechooser");
   await page.getByRole("button", { name: "Add attachment" }).click();
@@ -1404,7 +1406,6 @@ test("runs the selected mode and model without reloading the workspace", async (
     { name: "index.ts", mimeType: "text/typescript", buffer: Buffer.from("export const second = true;\n") },
   ]);
   await expect(page.getByLabel("Prompt context").getByText("index.ts", { exact: true })).toHaveCount(2);
-  const composer = page.getByRole("textbox", { name: "Message to agent" });
   await composer.fill("$ux");
   await page.getByRole("option", { name: /ux-fundamentals/ }).click();
   await expect(page.getByLabel("Prompt context").getByText("ux-fundamentals", { exact: true })).toBeVisible();
@@ -1445,7 +1446,7 @@ test("runs the selected mode and model without reloading the workspace", async (
   await page.getByLabel("Agent task").evaluate((pane) => { pane.scrollTop = 0; });
   await expect.poll(() => page.getByLabel("Agent task").evaluate((pane) =>
     pane.scrollHeight - pane.scrollTop - pane.clientHeight)).toBeGreaterThan(100);
-  await page.getByRole("button", { name: "Plan", exact: true }).click();
+  await page.getByRole("button", { name: "Mode" }).click();
   await page.getByRole("option", { name: /Review/ }).click();
   await expectTaskPaneAtBottom(page);
   expect(browserErrors).toEqual([]);
@@ -1738,7 +1739,7 @@ test("starts Build in an isolated worktree and opens a closable exact diff", asy
   });
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Ask", exact: true }).click();
+  await page.getByRole("button", { name: "Mode" }).click();
   await page.getByRole("option", { name: /Build/ }).click();
   await expect(page.getByText("Build uses an isolated worktree")).toBeVisible();
   await page.getByRole("textbox", { name: "Message to agent" }).fill("Add a health check");
@@ -2210,7 +2211,8 @@ test("saves runtime and model defaults in a dedicated settings surface", async (
   await expect(page.getByText("Vraxis conformance", { exact: true })).toBeVisible();
   await expect(page.getByText(/may use provider quota/)).toBeVisible();
   await page.getByRole("button", { name: "Verify live" }).click();
-  await expect(page.getByText("Verified", { exact: true })).toBeVisible();
+  await expect(page.getByText("Codex CLI verified", { exact: true })).toBeVisible();
+  await expect(page.locator(".harness-row").filter({ hasText: "Codex CLI" }).getByText("Verified", { exact: true })).toBeVisible();
   await expect(page.getByText("Live model response", { exact: true })).toBeVisible();
   expect(runtimeProbe).toEqual({ consent: true, modelId: "gpt-5.6-terra" });
   await page.screenshot({ path: testInfo.outputPath("runtime-conformance.png"), fullPage: true });
@@ -2244,7 +2246,7 @@ test("saves runtime and model defaults in a dedicated settings surface", async (
 
   await page.getByRole("button", { name: "Done" }).click();
   await expect(page.getByRole("heading", { name: "Your first trusted task" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Ask", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Mode" })).toContainText("Ask");
   await page.getByRole("tab", { name: "Files" }).click();
   await page.locator('.tree-row[title="apps/service/src/http/app.ts"]').click();
   const keywordColor = await page.locator('[aria-label="File preview"] .hljs-keyword').first().evaluate(

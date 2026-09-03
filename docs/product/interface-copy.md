@@ -46,7 +46,9 @@ File not opened. Explain whether the file is outside the approved project, binar
 
 Agent is working.
 
-The agent is reading the approved project with read-only access.
+The agent is gathering repository evidence without changing files.
+
+Continuing from evidence. The agent is using tool results to continue or answer.
 
 Task stopped. The conversation remains available.
 

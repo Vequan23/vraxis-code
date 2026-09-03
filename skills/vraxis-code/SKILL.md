@@ -18,8 +18,10 @@ Use this skill when working inside Vraxis Code sessions.
 ## Evidence first
 
 - Treat approvals, verification receipts, browser captures, and terminal output as first-class evidence.
-- Use evidence-status before claiming work is complete.
-- Request verification when checks or browser proof are required.
+- Use evidence-status before claiming work on this project is complete.
+- Request verification only when the user asked to verify this project or you changed this project's interface.
+- Do not request verification because an external page failed to load.
+- After a blocked, challenge, empty, or unauthorized web result, change approach once or answer. Do not retry the same URL.
 - Name project-relative file paths in answers and cite the evidence you inspected.
 
 ## Safety

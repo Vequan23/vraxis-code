@@ -18,6 +18,7 @@ Use this skill when planning or running verification inside Vraxis Code.
 ## Browser proof
 
 - Capture proof from the configured browser URL. Do not substitute a different route or origin.
+- If the current page is not the configured target, stop and report the mismatch. Do not keep browsing an external research URL.
 - Route, title, visible-text, console, network, and visual assertions are evaluated from the same capture.
 - Report failures with the failing check, command output, and any browser assertion that did not pass.
 

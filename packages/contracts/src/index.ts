@@ -119,6 +119,8 @@ export interface UserSettings {
   defaultRuntimeId?: string;
   runtimeModels?: Record<string, string>;
   disabledRuntimeIds?: string[];
+  harnessMetricsEnabled?: boolean;
+  harnessMetricsExportEnabled?: boolean;
 }
 
 export const defaultUserSettings: UserSettings = {
@@ -430,6 +432,7 @@ export interface ActivityEvent {
     delivery: SteeringDelivery;
     state: "queued" | "running" | "handled" | "superseded";
   };
+  metrics?: HarnessRunMetricsSnapshot;
 }
 
 export type ApprovalCapability = "write" | "command" | "network" | "browser" | "credentials" | "destructive" | "other";
@@ -1048,6 +1051,112 @@ export interface ProofVerificationSummary {
   detail: string;
 }
 
+export type HarnessRunOutcome = "complete" | "turn-complete" | "failed";
+
+export interface HarnessToolMetricsV1 {
+  id: string;
+  calls: number;
+  successes: number;
+  failures: number;
+  totalDurationMs: number;
+}
+
+export interface HarnessRunTokenMetricsV1 {
+  input?: number;
+  output?: number;
+  total?: number;
+  system?: number;
+  tools?: number;
+  transcript?: number;
+  toolResults?: number;
+  artifacts?: number;
+}
+
+export interface HarnessRunCostMetricsV1 {
+  status: "reported" | "estimated" | "included" | "unavailable";
+  amountUsd?: number;
+}
+
+export interface HarnessRunApprovalMetricsV1 {
+  requested: number;
+  approved: number;
+  denied: number;
+  totalWaitMs: number;
+}
+
+export interface HarnessRunVerificationMetricsV1 {
+  runs: number;
+  passed: number;
+  failed: number;
+}
+
+export interface HarnessRunMetricsSnapshot {
+  durationMs: number;
+  outcome: HarnessRunOutcome;
+  tokens?: HarnessRunTokenMetricsV1;
+  cost?: HarnessRunCostMetricsV1;
+  tools: HarnessToolMetricsV1[];
+  approvals: HarnessRunApprovalMetricsV1;
+  compactions: number;
+  verification?: HarnessRunVerificationMetricsV1;
+}
+
+export interface HarnessRunMetricsV1 extends HarnessRunMetricsSnapshot {
+  kind: "vraxis.harness-run-metrics";
+  version: 1;
+  id: string;
+  sessionId: string;
+  projectId: string;
+  runId: string;
+  runtimeId: string;
+  runtimeVersion?: string;
+  modelId?: string;
+  mode: SessionMode;
+  startedAt: string;
+  completedAt: string;
+}
+
+export interface HarnessRuntimeStatsV1 {
+  runtimeId: string;
+  runtimeVersion?: string;
+  mode: SessionMode;
+  runs: number;
+  completed: number;
+  failed: number;
+  avgDurationMs: number;
+  avgTokens?: number;
+  toolFailureRate: number;
+  approvalRate: number;
+  avgApprovalWaitMs: number;
+  verificationPassRate?: number;
+  compactionRate: number;
+  lastRunAt?: string;
+}
+
+export interface HarnessMetricsTrendV1 {
+  toolFailureRateDelta?: number;
+  verificationPassRateDelta?: number;
+}
+
+export interface HarnessMetricsSummaryV1 {
+  kind: "vraxis.harness-metrics-summary";
+  version: 1;
+  generatedAt: string;
+  enabled: boolean;
+  totalRuns: number;
+  windowDays: number;
+  byRuntime: HarnessRuntimeStatsV1[];
+  recentTrend?: HarnessMetricsTrendV1;
+}
+
+export interface HarnessMetricsExportV1 {
+  kind: "vraxis.harness-metrics-export";
+  version: 1;
+  generatedAt: string;
+  summary: HarnessMetricsSummaryV1;
+  aggregates: HarnessRuntimeStatsV1[];
+}
+
 export interface SupportBundleV1 {
   kind: "vraxis.support-bundle";
   version: 1;
@@ -1090,6 +1199,7 @@ export interface SupportBundleV1 {
     includesProjectContent: false;
     includesCredentials: false;
   };
+  harnessMetrics?: HarnessMetricsSummaryV1;
 }
 
 export interface RegisterProjectRequest {
@@ -1127,6 +1237,8 @@ export interface UpdateSettingsRequest {
   defaultRuntimeId?: string | null;
   runtimeModels?: Record<string, string | null>;
   disabledRuntimeIds?: string[];
+  harnessMetricsEnabled?: boolean;
+  harnessMetricsExportEnabled?: boolean;
 }
 
 export interface ConnectModelProviderRequest {
@@ -1502,6 +1614,14 @@ export function parseUpdateSettingsRequest(value: unknown): UpdateSettingsReques
   }
   if (input.runtimeModels !== undefined) result.runtimeModels = parseRuntimeModels(input.runtimeModels);
   if (input.disabledRuntimeIds !== undefined) result.disabledRuntimeIds = parseRuntimeIds(input.disabledRuntimeIds);
+  if (input.harnessMetricsEnabled !== undefined) {
+    if (typeof input.harnessMetricsEnabled !== "boolean") throw new TypeError("Harness metrics setting must be true or false.");
+    result.harnessMetricsEnabled = input.harnessMetricsEnabled;
+  }
+  if (input.harnessMetricsExportEnabled !== undefined) {
+    if (typeof input.harnessMetricsExportEnabled !== "boolean") throw new TypeError("Harness metrics export setting must be true or false.");
+    result.harnessMetricsExportEnabled = input.harnessMetricsExportEnabled;
+  }
   if (Object.keys(result).length === 0) throw new TypeError("Choose at least one setting to update.");
   return result;
 }
