@@ -6,6 +6,7 @@ export const settingsSectionIds = [
   "models",
   "metrics",
   "integrations",
+  "skills",
   "permissions",
   "proof-trust",
   "team-policy",
@@ -64,12 +65,20 @@ export const settingsNavigation: SettingsNavGroup[] = [
   },
   {
     label: "Integrations",
-    items: [{
-      id: "integrations",
-      label: "MCP servers",
-      description: "Connect external tools through the Model Context Protocol.",
-      icon: "boxes",
-    }],
+    items: [
+      {
+        id: "integrations",
+        label: "MCP servers",
+        description: "Connect external tools through the Model Context Protocol.",
+        icon: "boxes",
+      },
+      {
+        id: "skills",
+        label: "Skills",
+        description: "Discover project skills and install more with the Vercel skills CLI.",
+        icon: "sparkle",
+      },
+    ],
   },
   {
     label: "Security",

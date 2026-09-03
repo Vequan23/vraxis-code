@@ -13,6 +13,7 @@ import type {
   ApprovalRuleSummary,
   TeamPolicyBundleV1,
   TeamPolicyCreateRequest,
+  SkillSummary,
 } from "@vraxis/code-contracts";
 import AgentDefaults from "./AgentDefaults.vue";
 import AuthorityModeSettings from "./AuthorityModeSettings.vue";
@@ -20,6 +21,7 @@ import GeneralSettings from "./GeneralSettings.vue";
 import RuntimeSettings from "./RuntimeSettings.vue";
 import HarnessMetricsSettings from "./HarnessMetricsSettings.vue";
 import McpConnectionCenter from "./McpConnectionCenter.vue";
+import SkillLibrarySettings from "./SkillLibrarySettings.vue";
 import PermissionCenter from "./PermissionCenter.vue";
 import ProofTrustSettings from "./ProofTrustSettings.vue";
 import SupportDiagnostics from "./SupportDiagnostics.vue";
@@ -52,6 +54,7 @@ const props = defineProps<{
   teamPolicyError: string;
   teamPolicyNotice: string;
   mcpServers: McpServerSummary[];
+  skillLibrary: SkillSummary[];
   mcpProjects: ProjectSummary[];
   selectedProjectId?: string;
   modelProviders: ModelProviderSummary[];
@@ -75,6 +78,7 @@ const emit = defineEmits<{
   maintain: [runtime: RuntimeSummary, action: RuntimeMaintenanceActionSummary];
   probe: [runtime: RuntimeSummary];
   "mcp-changed": [];
+  "skills-changed": [];
   "provider-connected": [providerId: string];
   "providers-changed": [];
 }>();
@@ -198,6 +202,15 @@ function chooseSection(id: SettingsSectionId): void {
             :projects="mcpProjects"
             :selected-project-id="selectedProjectId"
             @changed="emit('mcp-changed')"
+          />
+
+          <SkillLibrarySettings
+            v-else-if="section === 'skills'"
+            :skills="skillLibrary"
+            :projects="mcpProjects"
+            :selected-project-id="selectedProjectId"
+            :runtimes="runtimes.filter((runtime) => runtime.availability === 'installed').map((runtime) => runtime.id)"
+            @changed="emit('skills-changed')"
           />
 
           <PermissionCenter

@@ -16,7 +16,9 @@ import {
   parseConnectModelProviderRequest,
   parseConnectMcpServerRequest,
   parseCreateSessionRequest,
+  parseInstallSkillsRequest,
   parseRegisterProjectRequest,
+  parseRepairSkillRequest,
   parseUpdateSettingsRequest,
   parseUpdateMcpServerProjectsRequest,
   type AttachmentHandoffConsent,
@@ -57,6 +59,9 @@ import { indexProjectFiles } from "../workspace/file-index.js";
 import { readProjectFile } from "../workspace/read-project-file.js";
 import { AttachmentStore } from "../attachments/attachment-store.js";
 import { SkillRegistry, type SkillInventoryDiscovery } from "../skills/skill-registry.js";
+import { installSkillsFromSource } from "../skills/skills-install.js";
+import { assertRepairableSkillManifest, describeMetadataRepair, isMetadataRepairableIssue, repairSkillMetadata } from "../skills/skills-repair.js";
+import { buildSkillsInstallInvocation, formatSkillsInstallScope, skillsCliAgentsForRuntimes } from "../skills/skills-cli.js";
 import { GitWorktrees, WorktreeApplyConflictError } from "../worktrees/git-worktree.js";
 import { TerminalRegistry } from "../terminal/terminal-registry.js";
 import {
@@ -1070,6 +1075,91 @@ export function createApp(options: AppOptions) {
               await approvals.mark(approval.id, "completed");
             } catch (error) {
               const failure = error instanceof Error ? error.message : "The MCP server could not be connected.";
+              await approvals.mark(approval.id, "failed", failure);
+              throw error;
+            }
+          },
+        });
+        json(response, 202, { approval });
+        return;
+      }
+
+      const installSkillsMatch = /^\/api\/projects\/([^/]+)\/skills\/install$/.exec(url.pathname);
+      if (request.method === "POST" && installSkillsMatch?.[1]) {
+        const input = parseInstallSkillsRequest(await body(request));
+        if (input.projectId !== installSkillsMatch[1]) throw new TypeError("Project id does not match the install route.");
+        const projectPath = await registry.resolveInside(input.projectId);
+        const agents = input.agents?.length ? input.agents : skillsCliAgentsForRuntimes(await installedRuntimeIds());
+        const installInput = {
+          source: input.source,
+          agents,
+          ...(input.global ? { global: true } : {}),
+          ...(input.skillNames?.length ? { skillNames: input.skillNames } : {}),
+        };
+        const invocation = buildSkillsInstallInvocation(installInput);
+        const command = commandText(invocation.command, invocation.args);
+        const approval = await approvals.request({
+          sessionId: "skills-settings",
+          projectId: input.projectId,
+          capability: "command",
+          title: `Install skills · ${input.source.trim()}`,
+          description: "Download skills with the Vercel skills CLI, copy them into this project's agent skill directories, and refresh the local inventory.",
+          scope: `${formatSkillsInstallScope(installInput)} · ${command}`,
+          risk: "high",
+          source: "skills",
+          actor: "user",
+          boundary: "approved-project",
+          rememberable: false,
+        }, undefined, false);
+        await registerManualAction(approval, {
+          approve: async () => {
+            await approvals.mark(approval.id, "executing");
+            try {
+              await installSkillsFromSource(projectPath, installInput);
+              await approvals.mark(approval.id, "completed");
+            } catch (error) {
+              const failure = error instanceof Error ? error.message : "Skills could not be installed.";
+              await approvals.mark(approval.id, "failed", failure);
+              throw error;
+            }
+          },
+        });
+        json(response, 202, { approval });
+        return;
+      }
+
+      const repairSkillMatch = /^\/api\/projects\/([^/]+)\/skills\/repair$/.exec(url.pathname);
+      if (request.method === "POST" && repairSkillMatch?.[1]) {
+        const input = parseRepairSkillRequest(await body(request));
+        if (input.projectId !== repairSkillMatch[1]) throw new TypeError("Project id does not match the repair route.");
+        const projectPath = await registry.resolveInside(input.projectId);
+        const skill = await skills.findLibrarySkill(projectPath, input.skillId);
+        if (!skill) throw new TypeError("The selected skill is no longer in the library.");
+        if (!skill.repairable || !skill.manifestPath || !isMetadataRepairableIssue(skill.issue)) {
+          throw new TypeError("This skill cannot be repaired automatically.");
+        }
+        const manifestPath = await assertRepairableSkillManifest(skill.manifestPath, projectPath);
+        const approval = await approvals.request({
+          sessionId: "skills-settings",
+          projectId: input.projectId,
+          capability: "write",
+          title: `Repair skill metadata · ${skill.name}`,
+          description: "Rewrite this skill manifest so metadata values are strings, then reload it for Vraxis attachment.",
+          scope: describeMetadataRepair(manifestPath, skill.name),
+          risk: "medium",
+          source: "skills",
+          actor: "user",
+          boundary: "approved-project",
+          rememberable: false,
+        }, undefined, false);
+        await registerManualAction(approval, {
+          approve: async () => {
+            await approvals.mark(approval.id, "executing");
+            try {
+              await repairSkillMetadata(manifestPath);
+              await approvals.mark(approval.id, "completed");
+            } catch (error) {
+              const failure = error instanceof Error ? error.message : "The skill manifest could not be repaired.";
               await approvals.mark(approval.id, "failed", failure);
               throw error;
             }

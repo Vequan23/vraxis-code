@@ -390,7 +390,7 @@ onMounted(() => {
       </section>
     </div>
 
-    <osx-empty-state v-else-if="!embedded" title="No harnesses detected" description="Install Codex, Claude Code, Cursor Agent, or OpenCode, then check again." icon="terminal" />
+    <osx-empty-state v-else-if="!embedded" title="No harnesses detected" description="Install Codex, Claude Code, Cursor Agent, OpenCode, or Antigravity CLI, then check again." icon="terminal" />
   </section>
 
   <section v-else-if="embedded && selectedRuntime" class="harness-detail" :aria-label="`${selectedRuntime.name} details`">

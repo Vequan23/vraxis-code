@@ -69,6 +69,7 @@ import ComposerMenuPicker from "./composer/ComposerMenuPicker.vue";
 import {
   buildComposerSlashCommandSuggestions,
   composerSlashCommandById,
+  resolveUserComposerSlashCommand,
   type ComposerSlashCommandContext,
 } from "./composer/composer-slash-commands.js";
 import TerminalWorkbench from "./terminal/TerminalWorkbench.vue";
@@ -376,6 +377,25 @@ const conflictingHunkIds = computed(() => new Set(
     ?.filter((conflict) => conflict.path === selectedChange.value)
     .flatMap((conflict) => conflict.hunkIds ?? []) ?? [],
 ));
+const worktreeFinishCompact = computed(() => {
+  const worktree = session.value?.worktree;
+  if (!worktree) return false;
+  if (worktree.status !== "active" && worktree.status !== "conflicted") return false;
+  if (worktree.conflicts?.length) return false;
+  if (latestWorktreeApproval.value?.state === "failed") return false;
+  return true;
+});
+const selectedChangeFileName = computed(() => {
+  const path = selectedChange.value;
+  if (!path) return "";
+  const parts = path.split("/");
+  return parts[parts.length - 1] ?? path;
+});
+const selectedChangeDirectory = computed(() => {
+  const path = selectedChange.value;
+  if (!path.includes("/")) return "";
+  return path.slice(0, path.lastIndexOf("/"));
+});
 const pendingApprovals = computed(() => state.approvals.filter((item) => item.state === "pending"));
 const approvalRules = computed(() => state.approvalRules ?? []);
 const latestWorktreeApproval = computed(() => state.approvals.find((item) => item.source === "worktree"));
@@ -437,7 +457,7 @@ const composerSlashCommandContext = computed<ComposerSlashCommandContext>(() => 
   startingNewTask: startingNewTask.value,
 }));
 const composerSuggestions = computed<OsxAgentComposerSuggestion[]>(() => [
-  ...buildComposerSlashCommandSuggestions(composerSlashCommandContext.value),
+  ...buildComposerSlashCommandSuggestions(composerSlashCommandContext.value, state.composerCommands ?? []),
   ...state.files.map((file) => ({
     id: `project-file:${file.path}`,
     kind: "file" as const,
@@ -923,6 +943,8 @@ function applyBootstrapPatch(next: Partial<BootstrapState>, scope: BootstrapScop
 
   if (includeCatalog) {
     assignCollectionIfChanged(state.skills, next.skills);
+    assignCollectionIfChanged(state.skillLibrary ??= [], next.skillLibrary);
+    assignCollectionIfChanged(state.composerCommands ??= [], next.composerCommands);
     assignCollectionIfChanged(state.runtimes, next.runtimes);
     assignCollectionIfChanged(state.modelProviders, next.modelProviders);
     assignCollectionIfChanged(state.mcpServers, next.mcpServers);
@@ -1596,6 +1618,7 @@ async function loadChangeDiff(): Promise<void> {
   if (cached) {
     changeDiff.value = cloneWorkspaceValue(cached);
     selectedHunkIds.value = selectedHunkIds.value.filter((id) => cached.hunks.some((hunk) => hunk.id === id));
+    syncDefaultHunkSelection(true);
   }
   changeLoading.value = !cached;
   changeError.value = "";
@@ -1620,6 +1643,7 @@ async function loadChangeDiff(): Promise<void> {
     if (requestVersion !== changeRequestVersion || session.value?.id !== sessionId || selectedChange.value !== path) return;
     changeDiff.value = result;
     selectedHunkIds.value = selectedHunkIds.value.filter((id) => result.hunks.some((hunk) => hunk.id === id));
+    syncDefaultHunkSelection(true);
   } catch (error) {
     if (requestVersion !== changeRequestVersion) return;
     if (!cached) changeDiff.value = undefined;
@@ -1689,6 +1713,25 @@ function applySlashPrompt(nextMode: SessionMode, prompt: string): void {
 }
 
 async function executeComposerSlashCommand(commandId: string): Promise<void> {
+  const userCommand = resolveUserComposerSlashCommand(commandId, state.composerCommands ?? []);
+  if (userCommand) {
+    taskError.value = "";
+    applySlashPrompt(userCommand.mode, userCommand.prompt);
+    if (userCommand.skillNames?.length) {
+      const names = new Set(userCommand.skillNames.map((name) => name.toLowerCase()));
+      composerContextItems.value = state.skills
+        .filter((skill) => names.has(skill.name.toLowerCase()))
+        .slice(0, promptSkillLimits.maximumCount)
+        .map((skill) => ({
+          id: `skill:${skill.id}`,
+          label: skill.name,
+          kind: "skill" as const,
+          removable: true,
+        }));
+    }
+    return;
+  }
+
   const command = composerSlashCommandById(commandId);
   if (!command) return;
   taskError.value = "";
@@ -2102,6 +2145,26 @@ function updateSelectedHunk(id: string, event: Event): void {
 }
 
 function selectAllAvailableHunks(): void {
+  selectedHunkIds.value = availableChangeHunks.value.map((hunk) => hunk.id);
+}
+
+function hunkLocationLabel(header: string): string {
+  const match = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(header);
+  if (!match) return "Change block";
+  const [, oldLine, newLine] = match;
+  return oldLine === newLine ? `Line ${newLine}` : `Lines ${oldLine} → ${newLine}`;
+}
+
+function hunkContextLabel(header: string): string {
+  return header.replace(/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@\s*/, "").trim();
+}
+
+function syncDefaultHunkSelection(force = false): void {
+  if (!changeDiff.value?.partialSelection || !availableChangeHunks.value.length) {
+    if (force) selectedHunkIds.value = [];
+    return;
+  }
+  if (!force && selectedHunkIds.value.length) return;
   selectedHunkIds.value = availableChangeHunks.value.map((hunk) => hunk.id);
 }
 
@@ -3018,7 +3081,7 @@ async function probeRuntime(runtime: RuntimeSummary): Promise<void> {
   }
 }
 
-const runtimeDocumentationHosts = new Set(["developers.openai.com", "docs.anthropic.com", "docs.cursor.com", "opencode.ai"]);
+const runtimeDocumentationHosts = new Set(["developers.openai.com", "docs.anthropic.com", "docs.cursor.com", "opencode.ai", "antigravity.google"]);
 
 function terminalArgument(value: string): string {
   return /^[a-zA-Z0-9_./:@%+=,-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
@@ -3103,6 +3166,10 @@ async function providersChanged(): Promise<void> {
 }
 
 async function mcpServersChanged(): Promise<void> {
+  await loadState();
+}
+
+async function skillsChanged(): Promise<void> {
   await loadState();
 }
 
@@ -3484,6 +3551,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
           :team-policy-error="teamPolicyError"
           :team-policy-notice="teamPolicyNotice"
           :mcp-servers="state.mcpServers"
+          :skill-library="state.skillLibrary ?? []"
           :mcp-projects="state.projects"
           :selected-project-id="state.selectedProjectId"
           :model-providers="state.modelProviders"
@@ -3503,6 +3571,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
           @maintain="maintainRuntime"
           @probe="probeRuntime"
           @mcp-changed="mcpServersChanged"
+          @skills-changed="skillsChanged"
           @provider-connected="providerConnected"
           @providers-changed="providersChanged"
         />
@@ -3945,71 +4014,77 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
           </div>
 
           <div v-else-if="inspector === 'changes'" class="evidence-view change-inspector">
-            <section v-if="session?.worktree" class="worktree-finish" aria-label="Build recovery">
-              <osx-alert
-                v-if="session.worktree.status === 'applied'"
-                tone="success"
-                title="Changes applied"
-                :description="`The approved project contains this Build. Its checkpoint remains on ${session.worktree.branch}.`"
-              />
-              <osx-alert
-                v-else-if="session.worktree.status === 'conflicted'"
-                tone="warning"
-                title="Apply needs attention"
-                :description="session.worktree.conflict ?? 'The project changed. Review the overlap, then retry the preserved checkpoint.'"
-              />
-              <div v-if="session.worktree.conflicts?.length" class="conflict-summary" role="status">
-                <strong>{{ session.worktree.status === "conflicted" ? "Overlap isolated" : "Known overlap remains" }}</strong>
-                <ul>
-                  <li v-for="conflict in session.worktree.conflicts" :key="`${conflict.path}:${conflict.hunkIds?.join(',')}`">
-                    <button v-if="state.changes.some((change) => change.path === conflict.path)" type="button" @click="openChangedFile(conflict.path)">{{ conflict.path }}</button>
-                    <span v-else>{{ conflict.path }}</span>
-                    <small>{{ conflict.detail }}</small>
-                  </li>
-                </ul>
-                <small>The approved project was not changed. Select a safe file or hunk and apply it separately.</small>
-              </div>
-              <osx-alert
-                v-else-if="session.worktree.status === 'archived'"
-                tone="info"
-                title="Build archived"
-                :description="`The checkpoint and ${session.worktree.branch} recovery branch are preserved.`"
-              />
-              <osx-alert
-                v-else-if="session.worktree.status === 'cleaned'"
-                tone="neutral"
-                title="Worktree cleaned"
-                :description="`The local worktree was removed. Restore it from ${session.worktree.branch} whenever you need it.`"
-              />
-              <osx-alert
-                v-else-if="session.worktree.status === 'reverted'"
-                tone="info"
-                title="Changes reverted"
-                description="The exact checkpoint patch was removed from the project. The recovery branch is still available."
-              />
-              <osx-alert
-                v-else-if="session.worktree.status === 'applying'"
-                tone="info"
-                title="Applying changes"
-                description="The checkpoint is being validated against the approved project."
-              />
-              <osx-alert
-                v-else-if="session.worktree.status === 'stale'"
-                tone="error"
-                title="Apply state needs review"
-                description="The project and checkpoint both changed while application was interrupted. Your recovery branch is preserved."
-              />
-              <osx-alert
-                v-else-if="latestWorktreeApproval?.state === 'failed'"
-                tone="error"
-                title="Worktree action failed"
-                :description="latestWorktreeApproval.failure ?? 'Review the project and try again.'"
-              />
+            <section v-if="session?.worktree" class="worktree-finish" :class="{ compact: worktreeFinishCompact }" aria-label="Build recovery">
+              <template v-if="!worktreeFinishCompact">
+                <osx-alert
+                  v-if="session.worktree.status === 'applied'"
+                  tone="success"
+                  title="Changes applied"
+                  :description="`The approved project contains this Build. Its checkpoint remains on ${session.worktree.branch}.`"
+                />
+                <osx-alert
+                  v-else-if="session.worktree.status === 'conflicted'"
+                  tone="warning"
+                  title="Apply needs attention"
+                  :description="session.worktree.conflict ?? 'The project changed. Review the overlap, then retry the preserved checkpoint.'"
+                />
+                <div v-if="session.worktree.conflicts?.length" class="conflict-summary" role="status">
+                  <strong>{{ session.worktree.status === "conflicted" ? "Overlap isolated" : "Known overlap remains" }}</strong>
+                  <ul>
+                    <li v-for="conflict in session.worktree.conflicts" :key="`${conflict.path}:${conflict.hunkIds?.join(',')}`">
+                      <button v-if="state.changes.some((change) => change.path === conflict.path)" type="button" @click="openChangedFile(conflict.path)">{{ conflict.path }}</button>
+                      <span v-else>{{ conflict.path }}</span>
+                      <small>{{ conflict.detail }}</small>
+                    </li>
+                  </ul>
+                  <small>The approved project was not changed. Select a safe file or hunk and apply it separately.</small>
+                </div>
+                <osx-alert
+                  v-else-if="session.worktree.status === 'archived'"
+                  tone="info"
+                  title="Build archived"
+                  :description="`The checkpoint and ${session.worktree.branch} recovery branch are preserved.`"
+                />
+                <osx-alert
+                  v-else-if="session.worktree.status === 'cleaned'"
+                  tone="neutral"
+                  title="Worktree cleaned"
+                  :description="`The local worktree was removed. Restore it from ${session.worktree.branch} whenever you need it.`"
+                />
+                <osx-alert
+                  v-else-if="session.worktree.status === 'reverted'"
+                  tone="info"
+                  title="Changes reverted"
+                  description="The exact checkpoint patch was removed from the project. The recovery branch is still available."
+                />
+                <osx-alert
+                  v-else-if="session.worktree.status === 'applying'"
+                  tone="info"
+                  title="Applying changes"
+                  description="The checkpoint is being validated against the approved project."
+                />
+                <osx-alert
+                  v-else-if="session.worktree.status === 'stale'"
+                  tone="error"
+                  title="Apply state needs review"
+                  description="The project and checkpoint both changed while application was interrupted. Your recovery branch is preserved."
+                />
+                <osx-alert
+                  v-else-if="latestWorktreeApproval?.state === 'failed'"
+                  tone="error"
+                  title="Worktree action failed"
+                  :description="latestWorktreeApproval.failure ?? 'Review the project and try again.'"
+                />
+              </template>
               <div class="worktree-finish-actions">
-                <div>
+                <div v-if="!worktreeFinishCompact">
                   <strong>{{ session.worktree.status === "active" ? "Ready to finish?" : "Recovery controls" }}</strong>
                   <small>Every destructive step asks again. The checkpoint branch remains the source of recovery.</small>
                 </div>
+                <span v-else class="worktree-finish-compact-label">
+                  <osx-icon name="git-branch" :size="14" />
+                  <span>{{ session.worktree.branch }}</span>
+                </span>
                 <span class="worktree-action-buttons">
                   <osx-button
                     v-if="session.worktree.status === 'active' || session.worktree.status === 'conflicted'"
@@ -4018,14 +4093,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                     icon="check"
                     :disabled="sessionIsRunning || worktreeApplyPending || changedFiles.length === 0"
                     @click="requestApplyChanges"
-                  >{{ worktreeApplyPending ? "Waiting for approval" : session.worktree.status === "conflicted" ? "Retry apply" : "Apply changes" }}</osx-button>
-                  <osx-button
-                    v-if="['active', 'conflicted'].includes(session.worktree.status) && selectedChange && !session.worktree.appliedPaths?.includes(selectedChange)"
-                    variant="secondary"
-                    size="small"
-                    :disabled="sessionIsRunning || worktreeApplyPending"
-                    @click="requestApplyChanges([selectedChange])"
-                  >Apply file</osx-button>
+                  >{{ worktreeApplyPending ? "Waiting for approval" : session.worktree.status === "conflicted" ? "Retry apply" : "Apply all" }}</osx-button>
                   <osx-button
                     v-if="['active', 'conflicted', 'applied', 'reverted'].includes(session.worktree.status)"
                     variant="secondary"
@@ -4063,77 +4131,10 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
             </div>
             <template v-else>
               <div :class="['change-workbench', { 'preview-open': selectedChange }]" aria-label="Build changes">
-                <section
-                  v-if="selectedChange"
-                  :id="evidenceDomId('change', selectedChange)"
-                  class="diff-preview"
-                  aria-label="Change diff"
-                >
-                  <header>
-                    <span><osx-icon name="git-branch" :size="14" /> {{ selectedChange }}</span>
-                    <span class="file-preview-actions">
-                      <osx-badge v-if="changeDiff" size="small" :label="`+${changeDiff.additions} −${changeDiff.deletions}`" />
-                      <osx-icon-button label="Close change diff" icon="close" size="small" @click="closeChangeDiff" />
-                    </span>
-                  </header>
-                  <div v-if="changeLoading" class="file-preview-state"><osx-spinner size="small" label="Loading diff" show-label /></div>
-                  <osx-alert v-else-if="changeError" tone="error" title="Diff not opened" :description="changeError" />
-                  <template v-else-if="changeDiff">
-                    <fieldset v-if="changeDiff.partialSelection && availableChangeHunks.length" class="hunk-selector">
-                      <legend>Apply exact hunks</legend>
-                      <div class="hunk-selector-list">
-                        <label
-                          v-for="(hunk, index) in availableChangeHunks"
-                          :key="hunk.id"
-                          :class="{ conflict: conflictingHunkIds.has(hunk.id) }"
-                        >
-                          <input
-                            type="checkbox"
-                            :checked="selectedHunkIds.includes(hunk.id)"
-                            :aria-label="`Select hunk ${index + 1}: ${hunk.header}`"
-                            @change="updateSelectedHunk(hunk.id, $event)"
-                          >
-                          <span><strong>Hunk {{ index + 1 }}</strong><code>{{ hunk.header }}</code></span>
-                          <small>+{{ hunk.additions }} −{{ hunk.deletions }}</small>
-                          <osx-badge v-if="conflictingHunkIds.has(hunk.id)" size="small" tone="warning" label="Overlaps" />
-                        </label>
-                      </div>
-                      <footer>
-                        <span>
-                          <button type="button" @click="selectAllAvailableHunks">Select all</button>
-                          <button v-if="selectedHunkIds.length" type="button" @click="selectedHunkIds = []">Clear</button>
-                        </span>
-                        <osx-button
-                          variant="primary"
-                          size="small"
-                          :disabled="!selectedHunkIds.length || sessionIsRunning || worktreeApplyPending"
-                          @click="requestApplySelectedHunks"
-                        >
-                          Apply {{ selectedHunkIds.length }} {{ selectedHunkIds.length === 1 ? "hunk" : "hunks" }}
-                        </osx-button>
-                      </footer>
-                    </fieldset>
-                    <osx-alert
-                      v-else-if="!changeDiff.partialSelection && !changeDiff.binary && changeDiff.hunks.length"
-                      tone="neutral"
-                      title="Whole-file change"
-                      description="New, deleted, renamed, and already-partial files are applied as a whole to preserve Git semantics."
-                    />
-                    <osx-diff-viewer
-                      :file="changeDiff.path"
-                      :patch="changeDiff.patch"
-                      view="unified"
-                      :language="changeDiff.language"
-                      :additions="changeDiff.additions"
-                      :deletions="changeDiff.deletions"
-                      :label="`Diff for ${changeDiff.path}`"
-                    />
-                  </template>
-                </section>
                 <div class="changed-file-list">
                   <header class="changed-file-summary">
                     <strong>{{ changedFiles.length }} {{ changedFiles.length === 1 ? "file" : "files" }} changed</strong>
-                    <small>Select a file to review</small>
+                    <small>{{ selectedChange ? "Reviewing" : "Select a file" }}</small>
                   </header>
                   <button
                     v-for="file in changedFiles"
@@ -4152,6 +4153,111 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                     <osx-badge v-if="session?.worktree?.appliedPaths?.includes(file.path)" size="small" label="Applied" tone="success" />
                   </button>
                 </div>
+                <div v-if="selectedChange" class="change-workbench-divider" aria-hidden="true" />
+                <section
+                  v-if="selectedChange"
+                  :id="evidenceDomId('change', selectedChange)"
+                  class="diff-preview"
+                  aria-label="Change diff"
+                >
+                  <header>
+                    <span class="diff-preview-title">
+                      <osx-icon name="file-text" :size="14" />
+                      <small v-if="selectedChangeDirectory">{{ selectedChangeDirectory }}/</small>
+                      <strong>{{ selectedChangeFileName }}</strong>
+                    </span>
+                    <span class="file-preview-actions">
+                      <osx-badge v-if="changeDiff" size="small" :label="`+${changeDiff.additions} −${changeDiff.deletions}`" />
+                      <osx-icon-button label="Close change diff" icon="close" size="small" @click="closeChangeDiff" />
+                    </span>
+                  </header>
+                  <div v-if="changeLoading" class="file-preview-state"><osx-spinner size="small" label="Loading diff" show-label /></div>
+                  <osx-alert v-else-if="changeError" tone="error" title="Diff not opened" :description="changeError" />
+                  <template v-else-if="changeDiff">
+                    <div class="diff-preview-body">
+                      <div class="diff-viewer-pane">
+                        <osx-alert
+                          v-if="!changeDiff.partialSelection && !changeDiff.binary && changeDiff.hunks.length"
+                          tone="neutral"
+                          title="Whole-file change"
+                          description="New, deleted, renamed, and already-partial files are applied as a whole to preserve Git semantics."
+                        />
+                        <osx-diff-viewer
+                          :file="changeDiff.path"
+                          :patch="changeDiff.patch"
+                          view="unified"
+                          :language="changeDiff.language"
+                          :additions="changeDiff.additions"
+                          :deletions="changeDiff.deletions"
+                          :label="`Diff for ${changeDiff.path}`"
+                        />
+                      </div>
+                      <aside
+                        v-if="changeDiff.partialSelection && availableChangeHunks.length"
+                        class="hunk-rail"
+                        aria-label="Hunks to apply"
+                      >
+                        <header class="hunk-rail-header">
+                          <strong>Hunks</strong>
+                          <small>{{ selectedHunkIds.length }}/{{ availableChangeHunks.length }}</small>
+                        </header>
+                        <div class="hunk-rail-list" role="group" aria-label="Hunks to apply">
+                          <label
+                            v-for="(hunk, index) in availableChangeHunks"
+                            :key="hunk.id"
+                            :class="{ conflict: conflictingHunkIds.has(hunk.id), selected: selectedHunkIds.includes(hunk.id) }"
+                          >
+                            <input
+                              type="checkbox"
+                              :checked="selectedHunkIds.includes(hunk.id)"
+                              :aria-label="`Select hunk ${index + 1}: ${hunkLocationLabel(hunk.header)}`"
+                              @change="updateSelectedHunk(hunk.id, $event)"
+                            >
+                            <span class="hunk-rail-copy">
+                              <strong>{{ hunkLocationLabel(hunk.header) }}</strong>
+                              <small v-if="hunkContextLabel(hunk.header)">{{ hunkContextLabel(hunk.header) }}</small>
+                              <span class="hunk-rail-stats">+{{ hunk.additions }} −{{ hunk.deletions }}</span>
+                            </span>
+                            <osx-badge v-if="conflictingHunkIds.has(hunk.id)" size="small" tone="warning" label="Overlaps" />
+                          </label>
+                        </div>
+                        <footer class="hunk-rail-footer">
+                          <button type="button" @click="selectAllAvailableHunks">Select all</button>
+                          <button v-if="selectedHunkIds.length" type="button" @click="selectedHunkIds = []">Clear</button>
+                        </footer>
+                      </aside>
+                    </div>
+                    <footer
+                      v-if="['active', 'conflicted'].includes(session?.worktree?.status ?? '') && !session?.worktree?.appliedPaths?.includes(selectedChange)"
+                      class="diff-preview-footer"
+                    >
+                      <small v-if="changeDiff.partialSelection && availableChangeHunks.length">
+                        {{ selectedHunkIds.length }} of {{ availableChangeHunks.length }} hunks selected
+                      </small>
+                      <small v-else>Apply this file to the approved project</small>
+                      <span class="diff-preview-footer-actions">
+                        <osx-button
+                          v-if="changeDiff.partialSelection && availableChangeHunks.length"
+                          variant="primary"
+                          size="small"
+                          icon="check"
+                          :disabled="!selectedHunkIds.length || sessionIsRunning || worktreeApplyPending"
+                          @click="requestApplySelectedHunks"
+                        >
+                          Apply {{ selectedHunkIds.length }} {{ selectedHunkIds.length === 1 ? "hunk" : "hunks" }}
+                        </osx-button>
+                        <osx-button
+                          v-else
+                          variant="primary"
+                          size="small"
+                          icon="check"
+                          :disabled="sessionIsRunning || worktreeApplyPending"
+                          @click="requestApplyChanges([selectedChange])"
+                        >Apply file</osx-button>
+                      </span>
+                    </footer>
+                  </template>
+                </section>
               </div>
             </template>
           </div>

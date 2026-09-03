@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildComposerSlashCommandSuggestions,
+  buildUserComposerSlashCommandSuggestions,
   composerSlashCommandById,
   composerSlashCommandDefinitionsForTest,
   type ComposerSlashCommandContext,
@@ -62,5 +63,37 @@ describe("composer slash commands", () => {
       mode: "ask",
       prompt: expect.stringContaining("external attachments"),
     });
+  });
+
+  it("merges project slash commands after built-ins", () => {
+    const suggestions = buildComposerSlashCommandSuggestions(baseContext, [{
+      id: "abc",
+      name: "review-pr",
+      description: "Review like a staff engineer.",
+      mode: "review",
+      prompt: "Review the branch.",
+      scope: "project",
+      path: ".vraxis/commands/review-pr.md",
+    }]);
+    const builtInIndex = suggestions.findIndex((item) => item.id === "command:verify");
+    const userIndex = suggestions.findIndex((item) => item.id === "command:user:abc");
+    expect(userIndex).toBeGreaterThan(builtInIndex);
+    expect(suggestions[userIndex]).toMatchObject({
+      label: "review-pr",
+      group: "Project commands",
+    });
+  });
+
+  it("disables project build commands when the runtime cannot write", () => {
+    const suggestions = buildUserComposerSlashCommandSuggestions([{
+      id: "build-recipe",
+      name: "ship",
+      description: "Implement a focused change.",
+      mode: "build",
+      prompt: "Implement the change.",
+      scope: "project",
+      path: ".vraxis/commands/ship.md",
+    }], { ...baseContext, runtimeCanBuild: false });
+    expect(suggestions[0]?.disabled).toBe(true);
   });
 });

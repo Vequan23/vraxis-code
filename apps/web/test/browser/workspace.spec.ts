@@ -1764,7 +1764,7 @@ test("starts Build in an isolated worktree and opens a closable exact diff", asy
   await page.getByRole("tab", { name: "Changes" }).click();
   await expect(page.getByRole("region", { name: "Change diff" })).toHaveCount(0);
   await expect(page.getByText("1 file changed", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Apply changes" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Apply all" })).toBeVisible();
   const changedFile = page.getByRole("button", { name: "src/index.ts modified" });
   const changedFileBounds = await changedFile.boundingBox();
   expect(changedFileBounds?.height).toBeLessThanOrEqual(44);
@@ -1773,15 +1773,14 @@ test("starts Build in an isolated worktree and opens a closable exact diff", asy
   await expect(page.getByRole("region", { name: "Change diff" })).toBeVisible();
   await expect(page.getByLabel("Diff for src/index.ts")).toBeVisible();
   await expect(page.locator(".diff-preview > header").getByText("+1 −0", { exact: true })).toBeVisible();
-  await expect(page.getByRole("group", { name: "Apply exact hunks" })).toBeVisible();
-  await page.getByRole("checkbox", { name: "Select hunk 1" }).check();
+  await expect(page.getByRole("complementary", { name: "Hunks to apply" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Apply 1 hunk" })).toBeEnabled();
   await page.screenshot({ path: testInfo.outputPath("selective-hunk-review.png"), fullPage: true });
   await page.getByRole("button", { name: "Clear" }).click();
   await expect(page.getByRole("button", { name: "Apply 0 hunks" })).toBeDisabled();
   await page.getByRole("button", { name: "Close change diff" }).click();
   await expect(page.getByRole("region", { name: "Change diff" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Apply changes" }).click();
+  await page.getByRole("button", { name: "Apply all" }).click();
   await expect(page.getByText("Apply Build changes", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Allow once" }).click();
   await expect(page.getByText("Changes applied", { exact: true }).first()).toBeVisible();

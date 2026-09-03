@@ -402,6 +402,41 @@ export interface SkillSummary {
   version: string;
   scopes: SkillScope[];
   runtimes: string[];
+  sourceLabel?: string;
+  manifestPath?: string;
+  compatibility?: SkillCompatibility;
+  issue?: string;
+  repairable?: boolean;
+}
+
+export type SkillCompatibility = "ready" | "incompatible" | "unreadable";
+
+export type ComposerCommandScope = "project" | "user";
+
+export interface ComposerCommandSummary {
+  id: string;
+  name: string;
+  description: string;
+  mode: SessionMode;
+  prompt: string;
+  scope: ComposerCommandScope;
+  path: string;
+  skillNames?: string[];
+  icon?: string;
+  keywords?: string[];
+}
+
+export interface InstallSkillsRequest {
+  projectId: string;
+  source: string;
+  global?: boolean;
+  skillNames?: string[];
+  agents?: string[];
+}
+
+export interface RepairSkillRequest {
+  projectId: string;
+  skillId: string;
 }
 
 export interface SkillReference {
@@ -456,7 +491,7 @@ export interface ApprovalSummary {
   scope: string;
   risk: ApprovalRisk;
   state: ApprovalState;
-  source: "agent" | "terminal" | "browser" | "worktree" | "mcp";
+  source: "agent" | "terminal" | "browser" | "worktree" | "mcp" | "skills";
   actor?: "user" | "agent" | "system";
   boundary?: "read-only-project" | "isolated-worktree" | "controlled-browser" | "approved-project" | "external-server";
   authority?: {
@@ -800,6 +835,8 @@ export interface BootstrapState {
   modelProviders: ModelProviderSummary[];
   mcpServers: McpServerSummary[];
   skills: SkillSummary[];
+  skillLibrary?: SkillSummary[];
+  composerCommands?: ComposerCommandSummary[];
   selectedProjectId?: string;
   selectedSessionId?: string;
   files: WorkspaceFile[];
@@ -1366,6 +1403,13 @@ function boundedString(value: unknown, label: string, maximumLength: number, all
   return result;
 }
 
+function optionalStringArray(value: unknown, label: string, maximumLength: number, maximumCount: number): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) throw new TypeError(`${label} list must be an array.`);
+  if (value.length > maximumCount) throw new TypeError(`Use no more than ${maximumCount} ${label.toLowerCase()} entries.`);
+  return value.map((item, index) => boundedString(item, `${label} ${index + 1}`, maximumLength));
+}
+
 /** Normalizes a user-provided Build branch slug for host-managed vraxis/* branches. */
 export function normalizeBranchSlug(value: string): string {
   const slug = value.trim().toLowerCase()
@@ -1718,6 +1762,30 @@ export function parseConnectMcpServerRequest(value: unknown): ConnectMcpServerRe
     transport: "streamable-http",
     url: boundedString(input.url, "MCP URL", 4_096),
     ...(credential ? { credential } : {}),
+  };
+}
+
+export function parseInstallSkillsRequest(value: unknown): InstallSkillsRequest {
+  const input = record(value, "Skill install");
+  const projectId = boundedString(input.projectId, "Project id", 120);
+  const source = boundedString(input.source, "Skill source", 4_096);
+  const global = input.global === true;
+  const skillNames = optionalStringArray(input.skillNames, "Skill name", 120, 32);
+  const agents = optionalStringArray(input.agents, "Agent", 64, 16);
+  return {
+    projectId,
+    source,
+    ...(global ? { global: true } : {}),
+    ...(skillNames?.length ? { skillNames } : {}),
+    ...(agents?.length ? { agents } : {}),
+  };
+}
+
+export function parseRepairSkillRequest(value: unknown): RepairSkillRequest {
+  const input = record(value, "Skill repair");
+  return {
+    projectId: boundedString(input.projectId, "Project id", 120),
+    skillId: boundedString(input.skillId, "Skill id", 64),
   };
 }
 

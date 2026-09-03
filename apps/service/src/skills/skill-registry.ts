@@ -5,7 +5,8 @@ import {
   type AgentSkillInventory,
   type InventoriedAgentSkill,
 } from "@vraxis/agent-v/node";
-import type { SkillReference, SkillScope, SkillSummary } from "@vraxis/code-contracts";
+import type { SkillCompatibility, SkillReference, SkillScope, SkillSummary } from "@vraxis/code-contracts";
+import { isMetadataRepairableIssue } from "./skills-repair.js";
 
 export type SkillInventoryDiscovery = typeof discoverAgentSkillInventory;
 
@@ -27,13 +28,24 @@ function unique<T>(values: readonly T[]): T[] {
 }
 
 function summary(skill: InventoriedAgentSkill): SkillSummary {
+  const exposure = skill.exposures[0];
+  const compatibility: SkillCompatibility = skill.status === "unreadable"
+    ? "unreadable"
+    : skill.agentVCompatible && skill.loaded
+      ? "ready"
+      : "incompatible";
   return {
     id: publicId(skill),
     name: skill.name,
     description: skill.description,
     version: skill.version,
-    scopes: unique(skill.exposures.map((exposure) => exposure.scope)) as SkillScope[],
+    scopes: unique(skill.exposures.map((item) => item.scope)) as SkillScope[],
     runtimes: [...skill.runtimes],
+    sourceLabel: exposure?.sourceId.split(":")[0] ?? "skill",
+    manifestPath: skill.manifestPath,
+    compatibility,
+    ...(skill.issue ? { issue: skill.issue } : {}),
+    ...(isMetadataRepairableIssue(skill.issue) ? { repairable: true } : {}),
   };
 }
 
@@ -43,6 +55,24 @@ export class SkillRegistry {
   async summaries(projectPath: string): Promise<SkillSummary[]> {
     const inventory = await this.discover({ cwd: projectPath });
     return readySkills(inventory).map(summary);
+  }
+
+  async library(projectPath: string): Promise<SkillSummary[]> {
+    const inventory = await this.discover({ cwd: projectPath });
+    return inventory.skills.map(summary);
+  }
+
+  async findLibrarySkill(projectPath: string, skillId: string): Promise<SkillSummary | undefined> {
+    return (await this.library(projectPath)).find((skill) => skill.id === skillId);
+  }
+
+  async resolveByNames(projectPath: string, skillNames: readonly string[]): Promise<string[]> {
+    if (!skillNames.length) return [];
+    const inventory = await this.discover({ cwd: projectPath });
+    const byName = new Map(readySkills(inventory).map((skill) => [skill.name.toLowerCase(), publicId(skill)]));
+    return skillNames
+      .map((name) => byName.get(name.toLowerCase()))
+      .filter((id): id is string => Boolean(id));
   }
 
   async resolve(projectPath: string, skillIds: readonly string[] = []): Promise<ResolvedSkill[]> {
