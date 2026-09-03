@@ -1141,15 +1141,28 @@ export interface HarnessMetricsTrendV1 {
 
 export type HarnessMetricsRecommendationKind =
   | "prefer-runtime"
+  | "prefer-mode"
   | "review-runtime"
+  | "verify-conformance"
+  | "high-compaction"
+  | "high-tokens"
   | "trend-warning"
   | "collect-more-data";
 
 export type HarnessMetricsRecommendationConfidence = "low" | "medium" | "high";
 
-export interface HarnessMetricsRecommendationActionV1 {
-  type: "set-default-runtime" | "disable-runtime" | "probe-runtime";
-  runtimeId: string;
+export type HarnessMetricsRecommendationActionV1 =
+  | { type: "set-default-runtime"; runtimeId: string }
+  | { type: "set-default-mode"; mode: SessionMode }
+  | { type: "disable-runtime"; runtimeId: string }
+  | { type: "probe-runtime"; runtimeId: string };
+
+export interface HarnessRoutingHintV1 {
+  id: string;
+  suggestedRuntimeId?: string;
+  suggestedMode?: SessionMode;
+  reason: string;
+  confidence: HarnessMetricsRecommendationConfidence;
 }
 
 export interface HarnessMetricsRecommendationV1 {
@@ -1175,6 +1188,7 @@ export interface HarnessMetricsSummaryV1 {
   byRuntime: HarnessRuntimeStatsV1[];
   recentTrend?: HarnessMetricsTrendV1;
   recommendations?: HarnessMetricsRecommendationV1[];
+  routingHint?: HarnessRoutingHintV1;
 }
 
 export interface HarnessMetricsExportV1 {

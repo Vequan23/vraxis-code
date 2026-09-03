@@ -11,17 +11,25 @@ export function settingsPatchForRecommendationAction(
   if (action.type === "set-default-runtime") {
     return { defaultRuntimeId: action.runtimeId };
   }
+  if (action.type === "set-default-mode") {
+    return { defaultMode: action.mode };
+  }
   if (action.type === "disable-runtime") {
     return { disabledRuntimeIds: [...new Set([...(settings.disabledRuntimeIds ?? []), action.runtimeId])] };
   }
   return {};
 }
 
+function recommendationRuntimeId(action: HarnessMetricsRecommendationActionV1 | undefined): string | undefined {
+  if (!action || action.type === "set-default-mode") return undefined;
+  return action.runtimeId;
+}
+
 export function recommendationAppliesToRuntime(
   runtimeId: string,
-  recommendation: { runtimeId?: string; suggestedRuntimeId?: string; action?: { runtimeId?: string } },
+  recommendation: { runtimeId?: string; suggestedRuntimeId?: string; action?: HarnessMetricsRecommendationActionV1 },
 ): boolean {
   return recommendation.runtimeId === runtimeId
     || recommendation.suggestedRuntimeId === runtimeId
-    || recommendation.action?.runtimeId === runtimeId;
+    || recommendationRuntimeId(recommendation.action) === runtimeId;
 }

@@ -13,41 +13,41 @@ import {
   type ApprovalPolicy,
 } from "@vraxis/agent-v";
 import type { McpConnectionAuthorizer } from "@vraxis/agent-v/mcp";
-import { LocalCliRuntimeEngine, builtInRuntimes } from "@vraxis/agent-v/local-cli";
+import { builtInRuntimes } from "@vraxis/agent-v/local-cli";
+import { createLocalCliRuntimeEngine } from "./local-cli-runtimes.js";
 import { type ModelProviderId } from "@vraxis/agent-v/providers";
 import { createAgentRuntime } from "@vraxis/agent-v/runtime";
 import {
   attachedSkillsFromMetadata,
+  attachedSkillArtifacts,
   modeRuntimeSelection,
   runtimeAgentSkillsFromMetadata,
 } from "./mode-agent-runtime.js";
 import { createBrowserTools, createPureTools, type BrowserController } from "@vraxis/agent-v/tools";
 import { createWorkspaceTools } from "@vraxis/agent-v/tools/node";
-import { modeAgentProfile, sessionModes, type SessionMode, type WorktreeSummary } from "@vraxis/code-contracts";
+import { modeAgentProfile, sessionModes, type SessionMode } from "@vraxis/code-contracts";
 import type { ModelProviderRegistry } from "../model-providers/model-provider-registry.js";
 import type { ApprovalRegistry } from "../approvals/approval-registry.js";
 import type { BrowserWorkspace } from "../browser/browser-workspace.js";
 import { createAgentTerminalPollTool, createAgentTerminalStopTool, createAgentTerminalTool } from "../terminal/agent-terminal-tool.js";
 import type { TerminalRegistry } from "../terminal/terminal-registry.js";
 import { createAgentEvidenceTool } from "../sessions/agent-evidence-tool.js";
-import { BUILD_GIT_POLICY_INSTRUCTION, buildWorktreeInstructionBlock, worktreeFromRuntimeMetadata } from "../sessions/build-workspace-context.js";
+import { worktreeFromRuntimeMetadata } from "../sessions/build-workspace-context.js";
+import { hostAgentInstructions, mergeHostInstructions } from "../sessions/host-run-instructions.js";
 import { createAgentVerificationHandoffTool } from "../sessions/agent-verification-handoff-tool.js";
-import { TASK_RECOVERY_INSTRUCTION } from "../sessions/task-recovery-instruction.js";
 import type { VerificationRegistry } from "../verification/verification-registry.js";
 import { createPromptWebFetchTool } from "../web/prompt-web-access.js";
 import type { McpServerRegistry, McpTaskConnection } from "../mcp/mcp-server-registry.js";
 
 const developmentCommands = ["bun", "cargo", "git", "go", "node", "npm", "npx", "pnpm", "python3", "pytest", "rg", "yarn"] as const;
 
-function builderInstructions(worktree?: WorktreeSummary): string {
-  const parts = [
-    "Work only inside the approved isolated worktree. Request approval for guarded writes, commands, network, or browser actions and verify the result.",
-    TASK_RECOVERY_INSTRUCTION,
-  ];
-  if (worktree) {
-    parts.push(buildWorktreeInstructionBlock(worktree), BUILD_GIT_POLICY_INSTRUCTION);
+function withoutAttachedSkillArtifacts<T extends { artifacts?: readonly { id?: string }[] }>(input: T): T {
+  const artifacts = input.artifacts?.filter((artifact) => !artifact.id?.startsWith("attached-skill:"));
+  if (!artifacts?.length) {
+    const { artifacts: _removed, ...rest } = input;
+    return rest as T;
   }
-  return parts.join("\n\n");
+  return { ...input, artifacts };
 }
 
 function uniqueTools(...groups: readonly (readonly AgentTool[])[]): AgentTool[] {
@@ -75,7 +75,7 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
     private readonly terminal?: TerminalRegistry,
     private readonly verifications?: VerificationRegistry,
     private readonly mcpServers?: McpServerRegistry,
-    private readonly local = new LocalCliRuntimeEngine({ timeoutMs: 10 * 60_000 }),
+    private readonly local = createLocalCliRuntimeEngine({ timeoutMs: 10 * 60_000 }),
   ) {}
 
   async inspect(runtimeId: string): Promise<RuntimeReadiness> {
@@ -183,9 +183,7 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
       agent: {
         id: request.workspaceAccess === "workspace-write" ? "vraxis-code-builder" : "vraxis-code-reader",
         name: "Vraxis Code",
-        instructions: request.workspaceAccess === "workspace-write"
-          ? builderInstructions(worktree)
-          : `Inspect only the approved repository and browser evidence. Use read tools for evidence and never claim files you did not inspect. ${TASK_RECOVERY_INSTRUCTION}`,
+        instructions: hostAgentInstructions(mode, worktree),
         recipe,
         skills: extraSkillIds,
         tools: tools.map((tool) => tool.name),
@@ -204,7 +202,7 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
       ...(request.sessionId ? { sessionId: request.sessionId } : {}),
       ...(request.abortSignal ? { abortSignal: request.abortSignal } : {}),
       scope,
-      input: request.input,
+      input: withoutAttachedSkillArtifacts(request.input),
       output: request.output,
       model: selectedModel,
       budget: { maxTokens: await this.contextWindow(request.runtimeId, selectedModel) },
@@ -291,8 +289,22 @@ export class VraxisCodeRuntimeEngine implements CodingRuntimeEngine {
     tools: readonly AgentTool[],
     events?: EventSink,
   ): Promise<CodingRuntimeResult<T>> {
+    const requestedMode = request.metadata?.mode;
+    const mode: SessionMode = typeof requestedMode === "string" && sessionModes.includes(requestedMode as SessionMode)
+      ? requestedMode as SessionMode
+      : "ask";
+    const worktree = worktreeFromRuntimeMetadata(request.metadata?.worktree);
+    const attachedSkills = attachedSkillsFromMetadata(request.metadata?.attachedSkills);
+    const skillArtifacts = attachedSkillArtifacts(attachedSkills);
+    const input = {
+      ...request.input,
+      instructions: mergeHostInstructions(request.input.instructions, hostAgentInstructions(mode, worktree)),
+      ...(skillArtifacts.length || request.input.artifacts?.length
+        ? { artifacts: [...(request.input.artifacts ?? []), ...skillArtifacts] }
+        : {}),
+    };
     const managed = manageAgentContext({
-      input: request.input,
+      input,
       tools,
       maxInputTokens: 64_000,
       ...(request.trajectory ? { trajectory: request.trajectory } : {}),

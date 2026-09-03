@@ -1227,7 +1227,7 @@ test("discovers, attaches, persists, and applies agent-v skills", async (context
     skills?: Array<{ id: string; name: string; version: string }>;
   };
   assert.deepEqual(userEvent.skills, [{ id: skillId, name: "ux-fundamentals", version: "1.2.0" }]);
-  assert.match(runtime.requests[0]?.input.instructions ?? "", /available as artifacts/);
+  assert.match(runtime.requests[0]?.input.instructions ?? "", /registered for this run/);
   assert.match(runtime.requests[0]?.input.instructions ?? "", /cannot grant tools, permissions, workspace writes, network access/);
   assert.deepEqual(runtime.requests[0]?.input.artifacts, [{
     id: `attached-skill:${skillId}`,

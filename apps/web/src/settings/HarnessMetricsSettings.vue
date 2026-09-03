@@ -9,6 +9,7 @@ import type {
   UserSettings,
 } from "@vraxis/code-contracts";
 import HarnessRecommendationList from "./HarnessRecommendationList.vue";
+import HarnessMetricsScorecard from "./HarnessMetricsScorecard.vue";
 import { settingsPatchForRecommendationAction } from "./harness-recommendation-actions.js";
 
 const props = defineProps<{
@@ -192,6 +193,11 @@ onMounted(() => {
     </div>
 
     <template v-else>
+      <HarnessMetricsScorecard
+        v-if="enabled && summary && runtimeStats.length"
+        :summary="summary"
+      />
+
       <HarnessRecommendationList
         v-if="enabled && recommendations.length"
         :recommendations="recommendations"
@@ -208,7 +214,9 @@ onMounted(() => {
               <th scope="col">Runtime</th>
               <th scope="col">Runs</th>
               <th scope="col">Avg time</th>
+              <th scope="col">Avg tokens</th>
               <th scope="col">Tool fail</th>
+              <th scope="col">Compaction</th>
               <th scope="col">Approvals</th>
               <th scope="col">Verify pass</th>
             </tr>
@@ -218,7 +226,9 @@ onMounted(() => {
               <td>{{ runtimeLabel(stat) }}</td>
               <td>{{ stat.runs }}</td>
               <td>{{ Math.round(stat.avgDurationMs / 1000) }}s</td>
+              <td>{{ stat.avgTokens === undefined ? "—" : `${Math.round(stat.avgTokens / 1000)}k` }}</td>
               <td>{{ percent(stat.toolFailureRate) }}</td>
+              <td>{{ percent(stat.compactionRate) }}</td>
               <td>{{ percent(stat.approvalRate) }}</td>
               <td>{{ stat.verificationPassRate === undefined ? "—" : percent(stat.verificationPassRate) }}</td>
             </tr>

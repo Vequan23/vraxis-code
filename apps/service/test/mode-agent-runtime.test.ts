@@ -3,6 +3,7 @@ import test from "node:test";
 import { builtInAgentSkills } from "@vraxis/agent-v/skills";
 import {
   activeRuntimeSkillNames,
+  attachedSkillArtifacts,
   attachedSkillMetadata,
   attachedSkillsFromMetadata,
   modeRuntimeSelection,
@@ -65,4 +66,26 @@ test("round-trips attached skill metadata for runtime reconstruction", () => {
   const restored = attachedSkillsFromMetadata(metadata);
   assert.deepEqual(restored, metadata);
   assert.equal(runtimeAgentSkillsFromMetadata("ask", restored).find((skill) => skill.id === "attached-abc")?.name, "UX fundamentals");
+});
+
+test("builds attached skill artifacts for local runtime runs", () => {
+  const metadata = attachedSkillMetadata([{
+    reference: { id: "abc", name: "UX fundamentals", version: "1.0.0" },
+    skill: defineSkill({
+      id: "ux-fundamentals",
+      name: "UX fundamentals",
+      version: "1.0.0",
+      instructions: "Preserve visible system status.",
+      tools: [],
+      trust: "local",
+    }),
+  }]);
+  assert.deepEqual(attachedSkillArtifacts(metadata), [{
+    id: "attached-skill:abc",
+    uri: "vraxis-skill:///abc/1.0.0",
+    mediaType: "text/markdown",
+    title: "UX fundamentals",
+    content: "Preserve visible system status.",
+    metadata: { skillId: "abc", version: "1.0.0" },
+  }]);
 });

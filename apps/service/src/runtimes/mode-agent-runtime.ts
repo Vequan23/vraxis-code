@@ -1,4 +1,4 @@
-import { defineSkill, type AgentSkill } from "@vraxis/agent-v";
+import { defineSkill, type AgentSkill, type ContextArtifact } from "@vraxis/agent-v";
 import { builtInAgentSkills, builtInSkillsForRecipe, type StarterRecipeId } from "@vraxis/agent-v/skills";
 import type { SessionMode } from "@vraxis/code-contracts";
 import type { ResolvedSkill } from "../skills/skill-registry.js";
@@ -82,6 +82,17 @@ export function attachedSkillsJsonMetadata(skills: readonly ResolvedSkill[]): Ar
     version: skill.version,
     instructions: skill.instructions,
     ...(skill.description ? { description: skill.description } : {}),
+  }));
+}
+
+export function attachedSkillArtifacts(skills: readonly AttachedSkillMetadata[]): ContextArtifact[] {
+  return skills.map((skill) => ({
+    id: `attached-skill:${skill.id}`,
+    uri: `vraxis-skill:///${skill.id}/${encodeURIComponent(skill.version)}`,
+    mediaType: "text/markdown",
+    title: skill.name,
+    content: skill.instructions,
+    metadata: { skillId: skill.id, version: skill.version },
   }));
 }
 

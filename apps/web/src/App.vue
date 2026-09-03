@@ -42,6 +42,8 @@ import {
   type TaskEvidenceKindV1,
   type UnderstandArtifactEnvelopeV1,
   type UnderstandEvidenceLinkV1,
+  type HarnessMetricsSummaryV1,
+  type HarnessRoutingHintV1,
   type UpdateSettingsRequest,
   type UserSettings,
   type WorkspaceDiff,
@@ -97,6 +99,8 @@ const taskEnd = ref<HTMLElement>();
 const latestMessagesHidden = ref(false);
 const composerAttachments = ref<OsxAgentComposerAttachment[]>([]);
 const composerContextItems = ref<OsxAgentComposerContextItem[]>([]);
+const harnessMetricsSummary = ref<HarnessMetricsSummaryV1 | null>(null);
+const dismissedRoutingHintId = ref("");
 const attachmentReferences = new Map<string, PromptAttachment>();
 interface PreparedPrompt {
   prompt: string;
@@ -617,6 +621,22 @@ const runningProjectIds = computed(() => new Set(
 const modeLabel = computed(() => mode.value.charAt(0).toUpperCase() + mode.value.slice(1));
 const sessionIsRunning = computed(() => session.value?.status === "running");
 const composerPending = computed(() => submitting.value || sessionIsRunning.value);
+const composerRoutingHint = computed(() => {
+  const hint = harnessMetricsSummary.value?.routingHint;
+  if (!hint || !state.settings.harnessMetricsEnabled || sessionIsRunning.value) return null;
+  if (dismissedRoutingHintId.value === hint.id) return null;
+  const runtimeId = runtime.value?.id ?? selectedRuntimeId.value;
+  const runtimeMatches = !hint.suggestedRuntimeId || hint.suggestedRuntimeId === runtimeId;
+  const modeMatches = !hint.suggestedMode || hint.suggestedMode === mode.value;
+  if (runtimeMatches && modeMatches) return null;
+  return hint;
+});
+watch(() => state.settings.harnessMetricsEnabled, () => {
+  void refreshHarnessMetrics();
+}, { immediate: true });
+watch(sessionIsRunning, (running, wasRunning) => {
+  if (wasRunning && !running) void refreshHarnessMetrics();
+});
 const activeToolSequence = computed(() => {
   if (!sessionIsRunning.value) return undefined;
   const latestUserSequence = [...sessionEvents.value].reverse()
@@ -2622,6 +2642,51 @@ function closeSettings(): void {
   activeView.value = "workspace";
 }
 
+function runtimeDisplayName(runtimeId: string): string {
+  return state.runtimes.find((item) => item.id === runtimeId)?.name ?? runtimeId;
+}
+
+function routingHintLabel(hint: HarnessRoutingHintV1): string {
+  const parts: string[] = [];
+  if (hint.suggestedRuntimeId) parts.push(runtimeDisplayName(hint.suggestedRuntimeId));
+  if (hint.suggestedMode) parts.push(hint.suggestedMode.charAt(0).toUpperCase() + hint.suggestedMode.slice(1));
+  return parts.join(" · ");
+}
+
+async function refreshHarnessMetrics(): Promise<void> {
+  if (!state.settings.harnessMetricsEnabled) {
+    harnessMetricsSummary.value = null;
+    return;
+  }
+  try {
+    const response = await fetch("/api/harness-metrics");
+    if (!response.ok) {
+      harnessMetricsSummary.value = null;
+      return;
+    }
+    harnessMetricsSummary.value = await response.json() as HarnessMetricsSummaryV1;
+  } catch {
+    harnessMetricsSummary.value = null;
+  }
+}
+
+async function applyComposerRoutingHint(): Promise<void> {
+  const hint = composerRoutingHint.value;
+  if (!hint) return;
+  const patch: UpdateSettingsRequest = {};
+  if (hint.suggestedRuntimeId) patch.defaultRuntimeId = hint.suggestedRuntimeId;
+  if (hint.suggestedMode) patch.defaultMode = hint.suggestedMode;
+  await updateSettings(patch);
+  if (hint.suggestedRuntimeId) selectedRuntimeId.value = hint.suggestedRuntimeId;
+  if (hint.suggestedMode && !sessionIsRunning.value) mode.value = hint.suggestedMode;
+  dismissedRoutingHintId.value = hint.id;
+}
+
+function dismissComposerRoutingHint(): void {
+  const hint = composerRoutingHint.value;
+  if (hint) dismissedRoutingHintId.value = hint.id;
+}
+
 async function updateSettings(patch: UpdateSettingsRequest): Promise<void> {
   if (settingsSaving.value) return;
   const previous: UserSettings = {
@@ -3392,6 +3457,16 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
       </section>
 
       <div v-if="activeView === 'workspace' && project" slot="composer" class="task-composer-shell">
+        <div v-if="composerRoutingHint" class="harness-routing-hint" role="status" aria-live="polite">
+          <div class="harness-routing-hint-copy">
+            <strong>Suggested setup</strong>
+            <span>{{ routingHintLabel(composerRoutingHint) }} · {{ composerRoutingHint.reason }}</span>
+          </div>
+          <div class="harness-routing-hint-actions">
+            <osx-button size="small" :disabled="settingsSaving" @click="applyComposerRoutingHint">Apply</osx-button>
+            <osx-button size="small" tone="secondary" @click="dismissComposerRoutingHint">Dismiss</osx-button>
+          </div>
+        </div>
         <div :class="['task-composer-frame', { 'is-pending': composerPending }]">
           <div v-if="latestMessagesHidden" class="task-jump-latest">
             <osx-tooltip text="Jump to latest" placement="top">

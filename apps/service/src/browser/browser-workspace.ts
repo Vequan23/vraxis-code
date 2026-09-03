@@ -186,6 +186,11 @@ export class BrowserWorkspace {
     return [...(state?.allowedOrigins ?? [])];
   }
 
+  hasActiveBrowser(sessionId: string): boolean {
+    assertSessionId(sessionId);
+    return this.relayStates.has(sessionId) || this.sessions.has(sessionId);
+  }
+
   async perform(input: BrowserActionRequest, receipt: BrowserActionReceipt = {}): Promise<BrowserSessionSummary> {
     assertSessionId(input.sessionId);
     const previous = this.operationQueues.get(input.sessionId) ?? Promise.resolve();

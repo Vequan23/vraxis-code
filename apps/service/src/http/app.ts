@@ -6,7 +6,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { CodingRuntimeEngine, CredentialStore } from "@vraxis/agent-v";
 import type { McpConnectionAuthorizer } from "@vraxis/agent-v/mcp";
 import { SystemCredentialStore } from "@vraxis/agent-v/node";
-import { LocalCliRuntimeEngine } from "@vraxis/agent-v/local-cli";
+import { createLocalCliRuntimeEngine } from "../runtimes/local-cli-runtimes.js";
 import {
   contractVersion,
   parseAppendMessageRequest,
@@ -305,7 +305,7 @@ export function createApp(options: AppOptions) {
   void runtimeDiscoveryCache.start();
   const runtimeConformance = new RuntimeConformanceRegistry(
     options.dataDirectory,
-    options.runtimeProbeEngine ?? new LocalCliRuntimeEngine(),
+    options.runtimeProbeEngine ?? createLocalCliRuntimeEngine(),
   );
   const discoverLocalRuntimes = async () => runtimeConformance.decorate(await runtimeDiscoveryCache.get());
   async function installedRuntimeIds(): Promise<string[]> {
@@ -314,11 +314,13 @@ export function createApp(options: AppOptions) {
       .map((item) => item.id);
   }
   async function harnessRecommendationContext(currentSettings: Awaited<ReturnType<typeof settings.read>>) {
+    const runtimes = await discoverLocalRuntimes();
     return {
       defaultRuntimeId: currentSettings.defaultRuntimeId,
       defaultMode: currentSettings.defaultMode,
       disabledRuntimeIds: currentSettings.disabledRuntimeIds,
-      installedRuntimeIds: await installedRuntimeIds(),
+      installedRuntimeIds: runtimes.filter((item) => item.availability === "installed").map((item) => item.id),
+      runtimeConformance: Object.fromEntries(runtimes.map((item) => [item.id, item.conformance?.state])),
     };
   }
   runMetricsHooks.afterRecorded = async () => {

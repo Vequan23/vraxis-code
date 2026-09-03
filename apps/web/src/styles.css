@@ -829,9 +829,17 @@ osx-app-shell {
 .harness-row-copy i.warning { background: var(--osx-warning, #d79a42); }
 .harness-list > footer { margin-top: auto; padding: 10px 11px; border-top: 1px solid var(--osx-border-soft, #384148); color: var(--osx-muted, #98a0a5); font-size: 12px; }
 
-.harness-detail { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr); }
-.harness-detail-switcher { padding: 8px 14px; border-bottom: 1px solid var(--osx-border-soft, #384148); }
-.harness-detail-header { min-height: 62px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 14px; border-bottom: 1px solid var(--osx-border-soft, #384148); }
+.harness-detail { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.harness-detail > .harness-recommendations.compact {
+  flex: 0 0 auto;
+  margin: 10px 14px 4px;
+  border-radius: 10px;
+}
+.harness-detail > .harness-recommendations.compact > header {
+  padding-bottom: 2px;
+}
+.harness-detail-switcher { flex: 0 0 auto; padding: 8px 14px; border-bottom: 1px solid var(--osx-border-soft, #384148); }
+.harness-detail-header { flex: 0 0 auto; min-height: 62px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 14px; border-bottom: 1px solid var(--osx-border-soft, #384148); }
 .harness-detail-header > div { min-width: 0; display: flex; align-items: center; gap: 10px; }
 .harness-detail-icon { width: 36px; height: 36px; border-radius: 9px; }
 .harness-detail-header > div > span:last-child { min-width: 0; display: grid; gap: 2px; }
@@ -839,7 +847,7 @@ osx-app-shell {
 .harness-detail-header small { overflow: hidden; color: var(--osx-muted, #98a0a5); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 
 .harness-models,
-.harness-configuration { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.harness-configuration { min-width: 0; min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; overflow: hidden; }
 .harness-model-toolbar { min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--osx-border-soft, #2c3338); }
 .harness-model-toolbar > div { display: grid; gap: 2px; }
 .harness-model-toolbar strong { font-size: 13px; }
@@ -934,6 +942,38 @@ osx-app-shell {
   position: relative;
   padding: 10px 12px 12px;
   background: color-mix(in srgb, var(--osx-surface, #15191b) 94%, #000 6%);
+}
+
+.harness-routing-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: min(100%, 780px);
+  margin: 0 auto 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--osx-accent, #5b9fd4) 35%, transparent);
+  background: color-mix(in srgb, var(--osx-accent, #5b9fd4) 8%, var(--osx-surface, #15191b));
+}
+
+.harness-routing-hint-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--osx-muted, #98a0a5);
+}
+
+.harness-routing-hint-copy strong {
+  color: var(--osx-text, #e8ecef);
+  font-size: 13px;
+}
+
+.harness-routing-hint-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
 }
 
 .task-end {

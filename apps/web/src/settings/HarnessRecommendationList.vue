@@ -26,19 +26,23 @@ function actionLabel(recommendation: HarnessMetricsRecommendationV1): string | u
   if (recommendation.action.type === "set-default-runtime") {
     return `Use ${runtimeName(recommendation.action.runtimeId)}`;
   }
+  if (recommendation.action.type === "set-default-mode") {
+    return `Use ${recommendation.action.mode.charAt(0).toUpperCase()}${recommendation.action.mode.slice(1)} mode`;
+  }
   if (recommendation.action.type === "probe-runtime") return "Verify live";
   if (recommendation.action.type === "disable-runtime") return "Disable harness";
   return undefined;
 }
 
 function handleAction(recommendation: HarnessMetricsRecommendationV1): void {
-  if (!recommendation.action) return;
-  if (recommendation.action.type === "probe-runtime") {
-    const runtime = props.runtimes.find((item) => item.id === recommendation.action!.runtimeId);
+  const action = recommendation.action;
+  if (!action) return;
+  if (action.type === "probe-runtime") {
+    const runtime = props.runtimes.find((item) => item.id === action.runtimeId);
     if (runtime) emit("probe", runtime);
     return;
   }
-  emit("apply", recommendation.action);
+  emit("apply", action);
 }
 </script>
 
