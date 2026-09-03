@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import type { RuntimeMaintenanceActionSummary, RuntimeSummary, UpdateSettingsRequest, UserSettings } from "@vraxis/code-contracts";
+import { harnessLogoUrl } from "./harness-logos.js";
 
 const props = defineProps<{
   runtimes: RuntimeSummary[];
@@ -130,6 +131,10 @@ function conformanceTone(runtime: RuntimeSummary): "success" | "warning" | "neut
   if (runtime.conformance?.state === "limited" || runtime.conformance?.state === "stale") return "warning";
   return "neutral";
 }
+
+function hasHarnessLogo(runtimeId: string): boolean {
+  return Boolean(harnessLogoUrl(runtimeId));
+}
 </script>
 
 <template>
@@ -157,7 +162,10 @@ function conformanceTone(runtime: RuntimeSummary): "success" | "warning" | "neut
           :class="['harness-row', { selected: runtime.id === selectedRuntime?.id }]"
         >
           <button type="button" :aria-current="runtime.id === selectedRuntime?.id ? 'true' : undefined" @click="selectedRuntimeId = runtime.id">
-            <span class="harness-icon"><osx-icon name="terminal" :size="16" /></span>
+            <span :class="['harness-icon', { 'has-brand-logo': hasHarnessLogo(runtime.id) }]">
+              <img v-if="hasHarnessLogo(runtime.id)" :src="harnessLogoUrl(runtime.id)" alt="" :aria-hidden="true" />
+              <osx-icon v-else name="terminal" :size="16" />
+            </span>
             <span class="harness-row-copy">
               <strong>{{ runtime.name }}</strong>
               <small><i :class="availabilityTone(runtime)" />{{ availabilityLabel(runtime) }}<template v-if="runtime.version"> · {{ runtime.version }}</template></small>
@@ -176,7 +184,10 @@ function conformanceTone(runtime: RuntimeSummary): "success" | "warning" | "neut
       <section v-if="selectedRuntime" class="harness-detail" :aria-label="`${selectedRuntime.name} details`">
         <header class="harness-detail-header">
           <div>
-            <span class="harness-detail-icon"><osx-icon name="terminal" :size="18" /></span>
+            <span :class="['harness-detail-icon', { 'has-brand-logo': hasHarnessLogo(selectedRuntime.id) }]">
+              <img v-if="hasHarnessLogo(selectedRuntime.id)" :src="harnessLogoUrl(selectedRuntime.id)" alt="" :aria-hidden="true" />
+              <osx-icon v-else name="terminal" :size="18" />
+            </span>
             <span>
               <strong>{{ selectedRuntime.name }}</strong>
               <small>{{ selectedRuntime.version ?? 'Version unavailable' }}</small>

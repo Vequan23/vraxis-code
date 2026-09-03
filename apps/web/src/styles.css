@@ -721,7 +721,11 @@ osx-app-shell {
 .harness-row osx-toggle { min-width: 88px; padding-right: 10px; }
 
 .harness-icon,
-.harness-detail-icon { display: grid; place-items: center; border: 1px solid var(--osx-border-soft, #384148); color: var(--osx-accent, #4aa9dc); background: color-mix(in srgb, var(--osx-accent, #4aa9dc) 9%, transparent); }
+.harness-detail-icon { display: grid; place-items: center; border: 1px solid var(--osx-border-soft, #384148); color: var(--osx-accent, #4aa9dc); background: color-mix(in srgb, var(--osx-accent, #4aa9dc) 9%, transparent); overflow: hidden; }
+.harness-icon.has-brand-logo,
+.harness-detail-icon.has-brand-logo { background: #101112; border-color: color-mix(in srgb, var(--osx-border-soft, #384148) 88%, #000); }
+.harness-icon img,
+.harness-detail-icon img { width: 68%; height: 68%; object-fit: contain; }
 .harness-icon { width: 32px; height: 32px; border-radius: 8px; }
 .harness-row-copy { min-width: 0; display: grid; gap: 4px; }
 .harness-row-copy strong { overflow: hidden; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
