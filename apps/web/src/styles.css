@@ -298,17 +298,20 @@ osx-app-shell {
   height: 100%;
   display: flex;
   flex-direction: column;
-  overflow: auto;
+  overflow-x: clip;
+  overflow-y: auto;
   background: var(--osx-surface, #15191b);
 }
 
 .workspace-stage {
   position: relative;
   min-width: 0;
+  width: 100%;
   min-height: 0;
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
+  overflow-x: clip;
 }
 
 .workspace-navigation-shade {
@@ -1343,6 +1346,7 @@ osx-app-shell {
 
 .task-composer-shell {
   position: relative;
+  min-width: 0;
   padding: 10px 12px 12px;
   background: color-mix(in srgb, var(--osx-surface, #15191b) 94%, #000 6%);
 }
@@ -1459,7 +1463,9 @@ osx-app-shell {
 
 .task-composer-frame {
   display: block;
-  width: min(100%, 780px);
+  width: 100%;
+  max-width: 780px;
+  min-width: 0;
   position: relative;
   isolation: isolate;
   margin: 0 auto;
@@ -1719,7 +1725,9 @@ osx-app-shell {
 .suggestions button:hover { color: var(--osx-text, #fff); background: color-mix(in srgb, var(--osx-text, #fff) 5%, transparent); }
 
 .conversation {
-  width: min(100%, 780px);
+  width: 100%;
+  max-width: 780px;
+  min-width: 0;
   margin: 0 auto;
   display: grid;
   gap: 14px;
@@ -1735,8 +1743,8 @@ osx-app-shell {
   animation: content-settle 180ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
 }
 
-.tool-activity-frame { min-width: 0; }
-.tool-activity-frame > osx-tool-call { display: block; }
+.tool-activity-frame { min-width: 0; max-width: 100%; }
+.tool-activity-frame > osx-tool-call { display: block; min-width: 0; max-width: 100%; }
 .activity-swap-enter-active,
 .activity-swap-leave-active { transition: opacity 120ms ease, transform 120ms ease; }
 .activity-swap-enter-from { opacity: 0; transform: translateY(3px); }
@@ -1769,7 +1777,7 @@ osx-app-shell {
 .runtime-preflight li { min-height: 50px; display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 7px; padding: 7px 5px; border-top: 1px solid var(--osx-border-soft, #384148); }
 .runtime-preflight li > span:nth-child(2) { min-width: 0; display: grid; gap: 2px; }
 .runtime-preflight li strong { font-size: 12px; font-weight: 600; }
-.runtime-preflight li small { color: var(--osx-muted, #98a0a5); font-size: 12px; line-height: 1.35; }
+.runtime-preflight li small { color: var(--osx-muted, #98a0a5); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
 .runtime-preflight li[data-state="available"] > span:first-child { color: var(--osx-success, #5ebc7b); }
 .runtime-preflight li[data-state="limited"] > span:first-child { color: var(--osx-warning, #d79a42); }
 .runtime-preflight li[data-state="unavailable"] > span:first-child { color: var(--osx-muted, #98a0a5); }
@@ -1792,8 +1800,17 @@ osx-app-shell {
 .evidence-deep-link-icon { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 7px; color: var(--osx-accent, #4aa9dc); background: color-mix(in srgb, var(--osx-accent, #4aa9dc) 12%, transparent); }
 .evidence-deep-link-focus > span:nth-child(2) { min-width: 0; display: grid; gap: 2px; }
 .evidence-deep-link-focus strong { font-size: 12px; font-weight: 650; }
-.evidence-deep-link-focus small { overflow: hidden; color: var(--osx-muted, #98a0a5); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.evidence-deep-link-focus code { overflow: hidden; color: var(--osx-muted, #98a0a5); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.evidence-deep-link-focus small,
+.evidence-deep-link-focus code {
+  color: var(--osx-muted, #98a0a5);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.evidence-deep-link-focus code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
 
 .approval-queue {
   width: min(calc(100% - 36px), 780px);
@@ -1839,6 +1856,8 @@ osx-app-shell {
 .approval-rule-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .session-note {
+  min-width: 0;
+  max-width: 100%;
   display: flex;
   align-items: flex-start;
   gap: 9px;
@@ -1848,13 +1867,29 @@ osx-app-shell {
   font-size: 12px;
 }
 
-.session-note div { display: grid; gap: 2px; }
+.session-note > osx-icon { flex: 0 0 auto; margin-top: 1px; }
+
+.session-note div {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: grid;
+  gap: 2px;
+}
+
 .session-note strong { color: var(--osx-text, #eef1f2); font-weight: 600; }
+
+.session-note span {
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .session-note.failed { border-left-color: var(--osx-danger, #c95b55); }
 .session-note.interrupted { border-left-color: var(--osx-warning, #d79a42); }
 
 .resume-run {
+  min-width: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
@@ -1862,6 +1897,14 @@ osx-app-shell {
   border: 1px solid var(--osx-border-soft, #384148);
   border-radius: 9px;
   background: color-mix(in srgb, var(--osx-surface-raised, #22282c) 68%, transparent);
+}
+
+.resume-run > div { min-width: 0; flex: 1 1 220px; display: grid; gap: 3px; }
+
+.resume-run span,
+.resume-run small {
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .resume-run > div { display: grid; gap: 3px; }

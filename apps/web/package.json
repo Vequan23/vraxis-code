@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@vraxis/code-contracts": "0.1.0",
-    "@vraxis/osx-components": "^0.12.8",
+    "@vraxis/osx-components": "^0.12.9",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
     "highlight.js": "^11.12.0",
