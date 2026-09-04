@@ -38,14 +38,14 @@
     "check": "npm run lint && npm run typecheck && npm run test && npm run build && npm run audit:ui && npm run desktop:validate"
   },
   "devDependencies": {
-    "@eslint/js": "^9.35.0",
-    "@types/node": "^24.10.0",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.4.0",
     "@vraxis/desktop": "^0.1.0",
-    "esbuild": "^0.25.9",
-    "eslint": "^9.35.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.9.1",
     "eslint-plugin-vue": "^10.4.0",
-    "globals": "^16.4.0",
-    "typescript": "^5.9.3",
+    "globals": "^17.11.0",
+    "typescript": "^7.0.2",
     "typescript-eslint": "^8.43.0",
     "vue-eslint-parser": "^10.2.0"
   }
