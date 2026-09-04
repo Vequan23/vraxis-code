@@ -23,10 +23,11 @@ export type ComposerSlashCommandId =
   | "baseline"
   | "handoff"
   | "clear"
-  | "new";
+  | "new"
+  | "create-skill";
 
 export type ComposerSlashCommandAction =
-  | { type: "prompt"; mode: SessionMode; prompt: string }
+  | { type: "prompt"; mode: SessionMode; prompt: string; skillNames?: string[] }
   | { type: "clear" }
   | { type: "new-task" }
   | { type: "open-inspector"; view: InspectorView; prompt?: { mode: SessionMode; text: string } }
@@ -325,6 +326,24 @@ const composerSlashCommandDefinitions: ComposerSlashCommandDefinition[] = [
     action: { type: "harness-setup" },
     disabled: (context) => context.previewMode,
     disabledReason: () => "Harness settings are unavailable in preview mode.",
+  },
+  {
+    id: "create-skill",
+    label: "create-skill",
+    description: "Scaffold a new Agent Skill with SKILL.md.",
+    icon: "sparkle",
+    group: "Harness",
+    keywords: ["skill", "scaffold", "author", "template", "agents"],
+    action: {
+      type: "prompt",
+      mode: "build",
+      skillNames: ["create-skill"],
+      prompt: "Create a new agent skill from my request. Gather any missing purpose, scope, and trigger details, then scaffold `.agents/skills/<skill-name>/SKILL.md` in the approved project root with strong frontmatter and concise instructions.",
+    },
+    disabled: (context) => !context.hasProject || !context.runtimeCanBuild,
+    disabledReason: (context) => !context.runtimeCanBuild
+      ? "Choose a runtime that supports guarded isolated-worktree writes."
+      : "Open a project before creating a skill.",
   },
   {
     id: "probe",

@@ -18,6 +18,7 @@ import {
   parseCreateSessionRequest,
   parseInstallSkillsRequest,
   parseRegisterProjectRequest,
+  parseCreateSkillRequest,
   parseRepairSkillRequest,
   parseUpdateSettingsRequest,
   parseUpdateMcpServerProjectsRequest,
@@ -62,6 +63,7 @@ import { SkillRegistry, type SkillInventoryDiscovery } from "../skills/skill-reg
 import { installSkillsFromSource } from "../skills/skills-install.js";
 import { assertRepairableSkillManifest, describeMetadataRepair, isMetadataRepairableIssue, repairSkillMetadata } from "../skills/skills-repair.js";
 import { buildSkillsInstallInvocation, formatSkillsInstallScope, skillsCliAgentsForRuntimes } from "../skills/skills-cli.js";
+import { createSkillScaffold, describeSkillCreateScope, skillManifestPath } from "../skills/skills-create.js";
 import { GitWorktrees, WorktreeApplyConflictError } from "../worktrees/git-worktree.js";
 import { TerminalRegistry } from "../terminal/terminal-registry.js";
 import {
@@ -1119,6 +1121,42 @@ export function createApp(options: AppOptions) {
               await approvals.mark(approval.id, "completed");
             } catch (error) {
               const failure = error instanceof Error ? error.message : "Skills could not be installed.";
+              await approvals.mark(approval.id, "failed", failure);
+              throw error;
+            }
+          },
+        });
+        json(response, 202, { approval });
+        return;
+      }
+
+      const createSkillMatch = /^\/api\/projects\/([^/]+)\/skills\/create$/.exec(url.pathname);
+      if (request.method === "POST" && createSkillMatch?.[1]) {
+        const input = parseCreateSkillRequest(await body(request));
+        if (input.projectId !== createSkillMatch[1]) throw new TypeError("Project id does not match the create route.");
+        const projectPath = await registry.resolveInside(input.projectId);
+        const manifestPath = skillManifestPath(projectPath, input.scope, input.name);
+        const approval = await approvals.request({
+          sessionId: "skills-settings",
+          projectId: input.projectId,
+          capability: "write",
+          title: `Create skill · ${input.name.trim()}`,
+          description: "Scaffold a new SKILL.md manifest in the selected skill directory and refresh the local inventory.",
+          scope: describeSkillCreateScope(manifestPath, input.scope, input.name.trim()),
+          risk: "medium",
+          source: "skills",
+          actor: "user",
+          boundary: "approved-project",
+          rememberable: false,
+        }, undefined, false);
+        await registerManualAction(approval, {
+          approve: async () => {
+            await approvals.mark(approval.id, "executing");
+            try {
+              await createSkillScaffold(projectPath, input);
+              await approvals.mark(approval.id, "completed");
+            } catch (error) {
+              const failure = error instanceof Error ? error.message : "The skill scaffold could not be created.";
               await approvals.mark(approval.id, "failed", failure);
               throw error;
             }

@@ -662,6 +662,13 @@ osx-app-shell {
   gap: 16px;
 }
 
+.skill-settings-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .skill-form {
   display: grid;
   gap: 15px;

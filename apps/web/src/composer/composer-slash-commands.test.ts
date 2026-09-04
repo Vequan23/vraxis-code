@@ -23,7 +23,7 @@ const baseContext: ComposerSlashCommandContext = {
 describe("composer slash commands", () => {
   it("exposes standard mode commands and differentiated evidence commands", () => {
     const labels = composerSlashCommandDefinitionsForTest.map((item) => item.label);
-    expect(labels).toEqual(expect.arrayContaining(["ask", "plan", "build", "review", "verify", "proof", "probe"]));
+    expect(labels).toEqual(expect.arrayContaining(["ask", "plan", "build", "review", "verify", "proof", "probe", "create-skill"]));
   });
 
   it("maps commands to slash suggestions with grouped metadata", () => {

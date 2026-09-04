@@ -439,6 +439,16 @@ export interface RepairSkillRequest {
   skillId: string;
 }
 
+export type SkillCreateScope = "project" | "user";
+
+export interface CreateSkillRequest {
+  projectId: string;
+  name: string;
+  description: string;
+  scope: SkillCreateScope;
+  instructions?: string;
+}
+
 export interface SkillReference {
   id: string;
   name: string;
@@ -1786,6 +1796,21 @@ export function parseRepairSkillRequest(value: unknown): RepairSkillRequest {
   return {
     projectId: boundedString(input.projectId, "Project id", 120),
     skillId: boundedString(input.skillId, "Skill id", 64),
+  };
+}
+
+export function parseCreateSkillRequest(value: unknown): CreateSkillRequest {
+  const input = record(value, "Skill create");
+  const scope: SkillCreateScope = input.scope === "user" ? "user" : "project";
+  const instructions = input.instructions === undefined || input.instructions === ""
+    ? undefined
+    : boundedString(input.instructions, "Skill instructions", 32_000);
+  return {
+    projectId: boundedString(input.projectId, "Project id", 120),
+    name: boundedString(input.name, "Skill name", 64),
+    description: boundedString(input.description, "Skill description", 1024),
+    scope,
+    ...(instructions ? { instructions } : {}),
   };
 }
 

@@ -1728,22 +1728,24 @@ function applySlashPrompt(nextMode: SessionMode, prompt: string): void {
 }
 
 async function executeComposerSlashCommand(commandId: string): Promise<void> {
+  const attachSkillsByName = (skillNames: readonly string[]): void => {
+    const names = new Set(skillNames.map((name) => name.toLowerCase()));
+    composerContextItems.value = state.skills
+      .filter((skill) => names.has(skill.name.toLowerCase()))
+      .slice(0, promptSkillLimits.maximumCount)
+      .map((skill) => ({
+        id: `skill:${skill.id}`,
+        label: skill.name,
+        kind: "skill" as const,
+        removable: true,
+      }));
+  };
+
   const userCommand = resolveUserComposerSlashCommand(commandId, state.composerCommands ?? []);
   if (userCommand) {
     taskError.value = "";
     applySlashPrompt(userCommand.mode, userCommand.prompt);
-    if (userCommand.skillNames?.length) {
-      const names = new Set(userCommand.skillNames.map((name) => name.toLowerCase()));
-      composerContextItems.value = state.skills
-        .filter((skill) => names.has(skill.name.toLowerCase()))
-        .slice(0, promptSkillLimits.maximumCount)
-        .map((skill) => ({
-          id: `skill:${skill.id}`,
-          label: skill.name,
-          kind: "skill" as const,
-          removable: true,
-        }));
-    }
+    if (userCommand.skillNames?.length) attachSkillsByName(userCommand.skillNames);
     return;
   }
 
@@ -1754,6 +1756,7 @@ async function executeComposerSlashCommand(commandId: string): Promise<void> {
   switch (command.action.type) {
     case "prompt":
       applySlashPrompt(command.action.mode, command.action.prompt);
+      if (command.action.skillNames?.length) attachSkillsByName(command.action.skillNames);
       return;
     case "clear":
       composer.value = "";
