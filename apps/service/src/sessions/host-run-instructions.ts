@@ -1,5 +1,5 @@
 import type { SessionMode, WorktreeSummary } from "@vraxis/code-contracts";
-import { BUILD_GIT_POLICY_INSTRUCTION, buildWorktreeInstructionBlock } from "./build-workspace-context.js";
+import { BUILD_GIT_POLICY_INSTRUCTION, BUILD_PUBLISH_POLICY_INSTRUCTION, buildWorktreeInstructionBlock } from "./build-workspace-context.js";
 import { TASK_RECOVERY_INSTRUCTION } from "./task-recovery-instruction.js";
 
 export function hostAgentInstructions(mode: SessionMode, worktree?: WorktreeSummary): string {
@@ -7,8 +7,9 @@ export function hostAgentInstructions(mode: SessionMode, worktree?: WorktreeSumm
     const parts = [
       "Work only inside the approved isolated worktree. Request approval for guarded writes, commands, network, or browser actions and verify the result.",
       TASK_RECOVERY_INSTRUCTION,
-      "Modify only files needed for this task inside the isolated workspace. Do not publish, commit, or access paths outside it.",
+      "Modify only files needed for this task inside the isolated workspace. Publish actions run on the worktree branch through approved terminal commands.",
       BUILD_GIT_POLICY_INSTRUCTION,
+      BUILD_PUBLISH_POLICY_INSTRUCTION,
     ];
     if (worktree) parts.splice(2, 0, buildWorktreeInstructionBlock(worktree));
     return parts.join("\n\n");

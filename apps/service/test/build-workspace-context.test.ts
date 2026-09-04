@@ -34,20 +34,27 @@ test("summarizeWorktreeForEvidence omits filesystem paths", () => {
   });
 });
 
-test("blockedBuildGitTerminalCommand rejects branch creation and publishing git commands", () => {
+test("blockedBuildGitTerminalCommand rejects branch management but allows commit and push", () => {
   const branch = sampleWorktree.branch;
   for (const command of [
     "git checkout -b feature/foo",
     "git switch -c feature/foo",
     "git branch feature/foo",
-    "git commit -m test",
-    "git push origin HEAD",
     "git checkout main",
     "git switch main",
+    "git push --force origin HEAD",
   ]) {
     const blocked = blockedBuildGitTerminalCommand(command, branch);
     assert.ok(blocked, `expected block for ${command}`);
     assert.match(blocked!, new RegExp(branch.replace("/", "\\/")));
+  }
+
+  for (const command of [
+    "git commit -m test",
+    "git push origin HEAD",
+    "gh pr create --fill",
+  ]) {
+    assert.equal(blockedBuildGitTerminalCommand(command, branch), undefined, `expected allow for ${command}`);
   }
 });
 

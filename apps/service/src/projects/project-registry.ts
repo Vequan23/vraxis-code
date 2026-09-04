@@ -4,6 +4,7 @@ import { constants } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import type { ProjectSummary } from "@vraxis/code-contracts";
+import { normalizeProjectName } from "./project-name.js";
 
 interface RegistryData {
   schemaVersion: 1;
@@ -14,14 +15,28 @@ interface RegistryData {
 const emptyRegistry: RegistryData = { schemaVersion: 1, projects: [] };
 
 function runGit(cwd: string, args: string[]): Promise<string> {
-  return new Promise((resolveOutput) => {
-    const child = spawn("git", args, { cwd, stdio: ["ignore", "pipe", "ignore"] });
+  return new Promise((resolveOutput, reject) => {
+    const child = spawn("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
+    let errorOutput = "";
     child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => { output += chunk; });
-    child.once("error", () => resolveOutput("untracked"));
-    child.once("close", (code) => resolveOutput(code === 0 ? output.trim() || "detached" : "untracked"));
+    child.stderr.on("data", (chunk: string) => { errorOutput += chunk; });
+    child.once("error", (error) => reject(error));
+    child.once("close", (code) => {
+      if (code === 0) resolveOutput(output.trim());
+      else reject(new Error(errorOutput.trim() || `git ${args.join(" ")} failed.`));
+    });
   });
+}
+
+async function gitInit(projectPath: string): Promise<void> {
+  try {
+    await runGit(projectPath, ["init"]);
+  } catch {
+    throw new TypeError("Git init failed. Install Git to create a new project.");
+  }
 }
 
 export class ProjectRegistry {
@@ -49,11 +64,18 @@ export class ProjectRegistry {
     if (!projectStat.isDirectory()) throw new TypeError("Choose a project folder.");
     await access(canonicalPath, constants.R_OK);
 
+    let branch = "untracked";
+    try {
+      branch = await runGit(canonicalPath, ["branch", "--show-current"]) || "main";
+    } catch {
+      branch = "untracked";
+    }
+
     const project: ProjectSummary = {
       id: createHash("sha256").update(canonicalPath).digest("hex").slice(0, 16),
       name: basename(canonicalPath),
       path: canonicalPath,
-      branch: await runGit(canonicalPath, ["branch", "--show-current"]),
+      branch,
       status: "ready",
     };
     const data = await this.read();
@@ -61,6 +83,32 @@ export class ProjectRegistry {
     data.selectedProjectId = project.id;
     await this.write(data);
     return project;
+  }
+
+  async create(parentPath: string, name: string): Promise<ProjectSummary> {
+    if (!isAbsolute(parentPath)) throw new TypeError("Choose an absolute parent folder.");
+    const normalizedName = normalizeProjectName(name);
+    const canonicalParent = await realpath(parentPath);
+    const parentStat = await stat(canonicalParent);
+    if (!parentStat.isDirectory()) throw new TypeError("Choose a folder to create the project in.");
+    await access(canonicalParent, constants.R_OK | constants.W_OK | constants.X_OK);
+
+    const projectPath = resolve(canonicalParent, normalizedName);
+    const relativePath = relative(canonicalParent, projectPath);
+    if (relativePath.startsWith("..") || isAbsolute(relativePath)) {
+      throw new TypeError("The project path is outside the approved parent folder.");
+    }
+
+    try {
+      await stat(projectPath);
+      throw new TypeError("A folder with that name already exists in this location.");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+
+    await mkdir(projectPath, { recursive: false, mode: 0o755 });
+    await gitInit(projectPath);
+    return this.register(projectPath);
   }
 
   async select(projectId: string): Promise<void> {

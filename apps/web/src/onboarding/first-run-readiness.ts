@@ -12,6 +12,7 @@ export type FirstRunActionId =
   | "connect-provider"
   | "verify-runtime"
   | "choose-project"
+  | "create-project"
   | "draft-task"
   | "review-verification"
   | "export-proof";
@@ -77,10 +78,10 @@ export function firstRunReadiness(input: FirstRunReadinessInput): FirstRunReadin
     },
     {
       id: "project",
-      label: "Choose a project",
+      label: "Create or open a project",
       detail: projectIsReady
         ? `${input.project?.name ?? "Project"} is ready for governed work.`
-        : "Choose the local repository you want Vraxis Code to understand.",
+        : "Create a new repository or open an existing local folder.",
       state: projectIsReady ? "complete" : runtimeIsReady ? "current" : "pending",
     },
     {
@@ -111,7 +112,7 @@ export function firstRunReadiness(input: FirstRunReadinessInput): FirstRunReadin
       ? { id: "verify-runtime", label: `Verify ${input.runtime?.name ?? "runtime"}`, detail: "One bounded request; no project or tool authority." }
       : { id: "setup-runtime", label: "Set up a runtime", detail: "Install an agent harness or connect a direct API provider." };
   } else if (!input.project) {
-    action = { id: "choose-project", label: "Choose project", detail: "Only the folder you approve is indexed." };
+    action = { id: "choose-project", label: "Open existing project", detail: "Only the folder you approve is indexed." };
   } else if (!taskIsReady) {
     action = { id: "draft-task", label: "Draft the first task", detail: "Start with a read-only, file-backed architecture question." };
   } else if (!proofIsReady) {

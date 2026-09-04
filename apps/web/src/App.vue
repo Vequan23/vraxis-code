@@ -52,6 +52,8 @@ import {
 } from "@vraxis/code-contracts";
 import { demoState, emptyState } from "./workspace/demo-state.js";
 import { chooseProjectFolder } from "./projects/project-picker.js";
+import NewProjectPanel from "./projects/NewProjectPanel.vue";
+import ProjectActionsMenu from "./projects/ProjectActionsMenu.vue";
 import ProjectSourceList from "./projects/ProjectSourceList.vue";
 import SettingsShell from "./settings/SettingsShell.vue";
 import HarnessRunNudge from "./settings/HarnessRunNudge.vue";
@@ -62,7 +64,7 @@ import {
 import { type SettingsSectionId } from "./settings/settings-navigation.js";
 import FirstRunJourney from "./onboarding/FirstRunJourney.vue";
 import TaskRuntimePicker from "./composer/TaskRuntimePicker.vue";
-import { runtimeConformanceLabel, runtimeSubmitBlockMessage } from "./settings/runtime-conformance.js";
+import { runtimeConformanceLabel, runtimeIsReady, runtimeSubmitBlockMessage } from "./settings/runtime-conformance.js";
 import ComposerMenuPicker from "./composer/ComposerMenuPicker.vue";
 import {
   buildComposerSlashCommandSuggestions,
@@ -138,6 +140,7 @@ const startingNewTask = ref(false);
 const sessionActionId = ref("");
 const confirmDeleteSessionId = ref("");
 const registering = ref(false);
+const showNewProjectPanel = ref(false);
 const registrationError = ref("");
 const selectedFile = ref("");
 const filePreview = ref<WorkspaceFileContent>();
@@ -286,6 +289,21 @@ const runtime = computed(() => {
     ?? state.runtimes.find((item) => item.availability === "installed")
     ?? state.runtimes[0];
 });
+const onboardingRuntimeReady = computed(() => runtimeIsReady(runtime.value));
+const projectActionOptions = computed(() => [
+  {
+    id: "create-project",
+    label: "Create new project",
+    description: "Start a folder, run git init, and open it.",
+    icon: "plus" as const,
+  },
+  {
+    id: "open-existing",
+    label: "Open existing project",
+    description: "Choose a local repository you already have.",
+    icon: "folder-open" as const,
+  },
+]);
 const modelId = computed(() => selectedModelId.value.trim() || undefined);
 const runtimeCanBuild = computed(() => runtime.value?.capabilities?.includes("workspace-write") ?? false);
 const runtimeCapabilities = computed(() => runtime.value?.productCapabilities ?? []);
@@ -359,6 +377,14 @@ const activityPresenter = createActivityPresenter((events) => {
 });
 watch(sessionEvents, (events) => activityPresenter.update(events), { deep: true, immediate: true });
 const changedFiles = computed(() => state.changes);
+const appliedChangePaths = computed(() => new Set(session.value?.worktree?.appliedPaths ?? []));
+const allChangesApplied = computed(() => changedFiles.value.length > 0
+  && changedFiles.value.every((file) => appliedChangePaths.value.has(file.path)));
+const changeListHint = computed(() => {
+  if (selectedChange.value) return "Reviewing";
+  if (allChangesApplied.value) return "All applied to your project · review diffs";
+  return "Select a file";
+});
 const availableChangeHunks = computed(() => {
   if (!changeDiff.value || !selectedChange.value) return [];
   const applied = new Set(session.value?.worktree?.appliedHunks?.[selectedChange.value] ?? []);
@@ -2803,6 +2829,7 @@ async function post(path: string, payload: unknown): Promise<unknown> {
 
 async function openProjectPicker(): Promise<void> {
   registrationError.value = "";
+  showNewProjectPanel.value = false;
   registering.value = true;
   try {
     const result = await chooseProjectFolder<ProjectSummary>(
@@ -2825,6 +2852,32 @@ async function openProjectPicker(): Promise<void> {
     await loadState();
   } catch (error) {
     registrationError.value = error instanceof Error ? error.message : "The project chooser could not open.";
+  } finally {
+    registering.value = false;
+  }
+}
+
+function openNewProjectPanel(): void {
+  registrationError.value = "";
+  showNewProjectPanel.value = true;
+}
+
+function handleProjectAction(actionId: string): void {
+  if (actionId === "create-project") {
+    openNewProjectPanel();
+    return;
+  }
+  if (actionId === "open-existing") void openProjectPicker();
+}
+
+async function registerCreatedProject(result: ProjectSummary): Promise<void> {
+  registering.value = true;
+  try {
+    if (!state.projects.some((item) => item.id === result.id)) state.projects.push(result);
+    state.selectedProjectId = result.id;
+    activeView.value = "workspace";
+    showNewProjectPanel.value = false;
+    await loadState();
   } finally {
     registering.value = false;
   }
@@ -2866,6 +2919,10 @@ async function handleFirstRunAction(action: FirstRunActionId): Promise<void> {
   }
   if (action === "choose-project") {
     await openProjectPicker();
+    return;
+  }
+  if (action === "create-project") {
+    openNewProjectPanel();
     return;
   }
   if (action === "draft-task") {
@@ -3405,7 +3462,12 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
       <nav slot="sidebar" class="sidebar" aria-label="Projects and tasks">
         <div class="sidebar-heading">
           <span>Projects</span>
-          <osx-icon-button v-if="state.projects.length" label="Choose another project" icon="plus" size="small" :disabled="registering" @click="openProjectPicker" />
+          <ProjectActionsMenu
+            label="Add project"
+            :options="projectActionOptions"
+            :disabled="registering"
+            @select="handleProjectAction"
+          />
         </div>
 
         <ProjectSourceList
@@ -3569,13 +3631,30 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
             :title="harnessNotice.title"
             :description="harnessNotice.description"
           />
-          <FirstRunJourney
-            :runtime="runtime"
-            :sessions="[]"
-            :verification-runs="[]"
+          <NewProjectPanel
+            v-if="showNewProjectPanel"
             :busy="firstRunBusy"
-            @action="handleFirstRunAction"
+            @created="registerCreatedProject"
+            @cancel="showNewProjectPanel = false"
           />
+          <template v-else>
+            <FirstRunJourney
+              :runtime="runtime"
+              :sessions="[]"
+              :verification-runs="[]"
+              :busy="firstRunBusy"
+              @action="handleFirstRunAction"
+            />
+            <div v-if="onboardingRuntimeReady" class="onboarding-project-actions">
+              <osx-button variant="primary" size="small" icon="plus" :disabled="firstRunBusy" @click="openNewProjectPanel">
+                Create new project
+              </osx-button>
+              <osx-button variant="secondary" size="small" icon="folder-open" :disabled="firstRunBusy" @click="openProjectPicker">
+                Open existing project
+              </osx-button>
+            </div>
+          </template>
+          <p v-if="registrationError" class="onboarding-error" role="alert">{{ registrationError }}</p>
           <small>Vraxis Code only reads folders you approve. Harness verification never opens a project.</small>
         </div>
 
@@ -3978,7 +4057,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                   v-if="session.worktree.status === 'applied'"
                   tone="success"
                   title="Changes applied"
-                  :description="`The approved project contains this Build. Its checkpoint remains on ${session.worktree.branch}.`"
+                  :description="`Your source checkout now contains this Build. Commit and push from ${project?.branch ?? 'your project branch'}, or ask the agent to publish the worktree branch with approval. The checkpoint on ${session.worktree.branch} stays available until you archive it.`"
                 />
                 <osx-alert
                   v-else-if="session.worktree.status === 'conflicted'"
@@ -4036,8 +4115,18 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
               </template>
               <div class="worktree-finish-actions">
                 <div v-if="!worktreeFinishCompact">
-                  <strong>{{ session.worktree.status === "active" ? "Ready to finish?" : "Recovery controls" }}</strong>
-                  <small>Every destructive step asks again. The checkpoint branch remains the source of recovery.</small>
+                  <strong>{{
+                    session.worktree.status === "applied"
+                      ? "Commit from your project checkout or ask the agent to publish the worktree branch"
+                      : session.worktree.status === "active"
+                        ? "Ready to finish?"
+                        : "Recovery controls"
+                  }}</strong>
+                  <small>{{
+                    session.worktree.status === "applied"
+                      ? "Apply moved the patch into your working tree. Commit locally or approve git push and gh pr commands from the agent."
+                      : "Every destructive step asks again. The checkpoint branch remains the source of recovery."
+                  }}</small>
                 </div>
                 <span v-else class="worktree-finish-compact-label">
                   <osx-icon name="git-branch" :size="14" />
@@ -4050,7 +4139,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                     size="small"
                     icon="check"
                     :disabled="sessionIsRunning || worktreeApplyPending || changedFiles.length === 0"
-                    @click="requestApplyChanges"
+                    @click="requestApplyChanges()"
                   >{{ worktreeApplyPending ? "Waiting for approval" : session.worktree.status === "conflicted" ? "Retry apply" : "Apply all" }}</osx-button>
                   <osx-button
                     v-if="['active', 'conflicted', 'applied', 'reverted'].includes(session.worktree.status)"
@@ -4092,7 +4181,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                 <div class="changed-file-list">
                   <header class="changed-file-summary">
                     <strong>{{ changedFiles.length }} {{ changedFiles.length === 1 ? "file" : "files" }} changed</strong>
-                    <small>{{ selectedChange ? "Reviewing" : "Select a file" }}</small>
+                    <small>{{ changeListHint }}</small>
                   </header>
                   <button
                     v-for="file in changedFiles"
@@ -4107,8 +4196,13 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                       <osx-icon name="file-text" :size="14" />
                       <span class="changed-file-path">{{ file.path }}</span>
                     </span>
-                    <osx-badge size="small" :label="file.status" />
-                    <osx-badge v-if="session?.worktree?.appliedPaths?.includes(file.path)" size="small" label="Applied" tone="success" />
+                    <osx-badge
+                      v-if="appliedChangePaths.has(file.path)"
+                      size="small"
+                      label="Applied"
+                      tone="success"
+                    />
+                    <osx-badge v-else size="small" :label="file.status" />
                   </button>
                 </div>
                 <div v-if="selectedChange" class="change-workbench-divider" aria-hidden="true" />
@@ -4644,6 +4738,20 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
         </ul>
       </div>
     </osx-dialog>
+
+    <div
+      v-if="showNewProjectPanel && project"
+      class="project-modal-backdrop"
+      @click.self="showNewProjectPanel = false"
+    >
+      <NewProjectPanel
+        :busy="registering"
+        prompt-location-on-mount
+        show-close
+        @created="registerCreatedProject"
+        @cancel="showNewProjectPanel = false"
+      />
+    </div>
 
     <osx-toast
       :open="Boolean(registrationError)"

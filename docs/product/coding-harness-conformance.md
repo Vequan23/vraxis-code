@@ -24,7 +24,7 @@ The minimally proficient gate is complete. A clean release still requires both r
 
 - Skills load from standard `SKILL.md` packages and never gain authority through metadata. The composer can discover and attach them; the runtime validates their tool and permission surface.
 - The private per-run MCP bridge gives Codex, Claude Code, OpenCode, and verified Cursor releases the same governed host tools without durable CLI configuration or native write authority.
-- Build work occurs in an isolated worktree with checkpoint, restore, apply, archive, and rollback lifecycles. Vraxis never commits or pushes without an explicit user instruction.
+- Build work occurs in an isolated worktree with checkpoint, restore, apply, archive, and rollback lifecycles. Commits and pushes run on the worktree branch through approved terminal commands; Vraxis never publishes without an explicit approval decision.
 - The task browser provides live desktop Chromium, mapped controls, screenshots, console/network evidence, approval receipts, and replay. External content is evidence, never runtime instruction.
 - Progress and output stream as ordered durable events. Approvals, terminal runs, browser actions, diffs, verification, context compaction, and usage remain inspectable after recovery.
 - Tool-request events are redacted before persistence, and Vraxis workspace mutations reject high-confidence credential material while permitting environment-variable and credential-store references.

@@ -18,6 +18,8 @@ test("hostAgentInstructions centralizes recovery and mode policy once", () => {
   assert.match(build, /Work only inside the approved isolated worktree/);
   assert.match(build, /Host context \(isolated Build workspace\):/);
   assert.match(build, /Git policy for Build/);
+  assert.match(build, /Publish policy \(commit, push, pull request\)/);
+  assert.match(build, /terminal-run when the user requests publish actions/);
   assert.doesNotMatch(build, /read-only/);
 });
 

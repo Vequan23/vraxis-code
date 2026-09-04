@@ -5,12 +5,20 @@ const execFileAsync = promisify(execFile);
 
 export type ProjectFolderPicker = () => Promise<string | null>;
 
-export async function pickProjectFolderWithSystemDialog(): Promise<string | null> {
+export async function pickProjectFolderWithSystemDialog(prompt = "Choose a project for Vraxis Code"): Promise<string | null> {
+  return pickFolderWithSystemDialog(prompt);
+}
+
+export async function pickParentFolderWithSystemDialog(): Promise<string | null> {
+  return pickFolderWithSystemDialog("Choose where to create the new project");
+}
+
+async function pickFolderWithSystemDialog(prompt: string): Promise<string | null> {
   try {
     const result = process.platform === "darwin"
       ? await execFileAsync("osascript", [
         "-e",
-        'POSIX path of (choose folder with prompt "Choose a project for Vraxis Code")',
+        `POSIX path of (choose folder with prompt "${prompt.replace(/"/g, "\\\"")}")`,
       ], { timeout: 120_000, maxBuffer: 64 * 1024 })
       : process.platform === "win32"
         ? await execFileAsync("powershell.exe", [
@@ -18,9 +26,9 @@ export async function pickProjectFolderWithSystemDialog(): Promise<string | null
           "-NonInteractive",
           "-STA",
           "-Command",
-          'Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = "Choose a project for Vraxis Code"; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dialog.SelectedPath) } else { exit 2 }',
+          `Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = "${prompt.replace(/"/g, '`"')}"; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dialog.SelectedPath) } else { exit 2 }`,
         ], { timeout: 120_000, maxBuffer: 64 * 1024 })
-        : await pickLinuxProjectFolder();
+        : await pickLinuxProjectFolder(prompt);
     return result.stdout.trim() || null;
   } catch (error) {
     const code = (error as { code?: number }).code;
@@ -31,12 +39,12 @@ export async function pickProjectFolderWithSystemDialog(): Promise<string | null
   }
 }
 
-async function pickLinuxProjectFolder(): Promise<{ stdout: string }> {
+async function pickLinuxProjectFolder(prompt: string): Promise<{ stdout: string }> {
   try {
     return await execFileAsync("zenity", [
       "--file-selection",
       "--directory",
-      "--title=Choose a project for Vraxis Code",
+      `--title=${prompt}`,
     ], { timeout: 120_000, maxBuffer: 64 * 1024 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -47,7 +55,7 @@ async function pickLinuxProjectFolder(): Promise<{ stdout: string }> {
       "--getexistingdirectory",
       ".",
       "--title",
-      "Choose a project for Vraxis Code",
+      prompt,
     ], { timeout: 120_000, maxBuffer: 64 * 1024 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {

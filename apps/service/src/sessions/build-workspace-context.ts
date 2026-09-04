@@ -45,7 +45,16 @@ export const BUILD_GIT_POLICY_INSTRUCTION = [
   "Git policy for Build:",
   "- The host already created your branch and worktree. Do not run git checkout, git switch, or git branch to create or switch branches.",
   "- Use git-repository-state or git-status to confirm the current branch instead of guessing.",
-  "- Do not commit or push. Edits stay in the isolated worktree until the user applies them to the source checkout.",
+  "- Commit and push on the host-managed worktree branch through terminal-run when the user requests publish actions. Each command requires explicit product approval.",
+].join("\n");
+
+export const BUILD_PUBLISH_POLICY_INSTRUCTION = [
+  "Publish policy (commit, push, pull request):",
+  "- When the user asks to commit, push, publish, or open a pull request, run the git or gh commands on the current worktree branch through terminal-run.",
+  "- Typical flow: git add, git commit, git push origin HEAD, then gh pr create when a remote is configured.",
+  "- Every publish command requires explicit product approval before it runs. Show the exact command in the approval request.",
+  "- Do not force-push or rewrite the host-managed branch. Do not push to the source base branch unless the user explicitly names that target.",
+  "- Applying to the source checkout in Vraxis Changes is optional. It updates the source working tree without committing when the user wants that handoff instead of a branch PR.",
 ].join("\n");
 
 export function summarizeWorktreeForEvidence(worktree: WorktreeSummary) {
@@ -92,7 +101,7 @@ function gitSubcommand(tokens: readonly string[]): { subcommand: string; index: 
 }
 
 function blockedBuildGitMessage(hostBranch: string, subcommand: string): string {
-  return `Build tasks use a host-managed branch (${hostBranch}). Do not run git ${subcommand} through the terminal. Use git-repository-state to inspect branch state and edit files directly in the worktree.`;
+  return `Build tasks use a host-managed branch (${hostBranch}). Do not run git ${subcommand} through the terminal. Use git-repository-state to inspect branch state and edit files on the current branch.`;
 }
 
 /**
@@ -107,7 +116,15 @@ export function blockedBuildGitTerminalCommand(command: string, hostBranch: stri
   const { subcommand, index } = parsed;
   const args = tokens.slice(index + 1);
 
-  if (subcommand === "commit" || subcommand === "push" || subcommand === "branch") {
+  if (subcommand === "push" && args.some((token) => token === "-f" || token === "--force" || token.startsWith("--force="))) {
+    return `Build tasks cannot force-push the host-managed branch (${hostBranch}).`;
+  }
+
+  if (subcommand === "commit" || subcommand === "push") {
+    return undefined;
+  }
+
+  if (subcommand === "branch") {
     return blockedBuildGitMessage(hostBranch, subcommand);
   }
 

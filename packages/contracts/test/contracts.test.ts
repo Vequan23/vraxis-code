@@ -11,6 +11,7 @@ import {
   parseConnectModelProviderRequest,
   parseConnectMcpServerRequest,
   parseCreateTeamPolicyRequest,
+  parseCreateProjectRequest,
   parseCreateSessionRequest,
   parseRegisterProjectRequest,
   parseTeamPolicyBundle,
@@ -48,6 +49,17 @@ test("publishes safe mode-specific default agent profiles", () => {
 
 test("parses a bounded project registration", () => {
   assert.deepEqual(parseRegisterProjectRequest({ path: " /tmp/example " }), { path: "/tmp/example" });
+});
+
+test("parses a bounded project creation request", () => {
+  assert.deepEqual(parseCreateProjectRequest({ name: " my-app ", parentPath: " /tmp/parent " }), {
+    name: "my-app",
+    parentPath: "/tmp/parent",
+  });
+  assert.throws(
+    () => parseCreateProjectRequest({ name: "", parentPath: "/tmp/parent" }),
+    /Project name/,
+  );
 });
 
 test("rejects an empty command", () => {

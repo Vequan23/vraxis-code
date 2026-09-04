@@ -419,6 +419,32 @@ test("a denied agent terminal command never creates a process receipt", async ()
   assert.equal((await approvals.list("session-deny"))[0]?.state, "denied");
 });
 
+test("build terminal-run allows git commit and push through approval", async () => {
+  const root = await mkdtemp(join(tmpdir(), "vraxis-agent-terminal-git-publish-"));
+  const approvals = new ApprovalRegistry(root);
+  const terminal = new TerminalRegistry(root);
+  const hostBranch = "vraxis/fix-login-a1b2c3d4";
+  const tool = createAgentTerminalTool({
+    sessionId: "session-git-publish",
+    workspacePath: root,
+    terminal,
+    approvals,
+    hostBranch,
+  });
+  const execution = executeAgentTool({
+    tool,
+    input: { command: "git commit -m \"test publish\"" },
+    runId: "run-git-publish",
+    sessionId: "session-git-publish",
+    scope: { ...localExecutionScope("project-git-publish"), permissions: ["command:execute"] },
+    approvalPolicy: approvals.policy("session-git-publish"),
+  });
+  const pending = await pendingApproval(approvals, "session-git-publish");
+  assert.match(pending.scope, /git commit/);
+  await approvals.decide(pending.id, "deny");
+  await assert.rejects(execution, /was denied/);
+});
+
 test("build terminal-run rejects host-forbidden git branch commands before approval", async () => {
   const root = await mkdtemp(join(tmpdir(), "vraxis-agent-terminal-git-block-"));
   const approvals = new ApprovalRegistry(root);

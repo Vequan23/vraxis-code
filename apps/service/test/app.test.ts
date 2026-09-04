@@ -243,6 +243,25 @@ test("registers and reopens a project with indexed files", async (context) => {
   assert.deepEqual(state.files, [{ path: "src/index.ts" }]);
 });
 
+test("creates a new git repository and registers it", async (context) => {
+  const app = await fixture();
+  context.after(() => app.close());
+  const parent = join(app.project, "..");
+  const response = await fetch(`${app.baseUrl}/api/projects/create`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "greenfield-app", parentPath: parent }),
+  });
+  assert.equal(response.status, 201);
+  const project = await response.json() as { id: string; name: string; path: string; branch: string };
+  assert.equal(project.name, "greenfield-app");
+  assert.match(project.branch, /main|master/);
+  const bootstrap = await fetch(`${app.baseUrl}/api/bootstrap`);
+  const state = await bootstrap.json() as { projects: Array<{ id: string; name: string }> };
+  assert.equal(state.projects.length, 1);
+  assert.equal(state.projects[0]?.name, "greenfield-app");
+});
+
 test("serves staged bootstrap scopes and caches local runtime discovery", async (context) => {
   let discoveries = 0;
   const app = await fixture(undefined, new DeterministicCodingRuntimeEngine(), {

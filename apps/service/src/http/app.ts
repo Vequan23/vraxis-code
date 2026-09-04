@@ -15,6 +15,7 @@ import {
   parseCommandRequest,
   parseConnectModelProviderRequest,
   parseConnectMcpServerRequest,
+  parseCreateProjectRequest,
   parseCreateSessionRequest,
   parseInstallSkillsRequest,
   parseRegisterProjectRequest,
@@ -42,6 +43,7 @@ import type { BrowserAutomationRelay } from "../browser/browser-automation.js";
 import { renderBrowserReplay } from "../browser/browser-replay.js";
 import { ProjectRegistry } from "../projects/project-registry.js";
 import {
+  pickParentFolderWithSystemDialog,
   pickProjectFolderWithSystemDialog,
   type ProjectFolderPicker,
 } from "../projects/system-directory-picker.js";
@@ -830,6 +832,13 @@ export function createApp(options: AppOptions) {
         return;
       }
 
+      if (request.method === "POST" && url.pathname === "/api/projects/create") {
+        const input = parseCreateProjectRequest(await body(request));
+        const project = await registry.create(input.parentPath, input.name);
+        json(response, 201, project);
+        return;
+      }
+
       const projectDoctorMatch = /^\/api\/projects\/([^/]+)\/doctor$/.exec(url.pathname);
       if (request.method === "GET" && projectDoctorMatch?.[1]) {
         const projectPath = await registry.resolveInside(projectDoctorMatch[1]);
@@ -1281,6 +1290,16 @@ export function createApp(options: AppOptions) {
         }
         const project = await registry.register(path);
         json(response, 200, { cancelled: false, project });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/projects/pick-parent-folder") {
+        const parentPath = await pickParentFolderWithSystemDialog();
+        if (!parentPath) {
+          json(response, 200, { cancelled: true });
+          return;
+        }
+        json(response, 200, { cancelled: false, parentPath });
         return;
       }
 

@@ -73,16 +73,29 @@ function stepStateLabel(state: "complete" | "current" | "pending" | "attention")
         <strong>{{ readiness.action.label }}</strong>
         <small>{{ readiness.action.detail }}</small>
       </span>
-      <osx-button
-        variant="primary"
-        size="small"
-        :icon="readiness.action.id === 'export-proof' ? 'download' : readiness.action.id === 'choose-project' ? 'folder-open' : 'arrow-right'"
-        :loading="busy"
-        :disabled="busy"
-        @click="emit('action', readiness.action.id)"
-      >
-        {{ readiness.action.label }}
-      </osx-button>
+      <div class="first-run-actions">
+        <osx-button
+          v-if="readiness.action.id === 'choose-project'"
+          variant="secondary"
+          size="small"
+          icon="plus"
+          :loading="busy"
+          :disabled="busy"
+          @click="emit('action', 'create-project')"
+        >
+          Create new project
+        </osx-button>
+        <osx-button
+          variant="primary"
+          size="small"
+          :icon="readiness.action.id === 'export-proof' ? 'download' : readiness.action.id === 'choose-project' ? 'folder-open' : 'arrow-right'"
+          :loading="busy"
+          :disabled="busy"
+          @click="emit('action', readiness.action.id)"
+        >
+          {{ readiness.action.label }}
+        </osx-button>
+      </div>
     </footer>
   </section>
 </template>
@@ -188,6 +201,13 @@ footer {
 }
 
 footer > span { min-width: 0; }
+
+.first-run-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
 
 @media (max-width: 680px) {
   .first-run { width: calc(100% - 20px); margin: 12px auto; }

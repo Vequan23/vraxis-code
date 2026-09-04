@@ -1296,6 +1296,11 @@ export interface RegisterProjectRequest {
   path: string;
 }
 
+export interface CreateProjectRequest {
+  name: string;
+  parentPath: string;
+}
+
 export interface CreateSessionRequest {
   projectId: string;
   mode: SessionMode;
@@ -1587,6 +1592,14 @@ function parseRuntimeIds(value: unknown): string[] {
 export function parseRegisterProjectRequest(value: unknown): RegisterProjectRequest {
   const input = record(value, "Project registration");
   return { path: requiredString(input.path, "Project path") };
+}
+
+export function parseCreateProjectRequest(value: unknown): CreateProjectRequest {
+  const input = record(value, "Project creation");
+  return {
+    name: boundedString(input.name, "Project name", 64),
+    parentPath: requiredString(input.parentPath, "Parent folder"),
+  };
 }
 
 function sessionMode(value: unknown): SessionMode {

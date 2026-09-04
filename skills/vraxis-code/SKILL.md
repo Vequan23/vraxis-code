@@ -12,7 +12,8 @@ Use this skill when working inside Vraxis Code sessions.
 ## Boundaries
 
 - Work only inside the user-approved project root or isolated Build worktree.
-- Keep project mutations inside the worktree. Do not commit, publish, or edit the source project during Build.
+- Keep project mutations inside the worktree. Do not edit the source project checkout directly during Build.
+- When the user asks to commit, push, or open a pull request, run `git` or `gh` commands on the worktree branch through terminal-run and wait for explicit approval on each command.
 - Request approval for guarded writes, commands, network access, browser control, credentials, and destructive actions.
 
 ## Evidence first

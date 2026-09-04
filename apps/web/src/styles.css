@@ -1707,6 +1707,40 @@ osx-app-shell {
 .attachment-handoff li strong { font-size: 12px; font-weight: 600; }
 .attachment-handoff li small { color: var(--osx-muted); font-size: 12px; }
 
+.sidebar-heading-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.project-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 48%);
+}
+
+.project-modal-backdrop .new-project-panel {
+  margin: 0;
+}
+
+.onboarding-project-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.onboarding-error {
+  margin: 0;
+  color: var(--osx-danger, #c95b55);
+  font-size: 13px;
+}
+
 .center-state,
 .onboarding-state,
 .new-task-state {
@@ -2816,13 +2850,16 @@ osx-app-shell {
 
 .worktree-finish {
   min-width: 0;
-  padding: 8px;
+  display: grid;
+  gap: 14px;
+  padding: 14px 12px 12px;
   border-bottom: 1px solid var(--osx-border-soft, #2c3338);
   background: var(--osx-surface, #15191b);
 }
 
 .worktree-finish.compact {
-  padding-block: 6px;
+  gap: 10px;
+  padding: 10px 12px;
 }
 
 .worktree-finish.compact .worktree-finish-actions {
@@ -2845,12 +2882,12 @@ osx-app-shell {
   white-space: nowrap;
 }
 
-.worktree-finish > osx-alert { display: block; }
+.worktree-finish > osx-alert { display: block; margin: 0; }
 
 .conflict-summary {
   display: grid;
   gap: 7px;
-  margin: 7px 3px 9px;
+  margin: 0;
   padding: 9px 10px;
   border: 1px solid color-mix(in srgb, var(--osx-warning, #d49a3a) 42%, var(--osx-border-soft, #384148));
   border-radius: 8px;
@@ -2870,12 +2907,12 @@ osx-app-shell {
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-  padding: 3px 4px;
+  align-items: start;
+  gap: 16px;
+  padding: 2px 2px 0;
 }
 
-.worktree-finish-actions > div { min-width: 0; display: grid; gap: 2px; }
+.worktree-finish-actions > div { min-width: 0; display: grid; gap: 4px; }
 .worktree-finish-actions strong { font-size: 12px; font-weight: 600; }
 .worktree-finish-actions small { color: var(--osx-muted, #a5adb2); font-size: 12px; line-height: 1.35; }
 
@@ -2883,7 +2920,8 @@ osx-app-shell {
   display: flex;
   justify-content: flex-end;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
+  padding-top: 2px;
 }
 
 @container (max-width: 520px) {
