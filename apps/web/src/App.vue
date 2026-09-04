@@ -1247,9 +1247,20 @@ watch([sessionPane, taskEnd, () => displayedSessionEvents.value.length], ([pane,
   });
 }, { flush: "post" });
 
+function forceConversationLayout(pane: HTMLElement): void {
+  pane.querySelectorAll(".conversation > *").forEach((node) => {
+    if (node instanceof HTMLElement) void node.offsetHeight;
+  });
+}
+
+function setConversationRevealing(pane: HTMLElement, revealing: boolean): void {
+  pane.querySelector(".conversation")?.classList.toggle("conversation--revealing", revealing);
+}
+
 async function jumpToLatest(): Promise<void> {
   const pane = sessionPane.value;
   if (!pane) return;
+  setConversationRevealing(pane, true);
   let cancelled = false;
   const cancel = () => { cancelled = true; };
   for (const event of ["wheel", "touchstart", "keydown"] as const) {
@@ -1258,15 +1269,17 @@ async function jumpToLatest(): Promise<void> {
   try {
     let stableFrames = 0;
     let previousHeight = -1;
+    const allowDocumentScroll = window.matchMedia("(max-width: 760px)").matches;
     // content-visibility replaces estimated message heights during a jump.
     // Drive the pane directly instead of scrollIntoView, which can scroll
     // ancestor containers and land at the top of the transcript.
     for (let frame = 0; frame < 24 && stableFrames < 4; frame += 1) {
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
       if (cancelled || sessionPane.value !== pane) return;
+      forceConversationLayout(pane);
       pane.scrollTop = pane.scrollHeight;
       const end = taskEnd.value;
-      if (end) {
+      if (allowDocumentScroll && end) {
         const endRect = end.getBoundingClientRect();
         if (endRect.bottom > window.innerHeight || endRect.top < pane.getBoundingClientRect().top) {
           window.scrollTo({
@@ -1280,8 +1293,11 @@ async function jumpToLatest(): Promise<void> {
       stableFrames = atBottom && height === previousHeight ? stableFrames + 1 : 0;
       previousHeight = height;
     }
+    latestMessagesHidden.value = false;
+    updateLatestMessagesHidden(true);
     pane.focus({ preventScroll: true });
   } finally {
+    setConversationRevealing(pane, false);
     for (const event of ["wheel", "touchstart", "keydown"] as const) {
       window.removeEventListener(event, cancel, true);
     }
@@ -1290,11 +1306,20 @@ async function jumpToLatest(): Promise<void> {
 
 async function scrollTaskToBottom(): Promise<void> {
   await nextTick();
-  for (let frame = 0; frame < 2; frame += 1) {
-    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
-    const pane = sessionPane.value;
-    if (!pane) return;
-    pane.scrollTop = pane.scrollHeight;
+  const pane = sessionPane.value;
+  if (!pane) return;
+  setConversationRevealing(pane, true);
+  try {
+    for (let frame = 0; frame < 4; frame += 1) {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      if (sessionPane.value !== pane) return;
+      forceConversationLayout(pane);
+      pane.scrollTop = pane.scrollHeight;
+    }
+    latestMessagesHidden.value = false;
+    updateLatestMessagesHidden(true);
+  } finally {
+    setConversationRevealing(pane, false);
   }
 }
 
