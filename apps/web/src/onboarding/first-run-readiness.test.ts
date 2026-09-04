@@ -42,8 +42,7 @@ it("moves a new installation through runtime, project, task, and proof actions",
   expect(firstRunReadiness({ runtime: runtime({ availability: "missing", conformance: undefined }), sessions: [], verificationRuns: [] }).action.id).toBe("setup-runtime");
   expect(firstRunReadiness({ runtime: runtime({ conformance: { state: "unverified", detail: "Not checked", checks: [] } }), sessions: [], verificationRuns: [] }).action.id).toBe("verify-runtime");
   expect(firstRunReadiness({ runtime: runtime(), sessions: [], verificationRuns: [] }).action.id).toBe("choose-project");
-  expect(firstRunReadiness({ runtime: runtime(), project: { id: "project-1", name: "Example", path: "/tmp/example", branch: "main", status: "ready" }, sessions: [], verificationRuns: [] }).action.id).toBe("inspect-project");
-  expect(firstRunReadiness({ runtime: runtime(), project: { id: "project-1", name: "Example", path: "/tmp/example", branch: "main", status: "ready" }, projectDoctor: doctor, sessions: [], verificationRuns: [] }).action.id).toBe("draft-task");
+  expect(firstRunReadiness({ runtime: runtime(), project: { id: "project-1", name: "Example", path: "/tmp/example", branch: "main", status: "ready" }, sessions: [], verificationRuns: [] }).action.id).toBe("draft-task");
 });
 
 it("does not claim portable proof until retained verification passes", () => {

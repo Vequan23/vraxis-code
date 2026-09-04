@@ -7,6 +7,15 @@ import type {
   TrustedProofSignerSummary,
 } from "@vraxis/code-contracts";
 
+defineProps<{
+  proofExportReady?: boolean;
+  proofExporting?: "" | "html" | "json";
+}>();
+
+const emit = defineEmits<{
+  "export-proof-json": [];
+}>();
+
 const state = ref<ProofTrustState>();
 const loading = ref(true);
 const saving = ref(false);
@@ -207,6 +216,23 @@ onMounted(load);
           <osx-button type="submit" variant="primary" size="small" :loading="saving" :disabled="!label.trim() || !publicKey.trim()">Enroll signer</osx-button>
         </form>
       </div>
+      <section class="proof-export-card" aria-label="Signed JSON export">
+        <span>
+          <strong>Signed JSON</strong>
+          <small v-if="proofExportReady">Machine-readable proof for CI, audit, and verification below.</small>
+          <small v-else>Available after the current task passes verification in Verify.</small>
+        </span>
+        <osx-button
+          size="small"
+          icon="file-code"
+          variant="secondary"
+          :loading="proofExporting === 'json'"
+          :disabled="!proofExportReady"
+          @click="emit('export-proof-json')"
+        >
+          Export signed JSON
+        </osx-button>
+      </section>
       <div class="proof-verifier">
         <span><strong>Verify an exported proof</strong><small>Signature validity and signer trust are reported separately.</small></span>
         <input ref="proofInput" class="visually-hidden" type="file" aria-label="Proof file" accept=".json,application/json,application/vnd.vraxis.task-proof+json" @change="verifyFile">
@@ -226,14 +252,18 @@ onMounted(load);
 .proof-trust-settings { gap: 15px; }
 .proof-trust-loading { min-height: 100px; display: grid; place-items: center; }
 .proof-identity-card,
+.proof-export-card,
 .proof-verifier { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 12px; border: 1px solid var(--osx-border-soft, #384148); border-radius: 8px; background: var(--osx-surface-sunken, #101416); }
 .proof-identity-card > span,
+.proof-export-card > span,
 .proof-verifier > span { min-width: 0; display: grid; gap: 3px; }
 .proof-identity-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; flex-wrap: wrap; }
 .proof-identity-card strong,
+.proof-export-card strong,
 .proof-verifier strong,
 .proof-trust-grid strong { font-size: 12px; font-weight: 650; }
 .proof-identity-card small,
+.proof-export-card small,
 .proof-verifier small,
 .proof-trust-grid small { overflow: hidden; color: var(--osx-muted, #98a0a5); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .proof-trust-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(280px, 1fr); gap: 12px; }
@@ -254,6 +284,7 @@ onMounted(load);
 @media (max-width: 760px) {
   .proof-trust-grid { grid-template-columns: 1fr; }
   .proof-identity-card,
+  .proof-export-card,
   .proof-verifier { align-items: flex-start; flex-direction: column; }
   .proof-identity-actions { justify-content: flex-start; }
 }

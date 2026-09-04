@@ -122,7 +122,7 @@ test("gives the empty workspace one primary action", async ({ page }, testInfo) 
   await expect(page.getByText("Quick start · 1/4 complete")).toBeVisible();
   const currentStep = page.locator('.first-run li[aria-current="step"]');
   await expect(currentStep).toHaveCount(1);
-  await expect(currentStep).toContainText("Inspect a project");
+  await expect(currentStep).toContainText("Choose a project");
   await expect(currentStep).toContainText("Current step");
   await expect(page.getByRole("tab", { name: "Changes" })).toHaveCount(0);
   await expect(page.getByRole("textbox", { name: "Message to agent" })).toHaveCount(0);
@@ -158,9 +158,8 @@ test("starts a task from a selected project and keeps evidence truthful", async 
   await expect(page.getByText("Open a terminal", { exact: true })).toBeVisible();
 
   await page.getByRole("tab", { name: "Browser" }).click();
-  await expect(page.getByRole("heading", { name: "Verify this page" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Run checks" })).toBeVisible();
-  await expect(page.getByText("Preview your app", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Page verification")).toHaveCount(0);
+  await expect(page.getByText("Browse your app", { exact: true })).toBeVisible();
   await expectBasicAccessibility(page);
   await page.screenshot({ path: testInfo.outputPath("redesigned-workspace.png"), fullPage: true });
   expect(browserErrors).toEqual([]);
@@ -892,29 +891,6 @@ test("turns discovered project checks into approved, retained verification proof
       body: "<!doctype html><title>Verified proof</title><p>Passed</p>",
     });
   });
-  await page.route("**/api/sessions/session-verify/understand.json", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/vnd.vraxis.understand+json",
-      body: JSON.stringify({
-        kind: "vraxis.understand-artifact", version: 1, generatedAt: new Date().toISOString(), deepLink: "vraxis-code://task/session-verify",
-        sourceProof: { artifactId: `sha256:${"a".repeat(64)}`, keyId: "b".repeat(64) },
-        session: { id: session.id, title: session.title, mode: session.mode, runtimeId: session.runtimeId },
-        project: { id: project.id, name: project.name, branch: project.branch },
-        verdict: { state: "verified", summary: "All 1 changed path is covered by passed governed verification." },
-        changes: [{ path: "src/index.ts", status: "modified", coverage: "verified", verificationIds: ["verification-1"] }],
-        claims: [{ id: "claim-verification", statement: "1 governed verification run has passed.", evidenceIds: ["verification-1"] }],
-        risks: [{ id: "risk-none-retained", severity: "info", title: "No contradictory evidence retained", detail: "No retained failure signal contradicts this verdict.", evidenceIds: ["verification-1"] }],
-        teachBack: [{ id: "teach-change", question: "What behavior depends on src/index.ts, and how did this task change it?", evidenceIds: ["change-1"] }],
-        evidenceLinks: [
-          { id: "change-1", kind: "change", target: "src/index.ts", label: "src/index.ts", deepLink: "vraxis-code://task/session-verify?evidence=change&target=src%2Findex.ts" },
-          { id: "verification-1", kind: "verification", target: "verification-1", label: "Verification verificat · passed", deepLink: "vraxis-code://task/session-verify?evidence=verification&target=verification-1" },
-        ],
-        artifactId: `sha256:${"c".repeat(64)}`,
-        integrity: { algorithm: "Ed25519", canonicalization: "vraxis-json-c14n-v1", digestAlgorithm: "SHA-256", digest: "c".repeat(64), signature: "signature", publicKey: "public-key", publicKeyFormat: "spki-base64", keyId: "b".repeat(64) },
-      }),
-    });
-  });
   await page.route("**/api/sessions/session-verify/diff?path=src%2Findex.ts", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
       path: "src/index.ts", patch: "@@ -1 +1 @@\n-false\n+true", language: "typescript", additions: 1, deletions: 1, binary: false, partialSelection: true,
@@ -924,33 +900,22 @@ test("turns discovered project checks into approved, retained verification proof
 
   await page.goto("/");
   await expect(page.getByRole("tab", { name: "Verify", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Review and run checks" }).click();
-  await expect(page.getByText("Project Doctor", { exact: true })).toBeVisible();
-  await expect(page.getByLabel("Project recipe")).toBeVisible();
-  await expect(page.getByText("Project contract · .vraxis/verify.json", { exact: true })).toBeVisible();
-  await expect(page.locator(".project-doctor-card").getByLabel("Ready")).toBeVisible();
+  await page.getByRole("button", { name: "Run checks" }).click();
+  await expect(page.getByRole("region", { name: "Project checks" })).toBeVisible();
   await expect(page.getByText("Project check", { exact: true })).toBeVisible();
-  await expect(page.getByText("Browser target · http://127.0.0.1:4318/")).toBeVisible();
-  await expect(page.getByRole("region", { name: "Agent verification handoff" })).toContainText("codex handed verification back to you");
+  await expect(page.getByRole("region", { name: "Agent verification handoff" })).toContainText("Agent requested checks");
   await expect(page.getByText("Run the project-owned checks before delivery.", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Run verification" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Start governed verification" }).click();
+  await page.getByRole("region", { name: "Agent verification handoff" }).getByRole("button", { name: "Run checks" }).click();
   expect(handoffStartRequest).toEqual({ handoffId: "handoff-verify" });
   await expect(page.getByText("Verify · Project check", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Allow once" }).click();
-  await expect(page.locator(".verification-workflow strong").filter({ hasText: /^Passed$/ })).toBeVisible();
+  await expect(page.locator(".verification-panel strong").filter({ hasText: /^Passed$/ })).toBeVisible();
   await expect(page.getByLabel("Task evidence ledger")).toContainText("1 verified");
-  await expect(page.getByRole("button", { name: "Understand", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Download proof", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Signed JSON", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Understand", exact: true }).click();
-  await expect(page.getByRole("region", { name: "Task understanding" })).toBeVisible();
-  await expect(page.getByText("All 1 changed path is covered by passed governed verification.", { exact: true })).toBeVisible();
-  await expect(page.getByText(
-    `Recipe ${recipeFingerprint.slice(0, 12)} · 0 services · 1 command receipt · 0 browser assertions`,
-    { exact: true },
-  )).toBeVisible();
-  await page.getByRole("button", { name: "Rerun exact recipe" }).click();
+  await page.getByRole("tab", { name: "Verify", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Export proof", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Signed JSON", exact: true })).toHaveCount(0);
+  await expect(page.getByText("1/1 checks passed", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Rerun checks" }).click();
   await expect.poll(() => rerunRequests).toBe(1);
   await expect(page.getByText("Verify · Project check", { exact: true })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("verified-delivery-loop.png"), fullPage: true });
@@ -1033,14 +998,12 @@ test("shows governed service health and can stop and tear down an active verific
 
   await page.goto("/");
   await expect(page.getByRole("tab", { name: "Verify", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Review and run checks" }).click();
-  const serviceHealth = page.getByLabel("Governed service health");
-  await expect(serviceHealth.getByText("Preview server", { exact: true })).toBeVisible();
-  await expect(serviceHealth.getByText(/http:\/\/127\.0\.0\.1:4318\/health · HTTP 200 · 2 attempts/)).toBeVisible();
-  await expect(page.getByText("Governed service", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Stop and tear down" }).click();
+  await page.getByRole("button", { name: "Run checks" }).click();
+  await expect(page.getByText("Preview server", { exact: true })).toBeVisible();
+  await expect(page.getByText(/http:\/\/127\.0\.0\.1:4318\/health · HTTP 200/)).toBeVisible();
+  await page.getByRole("button", { name: "Stop" }).click();
   await expect.poll(() => stopRequests).toBe(1);
-  await expect(page.locator(".verification-workflow strong").filter({ hasText: /^Interrupted$/ })).toBeVisible();
+  await expect(page.locator(".verification-panel strong").filter({ hasText: /^Interrupted$/ })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("governed-service-lifecycle.png"), fullPage: true });
   expect(browserErrors).toEqual([]);
 });
@@ -2027,7 +1990,7 @@ test("uses the local service chooser instead of asking for a path", async ({ pag
   await page.goto("/?preview=empty");
   await page.getByRole("button", { name: "Choose project", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Your first trusted task" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Run Project Doctor" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Draft the first task" })).toBeVisible();
   await expect(page.getByText("Folder path")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Cancel" })).toHaveCount(0);
 });

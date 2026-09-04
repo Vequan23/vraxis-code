@@ -14,7 +14,6 @@ export type ComposerSlashCommandId =
   | "debug"
   | "commit"
   | "verify"
-  | "doctor"
   | "changes"
   | "worktree"
   | "proof"
@@ -31,7 +30,6 @@ export type ComposerSlashCommandAction =
   | { type: "clear" }
   | { type: "new-task" }
   | { type: "open-inspector"; view: InspectorView; prompt?: { mode: SessionMode; text: string } }
-  | { type: "doctor"; prompt: string }
   | { type: "harness-setup" }
   | { type: "probe-runtime" };
 
@@ -206,34 +204,20 @@ const composerSlashCommandDefinitions: ComposerSlashCommandDefinition[] = [
   {
     id: "verify",
     label: "verify",
-    description: "Run governed checks from .vraxis/verify.json.",
+    description: "Run project checks with retained proof.",
     icon: "flask",
     group: "Evidence",
-    keywords: ["checks", "ci", "recipe", "validation"],
+    keywords: ["checks", "ci", "validation", "test"],
     action: {
       type: "open-inspector",
       view: "verify",
       prompt: {
         mode: "review",
-        text: "Use the project's governed verification recipe. Report what is configured, what still needs setup, and request verification when the work is ready.",
+        text: "Review the project checks configured for this repo. Report what will run, what still needs setup, and request checks when the work is ready.",
       },
     },
     disabled: (context) => !context.hasSession,
-    disabledReason: () => "Start a task before running governed verification.",
-  },
-  {
-    id: "doctor",
-    label: "doctor",
-    description: "Inspect project readiness and verification setup.",
-    icon: "activity",
-    group: "Evidence",
-    keywords: ["health", "readiness", "setup", "inspect"],
-    action: {
-      type: "doctor",
-      prompt: "Summarize Project Doctor findings, missing verification setup, and the next concrete steps to make this repo verification-ready.",
-    },
-    disabled: (context) => !context.hasProject || context.previewMode,
-    disabledReason: () => "Open a project before running Project Doctor.",
+    disabledReason: () => "Start a task before running checks.",
   },
   {
     id: "changes",

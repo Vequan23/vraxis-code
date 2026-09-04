@@ -40,8 +40,6 @@ import {
   type TeamPolicyState,
   type TaskProofEnvelopeV1,
   type TaskEvidenceKindV1,
-  type UnderstandArtifactEnvelopeV1,
-  type UnderstandEvidenceLinkV1,
   type HarnessMetricsSummaryV1,
   type HarnessRoutingHintV1,
   type UpdateSettingsRequest,
@@ -88,7 +86,6 @@ import {
   type WorkspaceStateSnapshot,
 } from "./workspace/workspace-cache.js";
 import WorkspaceFileTree from "./workspace/WorkspaceFileTree.vue";
-import UnderstandArtifactPanel from "./understand/UnderstandArtifactPanel.vue";
 import { createActivityPresenter } from "./activity/activity-presenter.js";
 import type { DisplayActivityEvent } from "./activity/session-activity.js";
 
@@ -192,11 +189,6 @@ const focusedEvidence = ref<{ kind: TaskEvidenceKindV1; target: string }>();
 const approvalActionId = ref("");
 const verificationAction = ref("");
 const receiptExporting = ref<"html" | "json" | "">("");
-const understandArtifact = ref<UnderstandArtifactEnvelopeV1>();
-const understandLoading = ref(false);
-const understandError = ref("");
-const understandOpen = ref(false);
-const understandExporting = ref(false);
 const browserReplayExporting = ref(false);
 const firstRunJourneyClosed = ref(false);
 let runPollTimer: ReturnType<typeof setTimeout> | undefined;
@@ -249,6 +241,9 @@ const session = computed(() => selectedSession(state));
 const projectSessions = computed(() => state.sessions.filter((item) => item.projectId === project.value?.id));
 const activeProjectSessions = computed(() => projectSessions.value.filter((item) => !item.archivedAt));
 const archivedProjectSessions = computed(() => projectSessions.value.filter((item) => item.archivedAt));
+const pendingDeleteSession = computed(() =>
+  archivedProjectSessions.value.find((item) => item.id === confirmDeleteSessionId.value) ?? null,
+);
 const showFirstRunJourney = computed(() => !firstRunJourneyClosed.value && activeProjectSessions.value.length <= 1);
 const STARTUP_RECOVERY_DISMISS_KEY = "vraxis-code:dismissed-startup-recovery";
 
@@ -363,9 +358,6 @@ const activityPresenter = createActivityPresenter((events) => {
   displayedSessionEvents.value = events;
 });
 watch(sessionEvents, (events) => activityPresenter.update(events), { deep: true, immediate: true });
-watch(() => session.value?.id, () => {
-  resetUnderstandArtifact();
-});
 const changedFiles = computed(() => state.changes);
 const availableChangeHunks = computed(() => {
   if (!changeDiff.value || !selectedChange.value) return [];
@@ -495,24 +487,7 @@ const browserMatchesVerificationTarget = computed(() => {
     return state.browser.url === verificationBrowserTarget.value;
   }
 });
-const verificationViewingWrongPage = computed(() => Boolean(
-  verificationBrowserTarget.value && state.browser?.url && !browserMatchesVerificationTarget.value,
-));
-const verificationStudioTitle = computed(() => (
-  verificationViewingWrongPage.value ? "Verification" : "Verify this page"
-));
-const verificationStudioBadge = computed(() => {
-  if (verificationViewingWrongPage.value) return { label: "Wrong page", tone: "warning" as const };
-  if (latestVerification.value) {
-    return { label: verificationLabel(latestVerification.value), tone: verificationTone(latestVerification.value) };
-  }
-  return { label: "Ready", tone: "neutral" as const };
-});
-const verificationStudioFailure = computed(() => {
-  const run = latestVerification.value;
-  if (!run || run.state !== "failed") return "";
-  return verificationFailureSummary(run);
-});
+const browserShowEmptyState = computed(() => !state.browser?.url && !desktopBrowserAvailable);
 const browserUsesLiveSurface = computed(() => desktopBrowserAvailable
   && Boolean(session.value)
   && (!state.browser || browserIsLive.value));
@@ -528,10 +503,13 @@ const verificationSteps = computed<OsxPlanStep[]>(() => {
   const visual = latestVerification.value?.visual ?? state.projectDoctor?.verificationVisual;
   const serviceSteps: OsxPlanStep[] = services.map((service) => {
     const stateValue = "state" in service ? service.state : "pending";
+    const healthDetail = "lastHealthStatus" in service && service.lastHealthStatus !== undefined
+      ? `${service.health.url} · HTTP ${service.lastHealthStatus}`
+      : service.health.url;
     return {
       id: `service:${service.id}`,
       title: service.title,
-      detail: `${service.command} ${service.args.join(" ")} · health ${service.health.url}`,
+      detail: healthDetail,
       state: stateValue === "healthy" || stateValue === "stopped" ? "done" as const
         : stateValue === "failed" ? "failed" as const
           : stateValue === "starting" || stateValue === "awaiting-approval" ? "active" as const : "pending" as const,
@@ -542,7 +520,7 @@ const verificationSteps = computed<OsxPlanStep[]>(() => {
     return {
       id: `check:${check.id}`,
       title: check.title,
-      detail: `${check.command} ${check.args.join(" ")} · ${check.source}`,
+      detail: check.source,
       state: stateValue === "passed" ? "done"
         : stateValue === "failed" ? "failed"
           : stateValue === "running" || stateValue === "awaiting-approval" ? "active"
@@ -566,6 +544,44 @@ const verificationSteps = computed<OsxPlanStep[]>(() => {
   }] : [];
   return [...serviceSteps, ...checkSteps, ...assertionSteps, ...visualSteps];
 });
+const verificationInventory = computed(() => {
+  const checks = latestVerification.value?.checks.length ?? state.projectDoctor?.verificationChecks.length ?? 0;
+  const services = latestVerification.value?.services.length ?? state.projectDoctor?.verificationServices?.length ?? 0;
+  const assertions = latestVerification.value?.browserAssertions?.length ?? state.projectDoctor?.verificationBrowserAssertions?.length ?? 0;
+  const visual = Boolean(latestVerification.value?.visual ?? state.projectDoctor?.verificationVisual);
+  return { checks, services, assertions, visual };
+});
+const verificationPanelTitle = computed(() => {
+  if (latestVerification.value) return verificationLabel(latestVerification.value);
+  if (verificationHasRecipe.value) return "Ready to run";
+  if (state.projectDoctor) return "No checks found";
+  return "Checks";
+});
+const verificationPanelDetail = computed(() => {
+  const run = latestVerification.value;
+  if (run?.state === "passed") {
+    const passed = run.checks.filter((item) => item.state === "passed").length;
+    const total = run.checks.length;
+    return total ? `${passed}/${total} checks passed` : "All checks passed";
+  }
+  if (run?.state === "failed") return verificationFailureSummary(run);
+  if (verificationProgressLabel.value) return verificationProgressLabel.value;
+  if (verificationHasRecipe.value) {
+    const inventory = verificationInventory.value;
+    const parts: string[] = [];
+    if (inventory.checks) parts.push(`${inventory.checks} check${inventory.checks === 1 ? "" : "s"}`);
+    if (inventory.services) parts.push(`${inventory.services} service${inventory.services === 1 ? "" : "s"}`);
+    if (inventory.assertions) parts.push(`${inventory.assertions} page assertion${inventory.assertions === 1 ? "" : "s"}`);
+    if (inventory.visual) parts.push("visual baseline");
+    return parts.join(" · ");
+  }
+  if (state.projectDoctor) return "Add test or lint scripts to package.json, or create .vraxis/verify.json.";
+  return "Loading project checks…";
+});
+const doctorIssues = computed(() => state.projectDoctor?.issues
+  .filter((issue) => issue.severity === "error" || issue.severity === "warning")
+  .slice(0, 2) ?? []);
+const doctorLoading = computed(() => Boolean(project.value && !state.projectDoctor));
 const taskTerminalRuns = computed(() => state.terminalRuns.filter((run) => run.purpose !== "user-shell"));
 const liveEvidenceActive = computed(() => pendingApprovals.value.length > 0
   || state.approvals.some((item) => item.state === "executing")
@@ -620,20 +636,12 @@ const evidenceLedger = computed(() => {
     hasEvidence: taskTerminalRuns.value.length > 0 || Boolean(state.browser?.actions.length) || state.approvals.length > 0 || verificationRuns.value.length > 0,
   };
 });
-const taskProofExportable = computed(() => Boolean(
+const taskProofReady = computed(() => Boolean(
   session.value
   && !sessionIsRunning.value
-  && (
-    verificationRuns.value.some((run) => run.state === "passed")
-    || evidenceLedger.value.hasEvidence
-    || displayedSessionEvents.value.some((event) => event.kind === "message" && event.actor === "agent")
-  ),
+  && verificationRuns.value.some((run) => run.state === "passed"),
 ));
-const evidenceChromeVisible = computed(() => evidenceLedger.value.hasEvidence
-  || taskProofExportable.value
-  || understandLoading.value
-  || understandOpen.value
-  || Boolean(understandError.value));
+const evidenceChromeVisible = computed(() => evidenceLedger.value.hasEvidence);
 const highlightedFile = computed(() => filePreview.value
   ? highlightCode(filePreview.value.content, filePreview.value.language)
   : undefined);
@@ -680,6 +688,13 @@ const postRunNudge = computed(() => {
 watch(() => state.settings.harnessMetricsEnabled, () => {
   void refreshHarnessMetrics();
 }, { immediate: true });
+watch(
+  () => state.settings.theme,
+  (theme) => {
+    document.documentElement.setAttribute("data-osx-theme", theme);
+  },
+  { immediate: true },
+);
 watch(sessionIsRunning, (running, wasRunning) => {
   if (running) {
     postRunNudgeSessionId.value = "";
@@ -780,7 +795,7 @@ const inspectorOptions = [
   { value: "files" as const, label: "Files", icon: "file-code" as const },
   { value: "changes" as const, label: "Changes", icon: "git-branch" as const },
   { value: "terminal" as const, label: "Terminal", icon: "terminal" as const },
-  { value: "browser" as const, label: "Browser", icon: "eye" as const },
+  { value: "browser" as const, label: "Browser", icon: "globe" as const },
   { value: "verify" as const, label: "Verify", icon: "list-checks" as const },
 ];
 const inspectorUsesTab = computed(() => inspectorOptions.some((item) => item.value === inspector.value));
@@ -1759,10 +1774,6 @@ async function executeComposerSlashCommand(commandId: string): Promise<void> {
       }
       if (command.action.prompt) applySlashPrompt(command.action.prompt.mode, command.action.prompt.text);
       return;
-    case "doctor":
-      await refreshProjectDoctor();
-      applySlashPrompt("ask", command.action.prompt);
-      return;
     case "harness-setup":
       await openHarnessSetup();
       return;
@@ -2476,69 +2487,6 @@ async function exportTaskReceipt(format: "html" | "json"): Promise<void> {
   }
 }
 
-function resetUnderstandArtifact(): void {
-  understandArtifact.value = undefined;
-  understandError.value = "";
-  understandOpen.value = false;
-  understandExporting.value = false;
-}
-
-async function openUnderstandArtifact(): Promise<void> {
-  if (!session.value || understandLoading.value) return;
-  understandError.value = "";
-  understandLoading.value = true;
-  understandOpen.value = true;
-  try {
-    const response = await fetch(`/api/sessions/${session.value.id}/understand.json`);
-    if (!response.ok) {
-      const failure = await response.json().catch(() => ({})) as { error?: string };
-      throw new Error(failure.error ?? "The understanding artifact could not be generated.");
-    }
-    understandArtifact.value = await response.json() as UnderstandArtifactEnvelopeV1;
-  } catch (error) {
-    understandError.value = error instanceof Error ? error.message : "The understanding artifact could not be generated.";
-    understandOpen.value = false;
-  } finally {
-    understandLoading.value = false;
-  }
-}
-
-async function exportUnderstandArtifact(): Promise<void> {
-  if (!session.value || understandExporting.value) return;
-  understandExporting.value = true;
-  taskError.value = "";
-  try {
-    const response = await fetch(`/api/sessions/${session.value.id}/understand.json`);
-    if (!response.ok) {
-      const failure = await response.json().catch(() => ({})) as { error?: string };
-      throw new Error(failure.error ?? "The understanding artifact could not be exported.");
-    }
-    const blob = new Blob([`${JSON.stringify(await response.json() as UnderstandArtifactEnvelopeV1, null, 2)}\n`], { type: "application/vnd.vraxis.understand+json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${project.value?.name ?? "vraxis"}-${session.value.id.slice(0, 8)}-understand.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-  } catch (error) {
-    taskError.value = error instanceof Error ? error.message : "The understanding artifact could not be exported.";
-  } finally {
-    understandExporting.value = false;
-  }
-}
-
-async function exploreUnderstandEvidence(link: UnderstandEvidenceLinkV1): Promise<void> {
-  if (link.kind === "verification") {
-    inspector.value = "verify";
-    return;
-  }
-  if (link.kind === "worktree") {
-    inspector.value = "changes";
-    return;
-  }
-  await focusLinkedEvidence({ kind: link.kind, target: link.target });
-}
-
 async function exportBrowserReplay(): Promise<void> {
   if (!session.value || browserReplayExporting.value) return;
   browserReplayExporting.value = true;
@@ -2892,10 +2840,6 @@ async function handleFirstRunAction(action: FirstRunActionId): Promise<void> {
     await openProjectPicker();
     return;
   }
-  if (action === "inspect-project") {
-    await refreshProjectDoctor();
-    return;
-  }
   if (action === "draft-task") {
     useSuggestion("Inspect this project and explain its architecture with file-backed evidence.", "ask");
     await nextTick();
@@ -2906,7 +2850,8 @@ async function handleFirstRunAction(action: FirstRunActionId): Promise<void> {
     inspector.value = "verify";
     return;
   }
-  await exportTaskReceipt("json");
+  inspector.value = "verify";
+  if (taskProofReady.value) await exportTaskReceipt("html");
 }
 
 function closeSettings(): void {
@@ -3485,12 +3430,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                 <span>{{ item.title }}</span>
                 <small>{{ visibleSessionMode(item) }}</small>
               </div>
-              <div v-if="confirmDeleteSessionId === item.id" class="session-delete-confirm" role="group" :aria-label="`Delete ${item.title}`">
-                <span>Delete permanently?</span>
-                <osx-button size="small" tone="secondary" :disabled="Boolean(sessionActionId)" @click.stop="confirmDeleteSessionId = ''">Cancel</osx-button>
-                <osx-button size="small" tone="danger" :loading="sessionActionId === item.id" :disabled="Boolean(sessionActionId && sessionActionId !== item.id)" @click.stop="deleteSession(item)">Delete</osx-button>
-              </div>
-              <div v-else class="session-row-actions">
+              <div class="session-row-actions">
                 <osx-icon-button
                   class="session-row-action"
                   label="Restore task"
@@ -3555,6 +3495,8 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
           :mcp-projects="state.projects"
           :selected-project-id="state.selectedProjectId"
           :model-providers="state.modelProviders"
+          :proof-export-ready="taskProofReady"
+          :proof-exporting="receiptExporting"
           @close="closeSettings"
           @update:section="settingsSection = $event"
           @update="updateSettings"
@@ -3574,6 +3516,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
           @skills-changed="skillsChanged"
           @provider-connected="providerConnected"
           @providers-changed="providersChanged"
+          @export-proof-json="exportTaskReceipt('json')"
         />
 
         <div v-else-if="loading" class="center-state">
@@ -3898,6 +3841,7 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
             <ComposerMenuPicker
               slot="controls"
               label="Model"
+              align="end"
               :value="selectedModelId"
               :groups="composerModelGroups"
               :disabled="submitting || sessionIsRunning"
@@ -3954,20 +3898,6 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
               <span v-if="evidenceLedger.browserActions"><osx-icon name="eye" :size="13" />{{ evidenceLedger.browserActions }} browser {{ evidenceLedger.browserActions === 1 ? 'action' : 'actions' }}</span>
               <span v-if="evidenceLedger.pendingApprovals" class="warning"><osx-icon name="lock" :size="13" />{{ evidenceLedger.pendingApprovals }} waiting</span>
             </section>
-            <section v-if="taskProofExportable" class="proof-export-actions" aria-label="Task proof actions">
-              <osx-button size="small" variant="secondary" icon="sparkle" :loading="understandLoading" @click="openUnderstandArtifact">Understand</osx-button>
-              <osx-button size="small" variant="secondary" icon="download" :loading="receiptExporting === 'html'" @click="exportTaskReceipt('html')">Download proof</osx-button>
-              <osx-button size="small" variant="secondary" icon="file-code" :loading="receiptExporting === 'json'" @click="exportTaskReceipt('json')">Signed JSON</osx-button>
-            </section>
-            <div v-if="understandLoading" class="understand-loading"><osx-spinner size="small" label="Generating understanding" show-label /></div>
-            <UnderstandArtifactPanel
-              v-if="understandOpen && understandArtifact"
-              :artifact="understandArtifact"
-              @close="resetUnderstandArtifact"
-              @download="exportUnderstandArtifact"
-              @explore="exploreUnderstandEvidence"
-            />
-            <osx-alert v-else-if="understandError" tone="error" title="Understanding unavailable" :description="understandError" />
           </div>
           <div v-if="inspector === 'files'" class="evidence-view file-inspector">
             <div
@@ -4255,75 +4185,39 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
           </div>
 
           <div v-else-if="inspector === 'verify'" class="evidence-view verification-inspector">
-            <section class="project-doctor-card" aria-label="Project Doctor">
-              <header>
-                <span class="project-doctor-title">
-                  <span><osx-icon name="stethoscope" :size="16" /></span>
-                  <span><strong>Project Doctor</strong><small>Manifest-backed checks. Nothing runs during inspection.</small></span>
-                </span>
-                <span class="project-doctor-actions">
-                  <osx-badge
-                    v-if="state.projectDoctor?.verificationSource"
-                    size="small"
-                    :label="state.projectDoctor.verificationSource.kind === 'project' ? 'Project recipe' : 'Discovered'"
-                    :tone="state.projectDoctor.verificationSource.kind === 'project' ? 'info' : 'neutral'"
-                  />
-                  <osx-badge
-                    size="small"
-                    :label="!state.projectDoctor ? 'Not inspected' : state.projectDoctor.ok && verificationHasRecipe ? 'Ready' : 'Needs setup'"
-                    :tone="state.projectDoctor?.ok && verificationHasRecipe ? 'success' : 'warning'"
-                  />
-                  <osx-icon-button label="Inspect project again" icon="refresh-cw" size="small" :loading="verificationAction === 'doctor'" @click="refreshProjectDoctor" />
-                </span>
-              </header>
-              <template v-if="state.projectDoctor">
-                <div class="project-facts" aria-label="Detected project facts">
-                  <span v-if="state.projectDoctor.packageManager"><strong>{{ state.projectDoctor.packageManager.name }}</strong><small>{{ state.projectDoctor.packageManager.lockfile ?? 'No lockfile' }}</small></span>
-                  <span><strong>{{ state.projectDoctor.projectKind.replace('-', ' ') }}</strong><small>Project shape</small></span>
-                  <span v-if="state.projectDoctor.frameworks.length"><strong>{{ state.projectDoctor.frameworks.map(item => item.name).join(', ') }}</strong><small>Frameworks</small></span>
-                  <span v-else><strong>{{ state.projectDoctor.ecosystems.map(item => item.label).join(', ') || 'Unknown' }}</strong><small>Ecosystem</small></span>
-                  <span v-if="state.projectDoctor.verificationServices?.length"><strong>{{ state.projectDoctor.verificationServices.length }}</strong><small>Governed {{ state.projectDoctor.verificationServices.length === 1 ? 'service' : 'services' }}</small></span>
-                </div>
-                <osx-alert
-                  v-for="issue in state.projectDoctor.issues.slice(0, 3)"
-                  :key="issue.code"
-                  :tone="issue.severity === 'error' ? 'error' : issue.severity === 'warning' ? 'warning' : 'info'"
-                  :title="issue.message"
-                  :description="issue.remediation"
-                />
-                <osx-alert
-                  v-if="!verificationHasRecipe"
-                  tone="warning"
-                  title="No verification recipe yet"
-                  description="Add checks to .vraxis/verify.json or ensure the project manifest exposes test, lint, or build scripts Project Doctor can discover."
-                />
-              </template>
-              <div v-else class="doctor-loading"><osx-spinner size="small" label="Inspecting project" show-label /></div>
-            </section>
-
-            <section class="verification-workflow" aria-label="Verification plan">
+            <section class="verification-panel" aria-label="Project checks">
               <header>
                 <span>
-                  <strong>{{ latestVerification ? verificationLabel(latestVerification) : 'Verification plan' }}</strong>
-                  <small>{{ latestVerification ? `Recipe ${latestVerification.recipeFingerprint?.slice(0, 12) ?? 'legacy'} · ${latestVerification.services.length} ${latestVerification.services.length === 1 ? 'service' : 'services'} · ${latestVerification.checks.length} command ${latestVerification.checks.length === 1 ? 'receipt' : 'receipts'} · ${latestVerification.browserAssertions?.length ?? 0} browser ${(latestVerification.browserAssertions?.length ?? 0) === 1 ? 'assertion' : 'assertions'}` : state.projectDoctor?.verificationSource?.kind === 'project' ? `Project contract · ${state.projectDoctor.verificationSource.path}` : 'Run the checks this project already declares.' }}</small>
+                  <strong>{{ verificationPanelTitle }}</strong>
+                  <small>{{ verificationPanelDetail }}</small>
                 </span>
                 <osx-badge v-if="latestVerification" size="small" :label="verificationLabel(latestVerification)" :tone="verificationTone(latestVerification)" />
               </header>
+
+              <osx-alert
+                v-for="issue in doctorIssues"
+                :key="issue.code"
+                :tone="issue.severity === 'error' ? 'error' : 'warning'"
+                :title="issue.message"
+                :description="issue.remediation"
+              />
+
               <section v-if="pendingVerificationHandoff" class="verification-handoff" aria-label="Agent verification handoff">
                 <span class="verification-handoff-icon"><osx-icon name="shield-check" :size="17" /></span>
                 <span>
-                  <strong>{{ pendingVerificationHandoff.requestedBy.runtimeId }} handed verification back to you</strong>
-                  <small>{{ pendingVerificationHandoff.note ?? 'The agent requested the exact project-owned recipe. It did not choose commands or start any process.' }}</small>
+                  <strong>Agent requested checks</strong>
+                  <small>{{ pendingVerificationHandoff.note ?? "Review and run the project checks when the work is ready." }}</small>
                 </span>
                 <div>
                   <osx-button size="small" variant="secondary" :loading="verificationAction === 'handoff'" @click="dismissVerificationHandoff">Dismiss</osx-button>
-                  <osx-button size="small" variant="primary" icon="play" :loading="verificationAction === 'start'" :disabled="!verificationHasRecipe" @click="startVerification(pendingVerificationHandoff.id)">Start governed verification</osx-button>
+                  <osx-button size="small" variant="primary" icon="play" :loading="verificationAction === 'start'" :disabled="!verificationHasRecipe" @click="startVerification(pendingVerificationHandoff.id)">Run checks</osx-button>
                 </div>
               </section>
+
               <section v-if="verificationPendingApproval" class="verification-approval" aria-label="Verification approval required">
                 <header>
-                  <strong>Approve the next project check</strong>
-                  <small>Verification uses the project-owned recipe. Each command waits for your approval before it runs.</small>
+                  <strong>{{ verificationPendingApproval.title }}</strong>
+                  <small>{{ approvalDescription(verificationPendingApproval) }}</small>
                 </header>
                 <osx-agent-approval
                   :title="verificationPendingApproval.title"
@@ -4337,43 +4231,19 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                   @reject="decideApproval(verificationPendingApproval, 'deny')"
                 />
               </section>
-              <osx-alert
-                v-else-if="verificationProgressLabel && verificationIsActive"
-                tone="info"
-                title="Verification in progress"
-                :description="verificationProgressLabel"
-              />
-              <div v-if="latestVerification?.services.length" class="verification-services" aria-label="Governed service health">
-                <article v-for="service in latestVerification.services" :key="service.id">
-                  <span>
-                    <strong>{{ service.title }}</strong>
-                    <small>{{ service.health.url }} · HTTP {{ service.lastHealthStatus ?? 'waiting' }} · {{ service.healthAttempts }} {{ service.healthAttempts === 1 ? 'attempt' : 'attempts' }}</small>
-                  </span>
-                  <osx-badge
-                    size="small"
-                    :label="service.state.replace('-', ' ')"
-                    :tone="service.state === 'healthy' || service.state === 'stopped' ? 'success' : service.state === 'failed' ? 'error' : 'info'"
-                  />
-                </article>
+
+              <div v-if="doctorLoading" class="verification-loading"><osx-spinner size="small" label="Loading checks" show-label /></div>
+              <osx-plan v-else-if="verificationSteps.length" :steps="verificationSteps" label="Checks" compact show-progress />
+              <div v-else-if="state.projectDoctor" class="evidence-empty" role="status">
+                <span><osx-icon name="list-checks" :size="18" /></span>
+                <div><strong>No checks found</strong><small>Add test or lint scripts to package.json, or create .vraxis/verify.json.</small></div>
               </div>
-              <div v-if="latestVerification?.browserAssertions?.length" class="verification-services" aria-label="Browser acceptance assertions">
-                <article v-for="assertion in latestVerification.browserAssertions" :key="assertion.id">
-                  <span>
-                    <strong>{{ assertion.title }}</strong>
-                    <small>{{ assertion.kind }} {{ assertion.match }} “{{ assertion.value }}”<template v-if="assertion.actual"> · saw “{{ assertion.actual.slice(0, 120) }}”</template></small>
-                  </span>
-                  <osx-badge
-                    size="small"
-                    :label="assertion.state"
-                    :tone="assertion.state === 'passed' ? 'success' : assertion.state === 'failed' ? 'error' : 'neutral'"
-                  />
-                </article>
-              </div>
-              <div v-if="latestVerification?.visual" class="verification-visual" aria-label="Visual comparison evidence">
+
+              <div v-if="latestVerification?.visual?.diffAvailable" class="verification-visual" aria-label="Visual comparison evidence">
                 <header>
                   <span>
-                    <strong>Visual baseline</strong>
-                    <small>{{ latestVerification.visual.baselinePath }} · tolerance {{ (latestVerification.visual.maxDiffRatio * 100).toFixed(3) }}%</small>
+                    <strong>Visual diff</strong>
+                    <small>{{ latestVerification.visual.diffPixels }} of {{ latestVerification.visual.totalPixels }} pixels differ</small>
                   </span>
                   <osx-badge
                     size="small"
@@ -4381,33 +4251,33 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                     :tone="latestVerification.visual.state === 'passed' ? 'success' : latestVerification.visual.state === 'failed' ? 'error' : 'neutral'"
                   />
                 </header>
-                <small v-if="latestVerification.visual.diffRatio !== undefined">
-                  {{ latestVerification.visual.diffPixels }} of {{ latestVerification.visual.totalPixels }} pixels differ · {{ (latestVerification.visual.diffRatio * 100).toFixed(3) }}%
-                </small>
                 <img
-                  v-if="latestVerification.visual.diffAvailable"
                   :src="`/api/verifications/${latestVerification.id}/visual-diff`"
                   alt="Visual regression difference map"
                 >
               </div>
-              <osx-plan v-if="verificationSteps.length" :steps="verificationSteps" label="Verification recipe" compact show-progress />
-              <div v-else class="evidence-empty" role="status">
-                <span><osx-icon name="list-checks" :size="18" /></span>
-                <div><strong>No verification recipe</strong><small>Add a check, service, or browser proof target to make delivery reproducible.</small></div>
-              </div>
+
               <osx-alert
                 v-if="latestVerification?.state === 'needs-browser'"
                 tone="info"
-                title="Prove the visible result"
-                :description="verificationBrowserTarget ? `Command checks passed. Open ${verificationBrowserTarget}, then capture its console and network evidence.` : 'Command checks passed. Capture the current task browser page to check its console and network evidence.'"
-              />
-              <osx-alert
-                v-else-if="latestVerification?.state === 'failed'"
-                tone="error"
-                title="Verification needs attention"
-                :description="verificationFailureSummary(latestVerification)"
+                title="Capture the page"
+                :description="verificationBrowserTarget ? `Checks passed. Open ${verificationBrowserTarget} and capture browser evidence.` : 'Checks passed. Capture the current browser page as evidence.'"
               />
               <osx-alert v-if="browserError && inspector === 'verify'" tone="error" title="Browser proof not captured" :description="browserError" />
+
+              <section v-if="taskProofReady" class="verification-delivery" aria-label="Delivery proof">
+                <p>Checks passed. Export a shareable report for review or handoff.</p>
+                <osx-button
+                  variant="primary"
+                  size="small"
+                  icon="download"
+                  :loading="receiptExporting === 'html'"
+                  @click="exportTaskReceipt('html')"
+                >
+                  Export proof
+                </osx-button>
+              </section>
+
               <div class="verification-actions">
                 <osx-button
                   v-if="latestVerification?.state === 'needs-browser'"
@@ -4417,18 +4287,29 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                   :loading="verificationAction === 'browser'"
                   @click="browserMatchesVerificationTarget ? captureVerificationBrowser() : openVerificationBrowser()"
                 >
-                  {{ browserMatchesVerificationTarget ? 'Capture browser proof' : verificationBrowserTarget ? 'Open verification target' : 'Open task browser' }}
+                  {{ browserMatchesVerificationTarget ? 'Capture page' : verificationBrowserTarget ? 'Open page' : 'Open browser' }}
                 </osx-button>
                 <osx-button
-                  v-else-if="!pendingVerificationHandoff"
-                  :variant="latestVerification?.state === 'passed' ? 'secondary' : 'primary'"
+                  v-else-if="!pendingVerificationHandoff && !taskProofReady"
+                  variant="primary"
                   size="small"
                   icon="play"
                   :loading="verificationAction === 'start' || verificationAction === 'rerun'"
                   :disabled="!session || Boolean(verificationAction) || (!verificationCanRerun && (verificationInProgress || !verificationHasRecipe))"
                   @click="verificationCanRerun ? rerunVerification() : startVerification()"
                 >
-                  {{ verificationCanRerun ? 'Rerun exact recipe' : verificationProgressLabel || (verificationInProgress ? 'Verification active' : 'Run verification') }}
+                  {{ verificationCanRerun ? 'Rerun checks' : verificationProgressLabel || (verificationInProgress ? 'Running' : 'Run checks') }}
+                </osx-button>
+                <osx-button
+                  v-else-if="!pendingVerificationHandoff && taskProofReady"
+                  variant="secondary"
+                  size="small"
+                  icon="play"
+                  :loading="verificationAction === 'rerun'"
+                  :disabled="!verificationCanRerun || Boolean(verificationAction) || verificationInProgress"
+                  @click="rerunVerification()"
+                >
+                  Rerun checks
                 </osx-button>
                 <osx-button
                   v-if="verificationCanStop"
@@ -4438,15 +4319,14 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                   :loading="verificationAction === 'stop'"
                   @click="stopVerification"
                 >
-                  Stop and tear down
+                  Stop
                 </osx-button>
-                <small v-if="!session">Start a task first so every check can be attached to its receipt.</small>
-                <small v-else-if="verificationBrowserTarget">Browser target · {{ verificationBrowserTarget }}</small>
+                <small v-if="!session">Start a task before running checks.</small>
               </div>
             </section>
 
             <details v-if="verificationRuns.length > 1" class="verification-history">
-              <summary>Previous verification · {{ verificationRuns.length - 1 }}</summary>
+              <summary>Previous runs · {{ verificationRuns.length - 1 }}</summary>
               <ol>
                 <li v-for="run in verificationRuns.slice(1, 6)" :key="run.id">
                   <span><strong>{{ verificationLabel(run) }}</strong><small>{{ new Date(run.createdAt).toLocaleString() }}</small></span>
@@ -4479,18 +4359,16 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                   :class="{ selected: tab.active }"
                 >
                   <button type="button" :disabled="!browserCanNavigate || tab.active" :aria-current="tab.active ? 'page' : undefined" @click="!tab.active && requestBrowserAction('select-tab', { tabId: tab.id })">
-                    <osx-icon name="external" :size="13" />
+                    <osx-icon name="globe" :size="13" />
                     <span>{{ tab.title || "New tab" }}</span>
                   </button>
                   <osx-icon-button label="Close tab" icon="close" size="small" :disabled="!browserCanNavigate" @click="requestBrowserAction('close-tab', { tabId: tab.id })" />
                 </div>
                 <osx-icon-button label="New tab" icon="plus" size="small" :disabled="!browserCanNavigate" @click="requestBrowserAction('new-tab')" />
               </nav>
-              <span v-else class="browser-window-label"><osx-icon name="external" :size="14" /> Browser</span>
-              <div class="browser-chrome-actions">
-                <osx-icon-button :label="browserIsLive ? 'Sync current page' : 'Restore browser'" icon="refresh" size="small" :disabled="!state.browser?.url" @click="requestBrowserAction('capture')" />
-                <osx-icon-button v-if="state.browser?.frames?.length" label="Export replay" icon="download" size="small" :disabled="browserReplayExporting" @click="exportBrowserReplay" />
-                <osx-icon-button :label="browserDetailsOpen ? 'Hide browser activity' : 'Show browser activity'" icon="list-checks" size="small" :pressed="browserDetailsOpen" :disabled="!state.browser?.url" @click="browserDetailsOpen = !browserDetailsOpen" />
+              <span v-else class="browser-window-label"><osx-icon name="globe" :size="14" /> Browser</span>
+              <div v-if="state.browser?.url" class="browser-chrome-actions">
+                <osx-icon-button :label="browserDetailsOpen ? 'Hide activity' : 'Show activity'" icon="list-checks" size="small" :pressed="browserDetailsOpen" @click="browserDetailsOpen = !browserDetailsOpen" />
               </div>
             </header>
 
@@ -4524,101 +4402,6 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
               </label>
             </form>
             <p v-if="browserError" class="browser-error" role="alert"><osx-icon name="warning" :size="13" /> {{ browserError }}</p>
-
-            <section
-              v-if="verificationHasRecipe || latestVerification || pendingVerificationHandoff"
-              class="browser-verification-studio"
-              aria-labelledby="browser-verification-heading"
-            >
-              <header>
-                <span class="browser-verification-icon"><osx-icon name="shield-check" :size="16" /></span>
-                <span>
-                  <h3 id="browser-verification-heading">{{ verificationStudioTitle }}</h3>
-                  <small v-if="verificationViewingWrongPage">
-                    Viewing {{ state.browser?.url }} · target {{ verificationBrowserTarget }}
-                  </small>
-                  <small v-else-if="latestVerification?.browserEvidence">
-                    Captured {{ new Date(latestVerification.browserEvidence.capturedAt).toLocaleTimeString() }} · {{ latestVerification.browserEvidence.consoleErrors }} console · {{ latestVerification.browserEvidence.networkErrors }} network errors
-                  </small>
-                  <small v-else-if="latestVerification?.state === 'needs-browser'">Command checks passed. Capture the visible page and browser diagnostics.</small>
-                  <small v-else-if="verificationBrowserTarget">Target · {{ verificationBrowserTarget }}</small>
-                  <small v-else>Use the current page as retained verification evidence.</small>
-                </span>
-                <osx-badge
-                  size="small"
-                  :label="verificationStudioBadge.label"
-                  :tone="verificationStudioBadge.tone"
-                />
-              </header>
-              <osx-alert
-                v-if="verificationPendingApproval"
-                tone="warning"
-                title="Approval required to continue"
-                :description="`${verificationPendingApproval.title} is waiting in Verify before the recipe can continue.`"
-              />
-              <osx-alert
-                v-if="verificationViewingWrongPage"
-                tone="warning"
-                title="Verification target is on another page"
-                :description="`Open ${verificationBrowserTarget} before capturing proof or rerunning checks against the recipe.`"
-              />
-              <p v-if="verificationStudioFailure" class="browser-verification-failure" role="status">
-                {{ verificationStudioFailure }}
-              </p>
-              <div class="browser-verification-progress">
-                <span><strong>{{ latestVerification?.checks.filter(item => item.state === 'passed').length ?? 0 }}/{{ latestVerification?.checks.length ?? state.projectDoctor?.verificationChecks.length ?? 0 }}</strong><small>checks passed</small></span>
-                <span><strong>{{ latestVerification?.browserAssertions.filter(item => item.state === 'passed').length ?? 0 }}/{{ latestVerification?.browserAssertions.length ?? state.projectDoctor?.verificationBrowserAssertions?.length ?? 0 }}</strong><small>page assertions</small></span>
-                <span><strong>{{ latestVerification?.browserEvidence?.actionCount ?? state.browser?.actions.length ?? 0 }}</strong><small>retained actions</small></span>
-              </div>
-              <footer>
-                <template v-if="verificationViewingWrongPage && verificationBrowserTarget">
-                  <osx-button
-                    variant="primary"
-                    size="small"
-                    icon="external"
-                    :loading="verificationAction === 'browser'"
-                    @click="openVerificationBrowser()"
-                  >
-                    Open target
-                  </osx-button>
-                  <osx-button
-                    v-if="verificationCanRerun"
-                    variant="secondary"
-                    size="small"
-                    icon="play"
-                    :loading="verificationAction === 'rerun'"
-                    :disabled="verificationIsActive"
-                    @click="rerunVerification()"
-                  >
-                    Rerun recipe
-                  </osx-button>
-                </template>
-                <osx-button
-                  v-else-if="latestVerification?.state === 'needs-browser'"
-                  variant="primary"
-                  size="small"
-                  icon="camera"
-                  :loading="verificationAction === 'browser'"
-                  @click="browserMatchesVerificationTarget ? captureVerificationBrowser() : openVerificationBrowser()"
-                >
-                  {{ browserMatchesVerificationTarget ? 'Capture proof' : 'Open target' }}
-                </osx-button>
-                <osx-button
-                  v-else
-                  :variant="latestVerification?.state === 'passed' ? 'secondary' : 'primary'"
-                  size="small"
-                  icon="play"
-                  :loading="verificationAction === 'start' || verificationAction === 'rerun'"
-                  :disabled="Boolean(verificationAction) || (!verificationCanRerun && (verificationInProgress || !verificationHasRecipe))"
-                  @click="verificationCanRerun ? rerunVerification() : startVerification()"
-                >
-                  {{ verificationCanRerun ? 'Rerun recipe' : verificationProgressLabel || (verificationInProgress ? 'Verification active' : 'Run checks') }}
-                </osx-button>
-                <osx-button v-if="verificationPendingApproval" size="small" variant="primary" @click="chooseInspectorView('verify')">Review approval</osx-button>
-                <osx-button v-if="verificationCanStop" size="small" variant="secondary" icon="square" :loading="verificationAction === 'stop'" @click="stopVerification">Stop</osx-button>
-                <osx-button size="small" variant="secondary" @click="chooseInspectorView('verify')">Full report</osx-button>
-              </footer>
-            </section>
 
             <section v-if="selectedBrowserControl" class="browser-control-action" aria-label="Selected page control">
               <span>
@@ -4655,21 +4438,39 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
                   :key="control.ref"
                   type="button"
                   class="browser-marker"
-                  :class="{ selected: selectedBrowserControlRef === control.ref }"
+                  :class="{ selected: selectedBrowserControlRef === control.ref, labeled: browserDetailsOpen || selectedBrowserControlRef === control.ref }"
                   :style="browserMarkerStyle(control)"
                   :aria-label="`Choose ${control.ref}, ${control.label}`"
                   @click="selectBrowserControl(control)"
                 >
-                  {{ control.ref }}
+                  <span aria-hidden="true">{{ control.ref }}</span>
                 </button>
               </div>
-              <figcaption>
-                <span><strong>{{ state.browser?.title || "Untitled page" }}</strong><small>{{ browserIsLive ? "Connected" : "Retained after restart" }}</small></span>
-                <span>{{ state.browser?.controls.length ?? 0 }} controls · synced {{ state.browser?.updatedAt ? new Date(state.browser.updatedAt).toLocaleTimeString() : "now" }}</span>
-              </figcaption>
             </figure>
 
             <section v-if="browserDetailsOpen && state.browser?.url" class="browser-details-panel" aria-label="Browser activity and evidence">
+              <header class="browser-details-toolbar">
+                <span>Activity and evidence</span>
+                <span class="browser-details-toolbar-actions">
+                  <osx-icon-button
+                    v-if="!browserIsLive && state.browser.url"
+                    label="Restore browser snapshot"
+                    icon="refresh"
+                    size="small"
+                    @click="requestBrowserAction('capture')"
+                  />
+                  <osx-button
+                    v-if="state.browser.frames?.length"
+                    size="small"
+                    variant="secondary"
+                    icon="download"
+                    :loading="browserReplayExporting"
+                    @click="exportBrowserReplay"
+                  >
+                    Export replay
+                  </osx-button>
+                </span>
+              </header>
               <section class="browser-control-map" aria-labelledby="browser-control-map-heading">
                 <header>
                   <span>
@@ -4760,17 +4561,9 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
               </details>
             </section>
 
-            <footer v-if="state.browser?.url" class="browser-context-status">
-              <span>
-                <osx-icon name="sparkle" :size="14" />
-                <span><strong>Shared with the agent</strong><small>The current page, visible text, and mapped controls are included with your next message.</small></span>
-              </span>
-              <osx-badge size="small" :label="browserIsLive ? 'Connected' : 'Retained'" :tone="browserIsLive ? 'success' : 'warning'" />
-            </footer>
-
-            <div v-if="!state.browser?.url && !desktopBrowserAvailable" class="evidence-empty" role="status">
-              <span><osx-icon name="eye" :size="18" /></span>
-              <div><strong>Preview your app</strong><small>Open a local URL to browse with the agent. Vraxis shares visible context, requests approval before actions, and retains what happened.</small></div>
+            <div v-if="browserShowEmptyState" class="evidence-empty browser-empty" role="status">
+              <span><osx-icon name="external" :size="18" /></span>
+              <div><strong>Browse your app</strong><small>Enter a URL above. Vraxis shares page context with the agent and keeps a record of what happened.</small></div>
             </div>
           </div>
         </section>
@@ -4789,6 +4582,18 @@ watch([() => state.selectedSessionId, () => state.realtime?.sessionEvents], () =
               : sessionIsRunning ? 'Read-only project access' : project ? project.path : ''"
       />
     </osx-app-shell>
+
+    <osx-dialog
+      :open="Boolean(pendingDeleteSession)"
+      title="Delete task permanently?"
+      :description="pendingDeleteSession ? `${pendingDeleteSession.title} will be removed from this device.` : ''"
+      size="small"
+      confirm-label="Delete"
+      cancel-label="Cancel"
+      :dismissible="false"
+      @close="confirmDeleteSessionId = ''"
+      @confirm="pendingDeleteSession && deleteSession(pendingDeleteSession)"
+    />
 
     <osx-dialog
       :open="Boolean(pendingAttachmentHandoff)"

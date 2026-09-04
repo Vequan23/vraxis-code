@@ -59,6 +59,8 @@ const props = defineProps<{
   selectedProjectId?: string;
   modelProviders: ModelProviderSummary[];
   hostedRuntimes: RuntimeSummary[];
+  proofExportReady?: boolean;
+  proofExporting?: "" | "html" | "json";
 }>();
 
 const emit = defineEmits<{
@@ -81,6 +83,7 @@ const emit = defineEmits<{
   "skills-changed": [];
   "provider-connected": [providerId: string];
   "providers-changed": [];
+  "export-proof-json": [];
 }>();
 
 const activeItem = computed(() => {
@@ -227,7 +230,12 @@ function chooseSection(id: SettingsSectionId): void {
             @revoke="emit('revoke-permission', $event)"
           />
 
-          <ProofTrustSettings v-else-if="section === 'proof-trust'" />
+          <ProofTrustSettings
+            v-else-if="section === 'proof-trust'"
+            :proof-export-ready="proofExportReady"
+            :proof-exporting="proofExporting"
+            @export-proof-json="emit('export-proof-json')"
+          />
 
           <TeamPolicySettings
             v-else-if="section === 'team-policy'"
