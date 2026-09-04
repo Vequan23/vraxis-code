@@ -12,7 +12,6 @@ export type FirstRunActionId =
   | "connect-provider"
   | "verify-runtime"
   | "choose-project"
-  | "inspect-project"
   | "draft-task"
   | "review-verification"
   | "export-proof";
@@ -54,7 +53,7 @@ function verificationRecipeReady(doctor?: ProjectDoctorSummary): boolean {
 export function firstRunReadiness(input: FirstRunReadinessInput): FirstRunReadiness {
   const runtimeIsReady = runtimeReady(input.runtime);
   const runtimeCanProbeNow = runtimeCanProbe(input.runtime);
-  const projectIsReady = Boolean(input.project && input.projectDoctor?.ok);
+  const projectIsReady = Boolean(input.project);
   const task = input.sessions[0];
   const taskIsReady = Boolean(task);
   const taskIsRunning = task?.status === "running";
@@ -78,15 +77,11 @@ export function firstRunReadiness(input: FirstRunReadinessInput): FirstRunReadin
     },
     {
       id: "project",
-      label: "Inspect a project",
+      label: "Choose a project",
       detail: projectIsReady
-        ? `${input.project?.name ?? "Project"} has a manifest-backed readiness report.`
-        : input.project && input.projectDoctor
-          ? "Project Doctor found issues that need attention before verification."
-          : input.project
-            ? "Inspect manifests and verification commands without executing project code."
-            : "Choose the local repository you want Vraxis Code to understand.",
-      state: projectIsReady ? "complete" : runtimeIsReady ? (input.projectDoctor ? "attention" : "current") : "pending",
+        ? `${input.project?.name ?? "Project"} is ready for governed work.`
+        : "Choose the local repository you want Vraxis Code to understand.",
+      state: projectIsReady ? "complete" : runtimeIsReady ? "current" : "pending",
     },
     {
       id: "task",
@@ -98,14 +93,14 @@ export function firstRunReadiness(input: FirstRunReadinessInput): FirstRunReadin
     },
     {
       id: "proof",
-      label: "Verify and export proof",
+      label: "Run checks and export proof",
       detail: proofIsReady
         ? "Required checks passed. Portable signed proof is ready to export."
         : taskIsRunning
-          ? "Verification becomes available when the current agent turn finishes."
+          ? "Checks become available when the current agent turn finishes."
           : recipeIsReady
-            ? "Run the project-owned checks and retain terminal and browser evidence."
-            : "Review Project Doctor and add a bounded verification recipe when needed.",
+            ? "Run the project checks and retain terminal and browser evidence."
+            : "Add test or lint scripts, or create .vraxis/verify.json when you need reproducible delivery proof.",
       state: proofIsReady ? "complete" : taskIsReady ? (recipeIsReady ? "current" : "attention") : "pending",
     },
   ];
@@ -117,18 +112,16 @@ export function firstRunReadiness(input: FirstRunReadinessInput): FirstRunReadin
       : { id: "setup-runtime", label: "Set up a runtime", detail: "Install an agent harness or connect a direct API provider." };
   } else if (!input.project) {
     action = { id: "choose-project", label: "Choose project", detail: "Only the folder you approve is indexed." };
-  } else if (!projectIsReady) {
-    action = { id: "inspect-project", label: "Run Project Doctor", detail: "Manifest inspection does not execute project code." };
   } else if (!taskIsReady) {
     action = { id: "draft-task", label: "Draft the first task", detail: "Start with a read-only, file-backed architecture question." };
   } else if (!proofIsReady) {
     action = {
       id: "review-verification",
-      label: taskIsRunning ? "View live evidence" : recipeIsReady ? "Review and run checks" : "Review verification setup",
-      detail: taskIsRunning ? "Follow the current turn without interrupting it." : "Inspect the exact commands and browser assertions before they run.",
+      label: taskIsRunning ? "View live evidence" : recipeIsReady ? "Run checks" : "Open checks",
+      detail: taskIsRunning ? "Follow the current turn without interrupting it." : recipeIsReady ? "Approve and run the checks this project declares." : "See what checks are available for this project.",
     };
   } else {
-    action = { id: "export-proof", label: "Export signed proof", detail: "Portable JSON verifies without trusting this installation." };
+    action = { id: "export-proof", label: "Export proof", detail: "Download a shareable HTML report after checks passed." };
   }
 
   return {

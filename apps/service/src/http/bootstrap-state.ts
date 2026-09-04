@@ -13,6 +13,7 @@ import type { SettingsRegistry } from "../settings/settings-registry.js";
 import type { ModelProviderRegistry } from "../model-providers/model-provider-registry.js";
 import type { McpServerRegistry } from "../mcp/mcp-server-registry.js";
 import type { SkillRegistry } from "../skills/skill-registry.js";
+import { discoverComposerCommands } from "../commands/command-registry.js";
 import type { ApprovalRegistry } from "../approvals/approval-registry.js";
 import type { TerminalRegistry } from "../terminal/terminal-registry.js";
 import type { VerificationRegistry } from "../verification/verification-registry.js";
@@ -62,6 +63,8 @@ function emptyBootstrapCollections(): Pick<
   | "modelProviders"
   | "mcpServers"
   | "skills"
+  | "skillLibrary"
+  | "composerCommands"
 > {
   return {
     files: [],
@@ -76,6 +79,8 @@ function emptyBootstrapCollections(): Pick<
     modelProviders: [],
     mcpServers: [],
     skills: [],
+    skillLibrary: [],
+    composerCommands: [],
   };
 }
 
@@ -184,6 +189,8 @@ export async function buildBootstrapState(
         providerSummaries,
         mcpServerSummaries,
         projectSkills,
+        skillLibrary,
+        composerCommands,
         projectDoctor,
       ] = await Promise.all([
         deps.discoverLocalRuntimes(),
@@ -191,12 +198,16 @@ export async function buildBootstrapState(
         deps.modelProviders.summaries(),
         deps.mcpServers.summaries(),
         ctx.selected ? deps.skills.summaries(ctx.selected.path) : Promise.resolve([]),
+        ctx.selected ? deps.skills.library(ctx.selected.path) : Promise.resolve([]),
+        ctx.selected ? discoverComposerCommands(ctx.selected.path) : Promise.resolve([]),
         ctx.selected ? deps.safeProjectDoctor(ctx.selected.id, ctx.selected.path) : Promise.resolve(undefined),
       ]);
       base.runtimes = withProductCapabilityMatrix([...localRuntimes, ...providerRuntimes]);
       base.modelProviders = providerSummaries;
       base.mcpServers = mcpServerSummaries;
       base.skills = projectSkills;
+      base.skillLibrary = skillLibrary;
+      base.composerCommands = composerCommands;
       if (projectDoctor) base.projectDoctor = projectDoctor;
     })());
   }

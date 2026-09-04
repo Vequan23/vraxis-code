@@ -1,3 +1,4 @@
+import type { ComposerCommandSummary } from "@vraxis/code-contracts";
 import type { OsxAgentComposerSuggestion, OsxIconName } from "@vraxis/osx-components";
 import type { InspectorView, SessionMode } from "@vraxis/code-contracts";
 
@@ -13,7 +14,6 @@ export type ComposerSlashCommandId =
   | "debug"
   | "commit"
   | "verify"
-  | "doctor"
   | "changes"
   | "worktree"
   | "proof"
@@ -30,7 +30,6 @@ export type ComposerSlashCommandAction =
   | { type: "clear" }
   | { type: "new-task" }
   | { type: "open-inspector"; view: InspectorView; prompt?: { mode: SessionMode; text: string } }
-  | { type: "doctor"; prompt: string }
   | { type: "harness-setup" }
   | { type: "probe-runtime" };
 
@@ -205,34 +204,20 @@ const composerSlashCommandDefinitions: ComposerSlashCommandDefinition[] = [
   {
     id: "verify",
     label: "verify",
-    description: "Run governed checks from .vraxis/verify.json.",
+    description: "Run project checks with retained proof.",
     icon: "flask",
     group: "Evidence",
-    keywords: ["checks", "ci", "recipe", "validation"],
+    keywords: ["checks", "ci", "validation", "test"],
     action: {
       type: "open-inspector",
       view: "verify",
       prompt: {
         mode: "review",
-        text: "Use the project's governed verification recipe. Report what is configured, what still needs setup, and request verification when the work is ready.",
+        text: "Review the project checks configured for this repo. Report what will run, what still needs setup, and request checks when the work is ready.",
       },
     },
     disabled: (context) => !context.hasSession,
-    disabledReason: () => "Start a task before running governed verification.",
-  },
-  {
-    id: "doctor",
-    label: "doctor",
-    description: "Inspect project readiness and verification setup.",
-    icon: "activity",
-    group: "Evidence",
-    keywords: ["health", "readiness", "setup", "inspect"],
-    action: {
-      type: "doctor",
-      prompt: "Summarize Project Doctor findings, missing verification setup, and the next concrete steps to make this repo verification-ready.",
-    },
-    disabled: (context) => !context.hasProject || context.previewMode,
-    disabledReason: () => "Open a project before running Project Doctor.",
+    disabledReason: () => "Start a task before running checks.",
   },
   {
     id: "changes",
@@ -378,10 +363,51 @@ export function composerSlashCommandById(id: string): ComposerSlashCommandDefini
   return composerSlashCommandDefinitions.find((item) => item.id === id);
 }
 
-export function buildComposerSlashCommandSuggestions(
+const composerIconNames = new Set<OsxIconName>([
+  "search", "list-checks", "code", "eye", "warning", "flask", "file-text", "boxes", "activity",
+  "git-branch", "download", "image", "upload", "lock", "settings", "terminal", "trash", "plus", "sparkle",
+]);
+
+function userCommandIcon(icon?: string): OsxIconName {
+  return icon && composerIconNames.has(icon as OsxIconName) ? icon as OsxIconName : "sparkle";
+}
+
+export function resolveUserComposerSlashCommand(
+  commandId: string,
+  commands: readonly ComposerCommandSummary[],
+): ComposerCommandSummary | undefined {
+  if (!commandId.startsWith("user:")) return undefined;
+  const id = commandId.slice("user:".length);
+  return commands.find((command) => command.id === id);
+}
+
+export function buildUserComposerSlashCommandSuggestions(
+  commands: readonly ComposerCommandSummary[],
   context: ComposerSlashCommandContext,
 ): OsxAgentComposerSuggestion[] {
-  return composerSlashCommandDefinitions.map((command) => ({
+  return commands.map((command) => ({
+    id: `command:user:${command.id}`,
+    kind: "command" as const,
+    trigger: "/" as const,
+    label: command.name,
+    description: command.description,
+    icon: userCommandIcon(command.icon),
+    group: command.scope === "project" ? "Project commands" : "User commands",
+    keywords: [command.name, ...(command.keywords ?? []), command.scope],
+    selectionBehavior: "emit" as const,
+    disabled: command.mode === "build" && !context.runtimeCanBuild,
+    ...(command.mode === "build" && !context.runtimeCanBuild ? {
+      disabledReason: "Choose a runtime that supports guarded isolated-worktree writes.",
+    } : {}),
+  }));
+}
+
+export function buildComposerSlashCommandSuggestions(
+  context: ComposerSlashCommandContext,
+  userCommands: readonly ComposerCommandSummary[] = [],
+): OsxAgentComposerSuggestion[] {
+  return [
+    ...composerSlashCommandDefinitions.map((command) => ({
     id: `command:${command.id}`,
     kind: "command" as const,
     trigger: "/" as const,
@@ -393,7 +419,9 @@ export function buildComposerSlashCommandSuggestions(
     selectionBehavior: "emit" as const,
     disabled: command.disabled?.(context) ?? false,
     ...(command.disabledReason?.(context) ? { disabledReason: command.disabledReason(context) } : {}),
-  }));
+  })),
+    ...buildUserComposerSlashCommandSuggestions(userCommands, context),
+  ];
 }
 
 export const composerSlashCommandDefinitionsForTest = composerSlashCommandDefinitions;

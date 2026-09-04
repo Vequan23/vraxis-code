@@ -13,6 +13,7 @@ import type {
   ApprovalRuleSummary,
   TeamPolicyBundleV1,
   TeamPolicyCreateRequest,
+  SkillSummary,
 } from "@vraxis/code-contracts";
 import AgentDefaults from "./AgentDefaults.vue";
 import AuthorityModeSettings from "./AuthorityModeSettings.vue";
@@ -20,6 +21,7 @@ import GeneralSettings from "./GeneralSettings.vue";
 import RuntimeSettings from "./RuntimeSettings.vue";
 import HarnessMetricsSettings from "./HarnessMetricsSettings.vue";
 import McpConnectionCenter from "./McpConnectionCenter.vue";
+import SkillLibrarySettings from "./SkillLibrarySettings.vue";
 import PermissionCenter from "./PermissionCenter.vue";
 import ProofTrustSettings from "./ProofTrustSettings.vue";
 import SupportDiagnostics from "./SupportDiagnostics.vue";
@@ -52,10 +54,13 @@ const props = defineProps<{
   teamPolicyError: string;
   teamPolicyNotice: string;
   mcpServers: McpServerSummary[];
+  skillLibrary: SkillSummary[];
   mcpProjects: ProjectSummary[];
   selectedProjectId?: string;
   modelProviders: ModelProviderSummary[];
   hostedRuntimes: RuntimeSummary[];
+  proofExportReady?: boolean;
+  proofExporting?: "" | "html" | "json";
 }>();
 
 const emit = defineEmits<{
@@ -75,8 +80,10 @@ const emit = defineEmits<{
   maintain: [runtime: RuntimeSummary, action: RuntimeMaintenanceActionSummary];
   probe: [runtime: RuntimeSummary];
   "mcp-changed": [];
+  "skills-changed": [];
   "provider-connected": [providerId: string];
   "providers-changed": [];
+  "export-proof-json": [];
 }>();
 
 const activeItem = computed(() => {
@@ -200,6 +207,15 @@ function chooseSection(id: SettingsSectionId): void {
             @changed="emit('mcp-changed')"
           />
 
+          <SkillLibrarySettings
+            v-else-if="section === 'skills'"
+            :skills="skillLibrary"
+            :projects="mcpProjects"
+            :selected-project-id="selectedProjectId"
+            :runtimes="runtimes.filter((runtime) => runtime.availability === 'installed').map((runtime) => runtime.id)"
+            @changed="emit('skills-changed')"
+          />
+
           <PermissionCenter
             v-else-if="section === 'permissions'"
             :rules="permissionRules"
@@ -214,7 +230,12 @@ function chooseSection(id: SettingsSectionId): void {
             @revoke="emit('revoke-permission', $event)"
           />
 
-          <ProofTrustSettings v-else-if="section === 'proof-trust'" />
+          <ProofTrustSettings
+            v-else-if="section === 'proof-trust'"
+            :proof-export-ready="proofExportReady"
+            :proof-exporting="proofExporting"
+            @export-proof-json="emit('export-proof-json')"
+          />
 
           <TeamPolicySettings
             v-else-if="section === 'team-policy'"
