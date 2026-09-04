@@ -1,6 +1,9 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 const servicePort = Number(process.env.PORT ?? 4317);
+
+const contracts = spawnSync("npm", ["run", "build:contracts"], { stdio: "inherit", shell: false });
+if (contracts.status !== 0) process.exit(contracts.status ?? 1);
 
 const children = [
   spawn("npm", ["run", "dev:service"], { stdio: "inherit", shell: false, env: { ...process.env, PORT: String(servicePort) } }),
