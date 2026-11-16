@@ -18,6 +18,6 @@
     "@vraxis/agent-v": "^0.13.0"
   },
   "devDependencies": {
-    "tsx": "^4.23.0"
+    "tsx": "^4.23.15"
   }
 }
